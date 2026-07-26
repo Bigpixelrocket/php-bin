@@ -22,6 +22,7 @@ imap
 intl
 json
 ldap
+lexbor
 libxml
 lz4
 mbstring

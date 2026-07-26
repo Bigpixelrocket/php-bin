@@ -14,7 +14,7 @@ fi
 PHP_BIN="$1"
 RELEASE_TAG="$2"
 
-if [[ ! "$RELEASE_TAG" =~ ^8\.[0-5]\.[0-9]+(-[1-9][0-9]*)?$ ]]; then
+if [[ ! "$RELEASE_TAG" =~ ^8\.[2-5]\.[0-9]+(-[1-9][0-9]*)?$ ]]; then
   echo "Release tag must look like 8.4.5 or 8.4.5-1." >&2
   exit 2
 fi

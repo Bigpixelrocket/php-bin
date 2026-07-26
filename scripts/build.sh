@@ -14,8 +14,8 @@ STAGE_FILE="$PROJECT_ROOT/stages/$STAGE.txt"
 SPC_BIN="${SPC_BIN:-$PROJECT_ROOT/.spc/spc}"
 BUILD_DIR="$PROJECT_ROOT/.build/$PHP_VERSION/$STAGE"
 
-if [[ ! "$PHP_VERSION" =~ ^8\.[0-5](\.[0-9]+)?$ ]]; then
-  echo "PHP version must be an 8.0 through 8.5 minor or patch version." >&2
+if [[ ! "$PHP_VERSION" =~ ^8\.[2-5](\.[0-9]+)?$ ]]; then
+  echo "PHP version must be a currently supported 8.2 through 8.5 minor or patch version." >&2
   exit 1
 fi
 
@@ -28,6 +28,24 @@ fi
 
 EXTENSIONS="$(grep -Ev '^[[:space:]]*(#|$)' "$STAGE_FILE" | paste -sd, -)"
 mkdir -p "$BUILD_DIR"
+
+print_failure_logs() {
+  local log_file
+
+  for log_file in \
+    "$BUILD_DIR/log/spc.output.log" \
+    "$BUILD_DIR/log/spc.shell.log"
+  do
+    if [[ -f "$log_file" ]]; then
+      echo "Sanitized tail of ${log_file#"$PROJECT_ROOT/"}:" >&2
+      tail -n 300 "$log_file" \
+        | sed -E \
+          -e 's/(Authorization:[[:space:]]*Bearer[[:space:]]+)[^"[:space:]]+/\1[REDACTED]/g' \
+          -e 's/gh[a-zA-Z]_[A-Za-z0-9_]+/[REDACTED]/g' \
+          -e 's/github_pat_[A-Za-z0-9_]+/[REDACTED]/g' >&2
+    fi
+  done
+}
 
 cat > "$BUILD_DIR/craft.yml" <<EOF
 php-version: "$PHP_VERSION"
@@ -46,11 +64,14 @@ extra-env:
   ac_cv_func_memset_s: "no"
 EOF
 
-(
+if ! (
   cd "$BUILD_DIR"
   "$SPC_BIN" doctor
   "$SPC_BIN" craft
-)
+); then
+  print_failure_logs
+  exit 1
+fi
 
 PHP_BIN="$BUILD_DIR/buildroot/bin/php"
 if [[ ! -x "$PHP_BIN" ]]; then
@@ -69,7 +90,7 @@ echo "Verified macOS minimum: $MINIMUM_MACOS_VERSION"
 
 if [[ "$STAGE" == "s4" ]]; then
   PHP_MINOR="${PHP_VERSION%.*}"
-  if [[ "$PHP_VERSION" =~ ^8\.[0-5]$ ]]; then
+  if [[ "$PHP_VERSION" =~ ^8\.[2-5]$ ]]; then
     PHP_MINOR="$PHP_VERSION"
   fi
   "$SCRIPT_DIR/compare-modules.sh" \
