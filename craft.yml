@@ -7,8 +7,6 @@ build-options:
   with-suggested-libs: false
   with-suggested-exts: false
   no-strip: false
-  with-added-patch:
-    - "patches/php-legacy-clang.php"
 download-options:
   retry: 5
 

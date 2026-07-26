@@ -14,8 +14,8 @@ STAGE_FILE="$PROJECT_ROOT/stages/$STAGE.txt"
 SPC_BIN="${SPC_BIN:-$PROJECT_ROOT/.spc/spc}"
 BUILD_DIR="$PROJECT_ROOT/.build/$PHP_VERSION/$STAGE"
 
-if [[ ! "$PHP_VERSION" =~ ^8\.[0-5](\.[0-9]+)?$ ]]; then
-  echo "PHP version must be an 8.0 through 8.5 minor or patch version." >&2
+if [[ ! "$PHP_VERSION" =~ ^8\.[2-5](\.[0-9]+)?$ ]]; then
+  echo "PHP version must be a currently supported 8.2 through 8.5 minor or patch version." >&2
   exit 1
 fi
 
@@ -27,10 +27,6 @@ if [[ ! -x "$SPC_BIN" ]]; then
 fi
 
 EXTENSIONS="$(grep -Ev '^[[:space:]]*(#|$)' "$STAGE_FILE" | paste -sd, -)"
-CUSTOM_SOURCE_URLS="[]"
-if [[ "$PHP_VERSION" == "8.0" || "$PHP_VERSION" == 8.0.* ]]; then
-  CUSTOM_SOURCE_URLS='["mongodb:https://github.com/mongodb/mongo-php-driver/releases/download/1.20.1/mongodb-1.20.1.tgz"]'
-fi
 mkdir -p "$BUILD_DIR"
 
 print_failure_logs() {
@@ -61,11 +57,8 @@ build-options:
   with-suggested-libs: false
   with-suggested-exts: false
   no-strip: false
-  with-added-patch:
-    - "$PROJECT_ROOT/patches/php-legacy-clang.php"
 download-options:
   retry: 5
-  custom-url: $CUSTOM_SOURCE_URLS
 extra-env:
   MACOSX_DEPLOYMENT_TARGET: "26.0"
   ac_cv_func_memset_s: "no"
@@ -97,7 +90,7 @@ echo "Verified macOS minimum: $MINIMUM_MACOS_VERSION"
 
 if [[ "$STAGE" == "s4" ]]; then
   PHP_MINOR="${PHP_VERSION%.*}"
-  if [[ "$PHP_VERSION" =~ ^8\.[0-5]$ ]]; then
+  if [[ "$PHP_VERSION" =~ ^8\.[2-5]$ ]]; then
     PHP_MINOR="$PHP_VERSION"
   fi
   "$SCRIPT_DIR/compare-modules.sh" \

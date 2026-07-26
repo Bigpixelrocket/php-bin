@@ -66,7 +66,7 @@ is documented in [`docs/release-process.md`](docs/release-process.md).
 
 - macOS 26 (Tahoe) or newer
 - arm64 / aarch64
-- PHP 8.0 through 8.5 after the 8.4 spike is complete
+- Currently supported PHP branches: 8.2 through 8.5
 - CLI SAPI
 
 Other operating systems, Intel Macs, and PHP 7.x are outside the v1 target.
