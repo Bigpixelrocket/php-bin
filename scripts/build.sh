@@ -46,7 +46,7 @@ EOF
 (
   cd "$BUILD_DIR"
   "$SPC_BIN" doctor
-  "$SPC_BIN" craft -v
+  "$SPC_BIN" craft
 )
 
 PHP_BIN="$BUILD_DIR/buildroot/bin/php"
