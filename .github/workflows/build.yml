@@ -34,7 +34,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: php-spike-${{ github.ref }}
+  group: php-spike-${{ github.ref }}-${{ inputs.php_version || '8.4' }}-${{ inputs.stage || 's4' }}
   cancel-in-progress: true
 
 jobs:
