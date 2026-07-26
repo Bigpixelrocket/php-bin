@@ -29,6 +29,24 @@ fi
 EXTENSIONS="$(grep -Ev '^[[:space:]]*(#|$)' "$STAGE_FILE" | paste -sd, -)"
 mkdir -p "$BUILD_DIR"
 
+print_failure_logs() {
+  local log_file
+
+  for log_file in \
+    "$BUILD_DIR/log/spc.output.log" \
+    "$BUILD_DIR/log/spc.shell.log"
+  do
+    if [[ -f "$log_file" ]]; then
+      echo "Sanitized tail of ${log_file#"$PROJECT_ROOT/"}:" >&2
+      tail -n 300 "$log_file" \
+        | sed -E \
+          -e 's/(Authorization:[[:space:]]*Bearer[[:space:]]+)[^"[:space:]]+/\1[REDACTED]/g' \
+          -e 's/gh[a-zA-Z]_[A-Za-z0-9_]+/[REDACTED]/g' \
+          -e 's/github_pat_[A-Za-z0-9_]+/[REDACTED]/g' >&2
+    fi
+  done
+}
+
 cat > "$BUILD_DIR/craft.yml" <<EOF
 php-version: "$PHP_VERSION"
 extensions: $EXTENSIONS
@@ -46,11 +64,14 @@ extra-env:
   ac_cv_func_memset_s: "no"
 EOF
 
-(
+if ! (
   cd "$BUILD_DIR"
   "$SPC_BIN" doctor
   "$SPC_BIN" craft
-)
+); then
+  print_failure_logs
+  exit 1
+fi
 
 PHP_BIN="$BUILD_DIR/buildroot/bin/php"
 if [[ ! -x "$PHP_BIN" ]]; then
