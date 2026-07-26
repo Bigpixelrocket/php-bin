@@ -16,7 +16,7 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Resolve PHP version
         run: |
           if [[ ! "$GITHUB_REF_NAME" =~ ^8\.[2-5]\.[0-9]+(-[1-9][0-9]*)?$ ]]; then
@@ -29,7 +29,7 @@ jobs:
       - name: Install pinned StaticPHP
         run: scripts/install-spc.sh
       - name: Restore source cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .build/*/s4/downloads
           key: spc-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-s4-${{ hashFiles('.spc-version', 'stages/s4.txt') }}
