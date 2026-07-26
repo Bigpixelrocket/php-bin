@@ -6,6 +6,12 @@ build-options:
   with-clean: false
   with-suggested-libs: false
   with-suggested-exts: false
+  with-added-patch:
+    - patches/postgresql-macos-sdk.php
   no-strip: false
 download-options:
   retry: 5
+
+extra-env:
+  ac_cv_func_memset_s: "no"
+  ac_cv_func_strchrnul: "no"
