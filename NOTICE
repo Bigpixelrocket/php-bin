@@ -1,0 +1,10 @@
+php-bin build recipes and scripts are licensed under the MIT License.
+
+Release archives contain PHP, which is distributed under the PHP License, and
+third-party extensions and libraries under their respective licenses. Every
+release must include the license material produced by the pinned StaticPHP
+toolchain. See https://www.php.net/license/ for the PHP license.
+
+StaticPHP is an independent open-source project. Its source and license are at
+https://github.com/crazywhalecc/static-php-cli.
+

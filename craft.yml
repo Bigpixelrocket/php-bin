@@ -1,0 +1,15 @@
+php-version: "8.4"
+extensions: bcmath,bz2,calendar,ctype,curl,dba,dom,exif,ffi,fileinfo,filter,ftp,gd,gmp,iconv,igbinary,imagick,imap,intl,ldap,lz4,mbstring,mongodb,mysqli,opcache,openssl,pcntl,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pdo_sqlsrv,pgsql,phar,posix,readline,redis,session,shmop,simplexml,soap,sockets,sodium,sqlsrv,sqlite3,sysvmsg,sysvsem,sysvshm,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib
+sapi: cli
+debug: false
+build-options:
+  with-clean: false
+  with-suggested-libs: false
+  with-suggested-exts: false
+  no-strip: false
+download-options:
+  retry: 5
+
+extra-env:
+  MACOSX_DEPLOYMENT_TARGET: "26.0"
+  ac_cv_func_memset_s: "no"

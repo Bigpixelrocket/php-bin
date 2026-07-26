@@ -1,0 +1,7 @@
+bcmath
+core
+json
+opcache
+pdo
+redis
+

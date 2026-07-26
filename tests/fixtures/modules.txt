@@ -1,0 +1,10 @@
+[PHP Modules]
+bcmath
+Core
+json
+PDO
+redis
+
+[Zend Modules]
+Zend OPcache
+

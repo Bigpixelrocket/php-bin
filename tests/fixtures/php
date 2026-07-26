@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if [[ "${1:-}" == "-r" ]]; then
+  printf '8.4.99'
+elif [[ "${1:-}" == "-m" ]]; then
+  cat "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/modules.txt"
+elif [[ "${1:-}" == "-v" ]]; then
+  echo "PHP 8.4.99 (cli) (built: fixture)"
+else
+  echo "PHP 8.4.99 fixture"
+fi
+

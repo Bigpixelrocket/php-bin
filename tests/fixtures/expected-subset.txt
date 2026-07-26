@@ -1,0 +1,4 @@
+bcmath
+pdo
+redis
+

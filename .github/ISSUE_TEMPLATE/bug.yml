@@ -1,0 +1,31 @@
+name: Build or artifact bug
+description: Report a reproducible builder or released-artifact problem.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: Do not report security vulnerabilities here. Use private vulnerability reporting.
+  - type: input
+    id: version
+    attributes:
+      label: PHP release tag
+      placeholder: 8.4.5
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include the failing command and complete error output.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include macOS version, architecture, and relevant runtime packages.
+    validations:
+      required: true
+
