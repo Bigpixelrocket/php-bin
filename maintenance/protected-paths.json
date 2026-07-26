@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "patterns": [
+    ".github/codex/maintenance/**",
+    ".github/workflows/**",
+    ".codex/**",
+    "schemas/agent-*",
+    "maintenance/control.py",
+    "maintenance/protected-paths.json",
+    "scripts/admit-maintenance-plan",
+    "scripts/seal-maintenance-patch",
+    "scripts/verify-merge-admission",
+    "scripts/release-maintenance",
+    "support-policy.json",
+    ".github/CODEOWNERS"
+  ]
+}

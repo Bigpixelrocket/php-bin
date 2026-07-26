@@ -14,11 +14,12 @@ jobs:
     name: Script checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install --yes shellcheck
       - name: Check shell scripts
         run: shellcheck scripts/*.sh
       - name: Run contract tests
         run: scripts/test.sh
-

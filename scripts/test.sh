@@ -33,4 +33,9 @@ rm -f \
   "$PROJECT_ROOT/.artifacts/SHA256SUMS"
 rmdir "$PROJECT_ROOT/.artifacts" 2>/dev/null || true
 
+(
+  cd "$PROJECT_ROOT"
+  python3 -m unittest discover -s tests -p 'test_*.py'
+)
+
 echo "All script tests passed."

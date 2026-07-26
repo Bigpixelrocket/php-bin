@@ -80,6 +80,8 @@ if [[ ! -x "$PHP_BIN" ]]; then
 fi
 
 "$PHP_BIN" -v
+"$PHP_BIN" -r 'exit(PHP_SAPI === "cli" ? 0 : 1);'
+file "$PHP_BIN" | grep -Eq 'arm64|Mach-O 64-bit executable arm64'
 
 MINIMUM_MACOS_VERSION="$(vtool -show-build "$PHP_BIN" | awk '$1 == "minos" { print $2; exit }')"
 if [[ "$MINIMUM_MACOS_VERSION" != "26.0" ]]; then

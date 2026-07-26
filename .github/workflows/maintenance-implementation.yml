@@ -1,0 +1,274 @@
+name: PHP maintenance implementation
+
+on:
+  workflow_dispatch:
+    inputs:
+      investigation_run_id:
+        description: Run containing an admitted maintenance plan artifact
+        required: true
+        type: string
+      exact_base_sha:
+        description: Exact admitted php-bin base commit
+        required: true
+        type: string
+      phase:
+        description: Agent phase
+        required: true
+        default: implementation
+        type: choice
+        options: [implementation, repair]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  implement:
+    name: Offline agent and patch sealing
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.exact_base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download admitted investigation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "${{ inputs.investigation_run_id }}" --name "maintenance-investigation-${{ inputs.investigation_run_id }}" --dir maintenance-run
+      - name: Enforce operator pause
+        run: test "$(jq -r .unattendedMutation .github/maintenance-operator.json)" = "enabled"
+      - name: Verify exact admitted base
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ inputs.exact_base_sha }}"
+          test "$(jq -r .preconditions.phpBinHead maintenance-run/maintenance-plan.json)" = "${{ inputs.exact_base_sha }}"
+      - name: Prepare offline phase contract
+        run: |
+          phase="${{ inputs.phase }}"
+          ./scripts/prepare-agent-task \
+            --phase "$phase" \
+            --action-key "$(jq -r .actionKey maintenance-run/maintenance-plan.json)" \
+            --goal "Implement the exact admitted maintenance plan and leave a sealable diff." \
+            --preconditions maintenance-run/preconditions.json \
+            --allowed-authority workspace_write_admitted_paths \
+            --allowed-authority local_advisory_checks \
+            --non-goal protected_control_change \
+            --non-goal irreversible_github_effect \
+            --stop-condition changed_precondition \
+            --stop-condition required_protected_or_unadmitted_change \
+            --stop-condition required_check_unavailable \
+            --shared .github/codex/maintenance/shared.md \
+            --phase-template ".github/codex/maintenance/$phase.md" \
+            --contract-output maintenance-run/implementation-contract.json \
+            --prompt-output maintenance-run/implementation-prompt.md
+          shared="$(./maintenance/control.py digest .github/codex/maintenance/shared.md)"
+          phase_digest="$(./maintenance/control.py digest ".github/codex/maintenance/$phase.md")"
+          event="$(./maintenance/control.py digest maintenance-run/implementation-contract.json)"
+          jq --arg shared "$shared" --arg phaseTemplate "$phase_digest" --arg eventContract "$event" \
+            '.agentContract.instructionDigests={shared:$shared,phaseTemplate:$phaseTemplate,eventContract:$eventContract}' \
+            maintenance-run/maintenance-plan.json > maintenance-run/implementation-plan.json
+          mkdir -p "$RUNNER_TEMP/codex-home"
+          cp ".codex/$phase.config.toml" "$RUNNER_TEMP/codex-home/"
+      - name: Run offline Codex implementation
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: maintenance-run/implementation-prompt.md
+          output-file: maintenance-run/implementation-result.json
+          codex-home: ${{ runner.temp }}/codex-home
+          sandbox: workspace-write
+          safety-strategy: drop-sudo
+          allow-users: loadinglucian
+          allow-bots: github-actions[bot]
+          codex-args: '["--ephemeral","--profile","implementation","--output-schema","schemas/agent-completion-assessment.schema.json"]'
+      - name: Seal exact agent diff
+        run: |
+          ./scripts/seal-maintenance-patch \
+            --repo . \
+            --base "${{ inputs.exact_base_sha }}" \
+            --plan maintenance-run/implementation-plan.json \
+            --result maintenance-run/implementation-result.json \
+            --contract maintenance-run/implementation-contract.json \
+            --output maintenance-run/sealed
+      - name: Retain sealed patch
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: sealed-maintenance-patch-${{ github.run_id }}
+          path: maintenance-run/
+          if-no-files-found: error
+          retention-days: 90
+          include-hidden-files: true
+
+  validate:
+    name: Clean deterministic validation
+    needs: implement
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.exact_base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: sealed-maintenance-patch-${{ github.run_id }}
+          path: maintenance-run
+      - name: Apply exact sealed bytes
+        run: |
+          test "$(./maintenance/control.py digest maintenance-run/sealed/sealed.patch)" = "$(jq -r .patchDigest maintenance-run/sealed/patch-manifest.json)"
+          git apply --index maintenance-run/sealed/sealed.patch
+      - name: Run authoritative checks
+        run: ./scripts/test.sh
+      - name: Record validated SHA and tree
+        run: |
+          export GIT_AUTHOR_NAME=maintenance-validator
+          export GIT_AUTHOR_EMAIL=maintenance@invalid
+          export GIT_COMMITTER_NAME=maintenance-validator
+          export GIT_COMMITTER_EMAIL=maintenance@invalid
+          export GIT_AUTHOR_DATE=2000-01-01T00:00:00Z
+          export GIT_COMMITTER_DATE=2000-01-01T00:00:00Z
+          git commit -m "chore: apply admitted maintenance patch"
+          jq -n --arg headSha "$(git rev-parse HEAD)" --arg tree "$(git rev-parse HEAD^{tree})" '{headSha:$headSha,tree:$tree,checks:{"Script checks":"success"}}' > maintenance-run/validation.json
+          git bundle create maintenance-run/validated.bundle HEAD "^${{ inputs.exact_base_sha }}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: validated-maintenance-patch-${{ github.run_id }}
+          path: maintenance-run/
+          if-no-files-found: error
+          retention-days: 90
+          include-hidden-files: true
+
+  merge:
+    name: Exact-SHA PR and merge admission
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.exact_base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: validated-maintenance-patch-${{ github.run_id }}
+          path: maintenance-run
+      - name: Restore exact validated commit
+        run: |
+          validated="$(jq -r .headSha maintenance-run/validation.json)"
+          git fetch maintenance-run/validated.bundle "$validated"
+          git checkout --detach "$validated"
+          test "$(git rev-parse HEAD)" = "$validated"
+      - name: Create or reuse automation PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          action_key="$(jq -r .actionKey maintenance-run/implementation-plan.json)"
+          branch="maintenance/$(printf '%s' "$action_key" | tr ':/' '--')"
+          gh auth setup-git
+          git push origin "HEAD:refs/heads/$branch"
+          existing="$(gh pr list --head "$branch" --state open --json number --jq '.[0].number // empty')"
+          if [[ -z "$existing" ]]; then
+            url="$(gh pr create --base main --head "$branch" --title "chore: $action_key" \
+              --body "Deterministically sealed maintenance patch for \`$action_key\`.\n\nValidated commit: \`$(git rev-parse HEAD)\`.")"
+            existing="${url##*/}"
+          fi
+          echo "number=$existing" >> "$GITHUB_OUTPUT"
+      - name: Wait for required checks on exact head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr checks "${{ steps.pr.outputs.number }}" --watch --fail-fast --interval 10
+      - name: Re-verify exact SHA, sealed tree, and preconditions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          expected="$(jq -r .headSha maintenance-run/validation.json)"
+          actual="$(gh pr view "${{ steps.pr.outputs.number }}" --json headRefOid --jq .headRefOid)"
+          test "$actual" = "$expected"
+          test "$(git rev-parse HEAD)" = "$expected"
+          test "$(git rev-parse "${{ inputs.exact_base_sha }}")" = "$(jq -r .preconditions.phpBinHead maintenance-run/implementation-plan.json)"
+          jq '.checks' maintenance-run/validation.json > maintenance-run/checks.json
+          jq -n --arg phpBinHead "${{ inputs.exact_base_sha }}" '{phpBinHead:$phpBinHead}' > maintenance-run/preconditions.json
+          cp maintenance-run/preconditions.json maintenance-run/current.json
+          ./scripts/verify-merge-admission \
+            --repo . \
+            --head "$expected" \
+            --manifest maintenance-run/sealed/patch-manifest.json \
+            --checks maintenance-run/checks.json \
+            --preconditions maintenance-run/preconditions.json \
+            --current maintenance-run/current.json
+      - name: Merge admitted exact commit
+        id: merged
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr merge "${{ steps.pr.outputs.number }}" --squash --delete-branch
+          echo "commit=$(gh pr view "${{ steps.pr.outputs.number }}" --json mergeCommit --jq .mergeCommit.oid)" >> "$GITHUB_OUTPUT"
+      - name: Commit deterministic php_bin_ready event record
+        id: readiness
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch origin main
+          git checkout -B "maintenance/readiness-${{ github.run_id }}" origin/main
+          action_key="$(jq -r .actionKey maintenance-run/implementation-plan.json)"
+          filename="$(printf '%s' "$action_key" | tr ':/' '--').json"
+          mkdir -p maintenance-events
+          jq -n \
+            --arg actionKey "$action_key" \
+            --arg classification "$(jq -r .action maintenance-run/implementation-plan.json)" \
+            --arg phpBinCommit "${{ steps.merged.outputs.commit }}" \
+            --arg planDigest "$(jq -r .planDigest maintenance-run/sealed/patch-manifest.json)" \
+            --arg policyDigest "$(jq -r .preconditions.supportPolicyDigest maintenance-run/implementation-plan.json)" \
+            --arg evidenceManifestDigest "$(jq -r .manifestDigest maintenance-run/evidence/evidence-manifest.json)" \
+            --argjson evidenceDigests "$(jq '[.captures[].digest]' maintenance-run/evidence/evidence-manifest.json)" \
+            --argjson instructionDigests "$(jq .agentContract.instructionDigests maintenance-run/implementation-plan.json)" \
+            '{
+              schemaVersion:1,
+              actionKey:$actionKey,
+              classification:$classification,
+              state:"detected",
+              history:[],
+              phpBinCommit:$phpBinCommit,
+              planDigest:$planDigest,
+              supportPolicyDigest:$policyDigest,
+              evidenceManifestDigest:$evidenceManifestDigest,
+              evidenceDigests:$evidenceDigests,
+              instructionDigests:$instructionDigests
+            }' > "maintenance-events/$filename"
+          jq -n \
+            --arg commit "${{ steps.merged.outputs.commit }}" \
+            --arg planDigest "$(jq -r .planDigest maintenance-run/sealed/patch-manifest.json)" \
+            '[{kind:"validated_merge",commit:$commit,planDigest:$planDigest}]' > maintenance-run/readiness-evidence.json
+          ./scripts/maintenance-event \
+            --event "maintenance-events/$filename" \
+            --target php_bin_ready \
+            --evidence maintenance-run/readiness-evidence.json \
+            --output "maintenance-events/$filename.next"
+          mv "maintenance-events/$filename.next" "maintenance-events/$filename"
+          git add "maintenance-events/$filename"
+          git -c user.name=maintenance-readiness -c user.email=maintenance@invalid \
+            commit -m "chore: record $action_key php-bin readiness"
+          gh auth setup-git
+          git push origin HEAD
+          url="$(gh pr create --base main --head "maintenance/readiness-${{ github.run_id }}" \
+            --title "chore: record $action_key php-bin readiness" \
+            --body "Deterministic event state for the exact merged implementation commit.")"
+          echo "number=${url##*/}" >> "$GITHUB_OUTPUT"
+      - name: Validate and merge php-bin readiness record
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr checks "${{ steps.readiness.outputs.number }}" --watch --fail-fast --interval 10
+          gh pr merge "${{ steps.readiness.outputs.number }}" --squash --delete-branch

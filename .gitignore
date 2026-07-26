@@ -1,9 +1,13 @@
 .artifacts/
+__pycache__/
+*.py[cod]
 .build/
 .spc/
 .DS_Store
 buildroot/
 downloads/
 log/
+maintenance-run/
 pkgroot/
 source/
+verification-results/

@@ -1,2 +1,13 @@
-* @loadinglucian
-
+/.github/codex/ @loadinglucian
+/.github/workflows/ @loadinglucian
+/.github/CODEOWNERS @loadinglucian
+/.github/maintenance-operator.json @loadinglucian
+/.github/maintenance-pins.json @loadinglucian
+/.codex/ @loadinglucian
+/maintenance/ @loadinglucian
+/schemas/agent-* @loadinglucian
+/scripts/admit-maintenance-plan @loadinglucian
+/scripts/seal-maintenance-patch @loadinglucian
+/scripts/verify-merge-admission @loadinglucian
+/scripts/release-maintenance @loadinglucian
+/support-policy.json @loadinglucian

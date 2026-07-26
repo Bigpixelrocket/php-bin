@@ -47,7 +47,9 @@ jobs:
       PHP_VERSION: ${{ inputs.php_version || '8.4' }}
       SPIKE_STAGE: ${{ inputs.stage || 's4' }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - name: Verify runner architecture
         run: test "$(uname -s)" = Darwin && test "$(uname -m)" = arm64
       - name: Install build dependencies
@@ -55,7 +57,7 @@ jobs:
       - name: Install pinned StaticPHP
         run: scripts/install-spc.sh
       - name: Restore source cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .build/${{ env.PHP_VERSION }}/${{ env.SPIKE_STAGE }}/downloads
           key: spc-${{ runner.os }}-${{ runner.arch }}-${{ env.PHP_VERSION }}-${{ env.SPIKE_STAGE }}-${{ hashFiles('.spc-version', 'stages/*.txt') }}
@@ -69,7 +71,7 @@ jobs:
           scripts/package.sh "$php_bin" "$actual_version"
       - name: Upload build result
         if: env.SPIKE_STAGE == 's4'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: php-${{ env.PHP_VERSION }}-cli-macos-aarch64
           path: .artifacts/

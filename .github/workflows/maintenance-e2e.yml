@@ -1,0 +1,149 @@
+name: Maintenance end to end
+
+on:
+  workflow_dispatch:
+    inputs:
+      php_bin_sha:
+        description: Exact reviewed php-bin commit
+        required: true
+        type: string
+      mise_php_sha:
+        description: Exact reviewed mise-php commit
+        required: true
+        type: string
+      suite:
+        description: Verification suite
+        required: true
+        default: production-parity
+        type: choice
+        options: [production-parity, notification-canary, live-canary]
+      live_version:
+        description: Exact stable PHP version for live-canary
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maintenance-e2e-${{ inputs.suite }}
+  cancel-in-progress: false
+
+jobs:
+  production-parity:
+    if: inputs.suite == 'production-parity'
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - name: Checkout reviewed workflow definition
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: control
+          persist-credentials: false
+      - name: Reject unreviewed workflow bytes
+        working-directory: control
+        run: |
+          expected="$(jq -r '.workflows[".github/workflows/maintenance-e2e.yml"]' .github/maintenance-pins.json)"
+          actual="sha256:$(shasum -a 256 .github/workflows/maintenance-e2e.yml | awk '{print $1}')"
+          test "$actual" = "$expected"
+      - name: Checkout exact php-bin commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: bigpixelrocket/php-bin
+          ref: ${{ inputs.php_bin_sha }}
+          path: php-bin
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Checkout exact mise-php commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: bigpixelrocket/mise-php
+          ref: ${{ inputs.mise_php_sha }}
+          path: mise-php
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Probe production credential boundaries
+        run: |
+          test -z "${OPENAI_API_KEY:-}"
+          test -z "${GH_TOKEN:-}"
+          test -z "${GITHUB_TOKEN:-}"
+      - name: Run stable cross-repository verifier
+        run: |
+          ./php-bin/scripts/verify-maintenance-system \
+            --mise-repo ./mise-php \
+            --php-bin-sha "${{ inputs.php_bin_sha }}" \
+            --mise-php-sha "${{ inputs.mise_php_sha }}" \
+            --output ./verification-results
+      - name: Retain production-parity report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: maintenance-production-parity-${{ github.run_id }}
+          path: verification-results/
+          if-no-files-found: error
+          retention-days: 90
+          include-hidden-files: true
+
+  notification-canary:
+    if: inputs.suite == 'notification-canary'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.php_bin_sha }}
+          persist-credentials: false
+      - name: Create, replay, transition, and close one namespaced issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p canary
+          action_key="notification-canary:${{ github.run_id }}"
+          jq -n --arg actionKey "$action_key" \
+            '{actionKey:$actionKey,state:"detected",severity:"info",summary:"Harmless notification delivery canary."}' \
+            > canary/event.json
+          ./scripts/notify-maintenance --event canary/event.json --state canary/state.json --output canary/next.json \
+            --backend github --repo "${{ github.repository }}" --owner "${{ vars.MAINTENANCE_OWNER }}"
+          mv canary/next.json canary/state.json
+          ./scripts/notify-maintenance --event canary/event.json --state canary/state.json --output canary/replay.json \
+            --backend github --repo "${{ github.repository }}" --owner "${{ vars.MAINTENANCE_OWNER }}"
+          test "$(jq -r .lastAction canary/replay.json)" = "none"
+          jq '.state="php_bin_ready"' canary/event.json > canary/transition.json
+          ./scripts/notify-maintenance --event canary/transition.json --state canary/state.json --output canary/next.json \
+            --backend github --repo "${{ github.repository }}" --owner "${{ vars.MAINTENANCE_OWNER }}"
+          mv canary/next.json canary/state.json
+          jq '.state="complete" | .finalResult="passed"' canary/event.json > canary/complete.json
+          ./scripts/notify-maintenance --event canary/complete.json --state canary/state.json --output canary/closed.json \
+            --backend github --repo "${{ github.repository }}" --owner "${{ vars.MAINTENANCE_OWNER }}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: maintenance-notification-canary-${{ github.run_id }}
+          path: canary/
+          if-no-files-found: error
+          retention-days: 90
+
+  live-canary:
+    if: inputs.suite == 'live-canary'
+    runs-on: macos-26
+    timeout-minutes: 20
+    environment: php-maintenance-release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: bigpixelrocket/mise-php
+          ref: ${{ inputs.mise_php_sha }}
+          persist-credentials: false
+      - uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4
+      - name: Verify exact and branch-shorthand public installs
+        run: |
+          [[ "${{ inputs.live_version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]
+          branch="${{ inputs.live_version }}"
+          branch="${branch%%-*}"
+          branch="${branch%.*}"
+          mise plugin link php "$GITHUB_WORKSPACE"
+          mise install "php@${{ inputs.live_version }}"
+          mise install "php@$branch"
+          mise exec "php@${{ inputs.live_version }}" -- php -v
+          mise exec "php@$branch" -- php -v

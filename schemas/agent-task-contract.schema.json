@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bigpixelrocket.dev/schemas/agent-task-contract.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contractVersion", "phase", "goal", "actionKey", "preconditions", "allowedAuthority", "nonGoals", "completionCriteria", "stopConditions"],
+  "properties": {
+    "contractVersion": {"const": 1},
+    "phase": {"enum": ["investigation", "implementation", "repair"]},
+    "goal": {"type": "string", "minLength": 1},
+    "actionKey": {"type": "string", "minLength": 1},
+    "preconditions": {"type": "object"},
+    "allowedAuthority": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "nonGoals": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "completionCriteria": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "requirement", "evidenceRequired"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "requirement": {"type": "string", "minLength": 1},
+          "evidenceRequired": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "stopConditions": {"type": "array", "items": {"type": "string"}}
+  }
+}

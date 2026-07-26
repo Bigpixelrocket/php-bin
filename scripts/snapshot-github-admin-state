@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""Capture a redacted, reproducible GitHub administrator-state snapshot."""
+
+import argparse
+import datetime as dt
+import hashlib
+import json
+import pathlib
+import subprocess
+import sys
+from typing import Any
+
+
+def gh_api(endpoint: str, allow_missing: bool = False) -> Any:
+    result = subprocess.run(
+        ["gh", "api", endpoint, "--paginate"],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        if allow_missing and ("404" in result.stderr or "Not Found" in result.stderr):
+            return None
+        raise RuntimeError(f"GitHub API failed for {endpoint}: {result.stderr.strip()}")
+    pages = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+    if not pages:
+        return None
+    if len(pages) == 1:
+        return pages[0]
+    flattened = []
+    for page in pages:
+        flattened.extend(page if isinstance(page, list) else [page])
+    return flattened
+
+
+def digest(value: dict[str, Any]) -> str:
+    body = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    return "sha256:" + hashlib.sha256(body).hexdigest()
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--repo", required=True)
+parser.add_argument("--output", type=pathlib.Path, required=True)
+args = parser.parse_args()
+
+try:
+    repository = gh_api(f"repos/{args.repo}")
+    default_branch = repository["default_branch"]
+    snapshot = {
+        "schemaVersion": 1,
+        "repository": args.repo,
+        "capturedAt": dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "repositorySettings": {
+            key: repository.get(key)
+            for key in (
+                "visibility",
+                "default_branch",
+                "allow_auto_merge",
+                "delete_branch_on_merge",
+                "allow_squash_merge",
+                "allow_merge_commit",
+                "allow_rebase_merge",
+                "allow_update_branch",
+                "use_squash_pr_title_as_default",
+                "security_and_analysis",
+            )
+        },
+        "actionsPermissions": gh_api(f"repos/{args.repo}/actions/permissions"),
+        "workflowPermissions": gh_api(f"repos/{args.repo}/actions/permissions/workflow"),
+        "branchProtection": gh_api(
+            f"repos/{args.repo}/branches/{default_branch}/protection", allow_missing=True
+        ),
+        "rulesets": gh_api(f"repos/{args.repo}/rulesets"),
+        "environments": gh_api(f"repos/{args.repo}/environments"),
+        "variables": sorted(
+            item["name"]
+            for item in (gh_api(f"repos/{args.repo}/actions/variables") or {}).get("variables", [])
+        ),
+        "secretNames": sorted(
+            item["name"]
+            for item in (gh_api(f"repos/{args.repo}/actions/secrets") or {}).get("secrets", [])
+        ),
+    }
+    snapshot["snapshotDigest"] = digest(snapshot)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
+    print(json.dumps({"repository": args.repo, "output": str(args.output), "digest": snapshot["snapshotDigest"]}))
+except (RuntimeError, OSError, KeyError, json.JSONDecodeError) as error:
+    print(f"administrator snapshot failed: {error}", file=sys.stderr)
+    raise SystemExit(1)

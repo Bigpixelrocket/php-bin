@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bigpixelrocket.dev/schemas/support-policy.schema.json",
+  "type": "object",
+  "required": ["schemaVersion", "target", "maintainedBranches", "allowPrereleases", "historicalExactVersionsRemainInstallable", "immutablePublishedAssets"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "target": {"type": "object"},
+    "maintainedBranches": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "allowPrereleases": {"const": false},
+    "historicalExactVersionsRemainInstallable": {"const": true},
+    "immutablePublishedAssets": {"const": true}
+  }
+}

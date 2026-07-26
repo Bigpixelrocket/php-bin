@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Admit a Codex maintenance plan against exact evidence and preconditions."""
+
+import argparse
+import json
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from maintenance.control import ControlError, load_json, validate_plan, write_json  # noqa: E402
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--plan", type=pathlib.Path, required=True)
+parser.add_argument("--manifest", type=pathlib.Path, required=True)
+parser.add_argument("--contract", type=pathlib.Path, required=True)
+parser.add_argument("--shared", type=pathlib.Path, required=True)
+parser.add_argument("--phase", type=pathlib.Path, required=True)
+parser.add_argument("--event-contract", type=pathlib.Path, required=True)
+parser.add_argument("--php-bin-head")
+parser.add_argument("--mise-php-head")
+parser.add_argument("--policy-digest")
+parser.add_argument("--completed-actions", type=pathlib.Path)
+parser.add_argument("--output", type=pathlib.Path, required=True)
+args = parser.parse_args()
+
+try:
+    heads = {}
+    if args.php_bin_head:
+        heads["phpBinHead"] = args.php_bin_head
+    if args.mise_php_head:
+        heads["misePhpHead"] = args.mise_php_head
+    completed = set()
+    if args.completed_actions and args.completed_actions.exists():
+        completed = set(load_json(args.completed_actions))
+    admission = validate_plan(
+        load_json(args.plan),
+        args.manifest,
+        load_json(args.contract),
+        args.shared,
+        args.phase,
+        args.event_contract,
+        heads,
+        args.policy_digest,
+        completed,
+    )
+    write_json(args.output, admission)
+    print(json.dumps(admission))
+except (ControlError, OSError) as error:
+    print(f"plan admission rejected: {error}", file=sys.stderr)
+    raise SystemExit(1)

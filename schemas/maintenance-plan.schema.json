@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bigpixelrocket.dev/schemas/maintenance-plan.schema.json",
+  "type": "object",
+  "required": ["schemaVersion", "actionKey", "action", "agentContract", "evidence", "repositories", "preconditions", "editsRequired", "allowedPaths", "requiredChecks", "notification", "risk", "completionAssessment", "summary"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "actionKey": {"type": "string"},
+    "action": {"enum": ["no_change", "new_patch", "new_branch", "branch_eol", "repair", "reconcile_partial", "blocked", "needs_human"]},
+    "agentContract": {"type": "object"},
+    "evidence": {"type": "array"},
+    "researchSources": {"type": "array"},
+    "repositories": {"type": "array", "items": {"enum": ["php-bin", "mise-php"]}},
+    "preconditions": {"type": "object"},
+    "editsRequired": {"type": "boolean"},
+    "allowedPaths": {"type": "object"},
+    "requiredChecks": {"type": "array", "items": {"type": "string"}},
+    "releaseIntent": {"type": ["object", "null"]},
+    "notification": {"type": "object"},
+    "risk": {"enum": ["routine", "compatibility", "lifecycle", "recovery", "policy-sensitive"]},
+    "completionAssessment": {"type": "object"},
+    "summary": {"type": "string"}
+  }
+}

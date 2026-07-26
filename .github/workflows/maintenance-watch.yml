@@ -1,0 +1,233 @@
+name: PHP maintenance watcher
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: php-maintenance-watcher
+  cancel-in-progress: false
+
+jobs:
+  investigate:
+    name: Capture and investigate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      trigger: ${{ steps.decision.outputs.trigger }}
+      action_key: ${{ steps.plan.outputs.action_key }}
+      edits_required: ${{ steps.plan.outputs.edits_required }}
+      base_sha: ${{ steps.plan.outputs.base_sha }}
+      action: ${{ steps.plan.outputs.action }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Capture fixed raw evidence
+        run: ./scripts/capture-maintenance-evidence --output maintenance-run/evidence
+      - name: Decide whether an agent call is required
+        id: decision
+        run: |
+          ./scripts/watch-maintenance-evidence \
+            --manifest maintenance-run/evidence/evidence-manifest.json \
+            --previous maintenance-state/last-evidence.json \
+            --events maintenance-events \
+            --output maintenance-run/watch-decision.json
+          echo "trigger=$(jq -r .trigger maintenance-run/watch-decision.json)" >> "$GITHUB_OUTPUT"
+      - name: Record exact preconditions
+        if: steps.decision.outputs.trigger != 'quiet'
+        run: |
+          jq -n \
+            --arg phpBinHead "$(git rev-parse HEAD)" \
+            --arg supportPolicyDigest "$(./maintenance/control.py digest support-policy.json)" \
+            '{phpBinHead:$phpBinHead,supportPolicyDigest:$supportPolicyDigest}' \
+            > maintenance-run/preconditions.json
+      - name: Prepare investigation contract
+        if: steps.decision.outputs.trigger != 'quiet'
+        run: |
+          ./scripts/prepare-agent-task \
+            --phase investigation \
+            --action-key "investigate:${{ steps.decision.outputs.trigger }}:${{ github.run_id }}" \
+            --goal "Classify the captured maintenance trigger and emit one evidence-bound plan." \
+            --preconditions maintenance-run/preconditions.json \
+            --allowed-authority read_repository \
+            --allowed-authority read_captured_evidence \
+            --allowed-authority allowlisted_web_search \
+            --non-goal repository_mutation \
+            --non-goal irreversible_github_effect \
+            --stop-condition missing_or_contradictory_required_evidence \
+            --stop-condition changed_precondition \
+            --stop-condition required_protected_change \
+            --shared .github/codex/maintenance/shared.md \
+            --phase-template .github/codex/maintenance/investigation.md \
+            --contract-output maintenance-run/event-contract.json \
+            --prompt-output maintenance-run/investigation-prompt.md
+          mkdir -p "$RUNNER_TEMP/codex-home"
+          cp .codex/investigation.config.toml "$RUNNER_TEMP/codex-home/"
+      - name: Run read-only Codex investigation
+        if: steps.decision.outputs.trigger != 'quiet'
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: maintenance-run/investigation-prompt.md
+          output-file: maintenance-run/maintenance-plan.json
+          codex-home: ${{ runner.temp }}/codex-home
+          sandbox: read-only
+          safety-strategy: drop-sudo
+          allow-users: loadinglucian
+          allow-bots: github-actions[bot]
+          codex-args: '["--ephemeral","--profile","investigation","--output-schema","schemas/maintenance-plan.schema.json"]'
+      - name: Admit plan against exact evidence
+        if: steps.decision.outputs.trigger != 'quiet'
+        run: |
+          ./scripts/admit-maintenance-plan \
+            --plan maintenance-run/maintenance-plan.json \
+            --manifest maintenance-run/evidence/evidence-manifest.json \
+            --contract maintenance-run/event-contract.json \
+            --shared .github/codex/maintenance/shared.md \
+            --phase .github/codex/maintenance/investigation.md \
+            --event-contract maintenance-run/event-contract.json \
+            --php-bin-head "$(git rev-parse HEAD)" \
+            --policy-digest "$(./maintenance/control.py digest support-policy.json)" \
+            --output maintenance-run/admission.json
+      - name: Expose admitted plan
+        id: plan
+        if: steps.decision.outputs.trigger != 'quiet'
+        run: |
+          echo "action_key=$(jq -r .actionKey maintenance-run/maintenance-plan.json)" >> "$GITHUB_OUTPUT"
+          echo "edits_required=$(jq -r .editsRequired maintenance-run/maintenance-plan.json)" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$(jq -r .preconditions.phpBinHead maintenance-run/maintenance-plan.json)" >> "$GITHUB_OUTPUT"
+          echo "action=$(jq -r .action maintenance-run/maintenance-plan.json)" >> "$GITHUB_OUTPUT"
+      - name: Retain evidence and admitted plan
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: maintenance-investigation-${{ github.run_id }}
+          path: maintenance-run/
+          if-no-files-found: error
+          retention-days: 90
+          include-hidden-files: true
+
+  coordinate:
+    name: Dispatch admitted next phase
+    needs: investigate
+    if: needs.investigate.outputs.action_key != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download admitted investigation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "${{ github.run_id }}" \
+            --repo "${{ github.repository }}" \
+            --name "maintenance-investigation-${{ github.run_id }}" \
+            --dir maintenance-plan-download
+      - name: Dispatch implementation or no-edit release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          action="${{ needs.investigate.outputs.action }}"
+          if [[ "$action" == "blocked" || "$action" == "needs_human" ]]; then
+            jq -n \
+              --arg actionKey "${{ needs.investigate.outputs.action_key }}" \
+              --arg state "$action" \
+              --arg summary "$(jq -r .summary maintenance-plan-download/maintenance-plan.json)" \
+              --arg evidenceDigest "$(jq -r .manifestDigest maintenance-plan-download/evidence/evidence-manifest.json)" \
+              '{actionKey:$actionKey,state:$state,severity:"warning",humanActionRequired:($state=="needs_human"),summary:$summary,evidenceDigest:$evidenceDigest}' \
+              > maintenance-plan-download/notification-event.json
+            ./scripts/notify-maintenance \
+              --event maintenance-plan-download/notification-event.json \
+              --state maintenance-plan-download/notification-state.json \
+              --output maintenance-plan-download/notification-next.json \
+              --backend github \
+              --repo "${{ github.repository }}" \
+              --owner "${{ vars.MAINTENANCE_OWNER }}"
+            exit 0
+          elif [[ "$action" == "no_change" ]]; then
+            git checkout -B "maintenance/evidence-${{ github.run_id }}" origin/main
+            mkdir -p maintenance-state
+            jq -n \
+              --arg manifestDigest "$(jq -r .manifestDigest maintenance-plan-download/evidence/evidence-manifest.json)" \
+              --arg planDigest "$(jq -r .planDigest maintenance-plan-download/admission.json)" \
+              --argjson captureDigests "$(jq '[.captures[] | {captureId,digest,status}]' maintenance-plan-download/evidence/evidence-manifest.json)" \
+              '{schemaVersion:1,manifestDigest:$manifestDigest,planDigest:$planDigest,captures:$captureDigests}' \
+              > maintenance-state/last-evidence.json
+            git add maintenance-state/last-evidence.json
+            git -c user.name=maintenance-watcher -c user.email=maintenance@invalid \
+              commit -m "chore: record reviewed maintenance evidence"
+            gh auth setup-git
+            git push origin HEAD
+            url="$(gh pr create --base main --head "maintenance/evidence-${{ github.run_id }}" \
+              --title "chore: record reviewed maintenance evidence" \
+              --body "Opaque evidence state for a reviewed no-change result.")"
+            number="${url##*/}"
+            gh pr checks "$number" --watch --fail-fast --interval 10
+            gh pr merge "$number" --squash --delete-branch
+            exit 0
+          elif [[ "${{ needs.investigate.outputs.edits_required }}" == "true" ]]; then
+            gh workflow run maintenance-implementation.yml \
+              --repo "${{ github.repository }}" \
+              --ref main \
+              -f investigation_run_id="${{ github.run_id }}" \
+              -f exact_base_sha="${{ needs.investigate.outputs.base_sha }}" \
+              -f phase=implementation
+          elif [[ "$action" == "new_patch" || "$action" == "reconcile_partial" ]]; then
+            version="$(jq -r .releaseIntent.version maintenance-plan-download/maintenance-plan.json)"
+            gh workflow run maintenance-release.yml \
+              --repo "${{ github.repository }}" \
+              --ref main \
+              -f action_key="${{ needs.investigate.outputs.action_key }}" \
+              -f investigation_run_id="${{ github.run_id }}" \
+              -f version="$version" \
+              -f exact_commit="${{ needs.investigate.outputs.base_sha }}"
+          else
+            echo "Action $action requires repository readiness before release." >&2
+          fi
+
+  notify-failure:
+    name: Notify actionable watcher failure
+    needs: investigate
+    if: always() && needs.investigate.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Create structured critical event
+        run: |
+          jq -n \
+            --arg actionKey "watcher-failure:${{ github.run_id }}" \
+            --arg summary "Maintenance watcher failed: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{actionKey:$actionKey,state:"blocked",severity:"critical",humanActionRequired:true,summary:$summary,failureFingerprint:$actionKey}' \
+            > event.json
+      - name: Notify owner
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/notify-maintenance \
+            --event event.json \
+            --state "maintenance-events/notification-watcher-failure-${{ github.run_id }}.json" \
+            --output notification.json \
+            --backend github \
+            --repo "${{ github.repository }}" \
+            --owner "${{ vars.MAINTENANCE_OWNER }}"
