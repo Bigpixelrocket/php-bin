@@ -9,9 +9,13 @@ server, DNS, databases, or a desktop UI.
 
 ## Status
 
-The PHP 8.4 build is in the staged spike described in
-[`docs/spike-status.md`](docs/spike-status.md). No release is considered ready
-until the full recipe builds on macOS arm64 and the exact module check passes.
+Public macOS arm64 releases are available for every maintained PHP branch:
+[8.2.32](https://github.com/bigpixelrocket/php-bin/releases/tag/8.2.32),
+[8.3.32](https://github.com/bigpixelrocket/php-bin/releases/tag/8.3.32),
+[8.4.23](https://github.com/bigpixelrocket/php-bin/releases/tag/8.4.23), and
+[8.5.8](https://github.com/bigpixelrocket/php-bin/releases/tag/8.5.8).
+Each release is rebuilt on macOS 26 arm64 and published only after its exact
+module baseline and deployment target checks pass.
 
 ## Release contract
 
@@ -29,7 +33,7 @@ The archive layout is stable:
 bin/php
 ```
 
-## Build the PHP 8.4 spike
+## Build locally
 
 Requirements: an Apple Silicon Mac running macOS 26 or newer, Homebrew, Xcode
 command-line tools, and enough free disk space for a full StaticPHP build.
