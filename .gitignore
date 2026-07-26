@@ -1,0 +1,9 @@
+.artifacts/
+.build/
+.spc/
+.DS_Store
+buildroot/
+downloads/
+log/
+pkgroot/
+source/

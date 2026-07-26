@@ -1,0 +1,44 @@
+name: Publish PHP release
+
+on:
+  push:
+    tags:
+      - "8.[0-5].[0-9]+"
+      - "8.[0-5].[0-9]+-[1-9][0-9]*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish ${{ github.ref_name }}
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve PHP version
+        run: echo "PHP_VERSION=${GITHUB_REF_NAME%%-*}" >> "$GITHUB_ENV"
+      - name: Install build dependencies
+        run: scripts/install-build-deps.sh
+      - name: Install pinned StaticPHP
+        run: scripts/install-spc.sh
+      - name: Restore source cache
+        uses: actions/cache@v4
+        with:
+          path: .build/*/s4/downloads
+          key: spc-${{ runner.os }}-${{ runner.arch }}-${{ github.ref_name }}-s4-${{ hashFiles('.spc-version', 'stages/s4.txt') }}
+      - name: Build and verify exact modules
+        run: scripts/build.sh "$PHP_VERSION" s4
+      - name: Package release
+        run: scripts/package.sh ".build/$PHP_VERSION/s4/buildroot/bin/php" "$GITHUB_REF_NAME"
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          .artifacts/php-"$GITHUB_REF_NAME"-cli-macos-aarch64.tar.gz
+          .artifacts/SHA256SUMS
+          --repo "$GITHUB_REPOSITORY"
+          --title "PHP $GITHUB_REF_NAME for macOS arm64"
+          --generate-notes
+          --verify-tag

@@ -1,0 +1,7 @@
+bcmath
+fileinfo
+phar
+posix
+tokenizer
+zlib
+
