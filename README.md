@@ -31,8 +31,8 @@ bin/php
 
 ## Build the PHP 8.4 spike
 
-Requirements: an Apple Silicon Mac, Homebrew, Xcode command-line tools, and
-enough free disk space for a full StaticPHP build.
+Requirements: an Apple Silicon Mac running macOS 26 or newer, Homebrew, Xcode
+command-line tools, and enough free disk space for a full StaticPHP build.
 
 ```bash
 scripts/install-build-deps.sh
@@ -64,7 +64,7 @@ is documented in [`docs/release-process.md`](docs/release-process.md).
 
 ## Supported target
 
-- macOS
+- macOS 26 (Tahoe) or newer
 - arm64 / aarch64
 - PHP 8.0 through 8.5 after the 8.4 spike is complete
 - CLI SAPI
@@ -80,4 +80,3 @@ security issues using [`SECURITY.md`](SECURITY.md), not a public issue.
 
 Build code is MIT licensed. Redistributed binaries contain PHP and third-party
 software under their own licenses; see [`NOTICE`](NOTICE).
-

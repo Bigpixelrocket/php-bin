@@ -1,7 +1,8 @@
 # Release process
 
 1. Update `expected-modules/<minor>.txt` only from a reviewed module baseline.
-2. Update the recipe and run the exact module comparison on macOS arm64.
+2. Update the recipe and run the exact module comparison on macOS arm64. The
+   build gate must report a macOS 26.0 deployment target.
 3. Confirm `scripts/test.sh` and public-language checks pass.
 4. Open a pull request with the build log and module diff.
 5. After approval and merge, create and push a version tag such as `8.4.5`.
@@ -13,4 +14,3 @@
 
 Never upload a locally built replacement over an existing release asset. A
 changed recipe or artifact requires a new rebuild revision.
-

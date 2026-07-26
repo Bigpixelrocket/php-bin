@@ -38,14 +38,12 @@ build-options:
   with-clean: false
   with-suggested-libs: false
   with-suggested-exts: false
-  with-added-patch:
-    - "$PROJECT_ROOT/patches/postgresql-macos-sdk.php"
   no-strip: false
 download-options:
   retry: 5
 extra-env:
+  MACOSX_DEPLOYMENT_TARGET: "26.0"
   ac_cv_func_memset_s: "no"
-  ac_cv_func_strchrnul: "no"
 EOF
 
 (
@@ -61,6 +59,13 @@ if [[ ! -x "$PHP_BIN" ]]; then
 fi
 
 "$PHP_BIN" -v
+
+MINIMUM_MACOS_VERSION="$(vtool -show-build "$PHP_BIN" | awk '$1 == "minos" { print $2; exit }')"
+if [[ "$MINIMUM_MACOS_VERSION" != "26.0" ]]; then
+  echo "Expected a macOS 26.0 minimum, got: ${MINIMUM_MACOS_VERSION:-unknown}" >&2
+  exit 1
+fi
+echo "Verified macOS minimum: $MINIMUM_MACOS_VERSION"
 
 if [[ "$STAGE" == "s4" ]]; then
   PHP_MINOR="${PHP_VERSION%.*}"

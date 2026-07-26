@@ -3,8 +3,7 @@ name: Publish PHP release
 on:
   push:
     tags:
-      - "8.[0-5].[0-9]+"
-      - "8.[0-5].[0-9]+-[1-9][0-9]*"
+      - "8.[0-5].*"
 
 permissions:
   contents: write
@@ -12,14 +11,19 @@ permissions:
 jobs:
   release:
     name: Build and publish ${{ github.ref_name }}
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 120
     env:
       GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
       - name: Resolve PHP version
-        run: echo "PHP_VERSION=${GITHUB_REF_NAME%%-*}" >> "$GITHUB_ENV"
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^8\.[0-5]\.[0-9]+(-[1-9][0-9]*)?$ ]]; then
+            echo "Unsupported release tag: $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          echo "PHP_VERSION=${GITHUB_REF_NAME%%-*}" >> "$GITHUB_ENV"
       - name: Install build dependencies
         run: scripts/install-build-deps.sh
       - name: Install pinned StaticPHP
