@@ -43,6 +43,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 120
     env:
+      GITHUB_TOKEN: ${{ github.token }}
       PHP_VERSION: ${{ inputs.php_version || '8.4' }}
       SPIKE_STAGE: ${{ inputs.stage || 's4' }}
     steps:
@@ -73,4 +74,3 @@ jobs:
           name: php-${{ env.PHP_VERSION }}-cli-macos-aarch64
           path: .artifacts/
           if-no-files-found: error
-
