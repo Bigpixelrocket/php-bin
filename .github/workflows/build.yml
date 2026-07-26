@@ -74,3 +74,4 @@ jobs:
           name: php-${{ env.PHP_VERSION }}-cli-macos-aarch64
           path: .artifacts/
           if-no-files-found: error
+          include-hidden-files: true
