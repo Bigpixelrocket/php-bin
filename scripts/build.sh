@@ -27,6 +27,10 @@ if [[ ! -x "$SPC_BIN" ]]; then
 fi
 
 EXTENSIONS="$(grep -Ev '^[[:space:]]*(#|$)' "$STAGE_FILE" | paste -sd, -)"
+CUSTOM_SOURCE_URLS="[]"
+if [[ "$PHP_VERSION" == "8.0" || "$PHP_VERSION" == 8.0.* ]]; then
+  CUSTOM_SOURCE_URLS='["mongodb:https://github.com/mongodb/mongo-php-driver/releases/download/1.20.1/mongodb-1.20.1.tgz"]'
+fi
 mkdir -p "$BUILD_DIR"
 
 print_failure_logs() {
@@ -57,8 +61,11 @@ build-options:
   with-suggested-libs: false
   with-suggested-exts: false
   no-strip: false
+  with-added-patch:
+    - "$PROJECT_ROOT/patches/php-legacy-clang.php"
 download-options:
   retry: 5
+  custom-url: $CUSTOM_SOURCE_URLS
 extra-env:
   MACOSX_DEPLOYMENT_TARGET: "26.0"
   ac_cv_func_memset_s: "no"
