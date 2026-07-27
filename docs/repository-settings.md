@@ -9,6 +9,9 @@ Required repository state:
 
 - Require a pull request before merging.
 - Require the `Script checks` status check.
+- Require the base-controlled `Protected controls` status check. It passes
+  automatically for unprotected generated paths and requires an exact-head
+  `loadinglucian` approval for any path in `maintenance/protected-paths.json`.
 - Bind the required check to the GitHub Actions app, preventing another app
   from satisfying the same context name.
 - Require conversation resolution.
