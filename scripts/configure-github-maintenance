@@ -85,6 +85,7 @@ try:
             "can_approve_pull_request_reviews": True,
         },
     )
+    gh("api", f"repos/{args.repo}/immutable-releases", "--method", "PUT")
     gh("variable", "set", "MAINTENANCE_OWNER", "--repo", args.repo, "--body", args.owner)
     ensure_label(args.repo, "maintenance", "1d76db", "Guarded PHP maintenance event")
     ensure_label(args.repo, "attention-required", "d73a4a", "Owner action is required")

@@ -68,6 +68,7 @@ try:
         },
         "actionsPermissions": gh_api(f"repos/{args.repo}/actions/permissions"),
         "workflowPermissions": gh_api(f"repos/{args.repo}/actions/permissions/workflow"),
+        "immutableReleases": gh_api(f"repos/{args.repo}/immutable-releases"),
         "branchProtection": gh_api(
             f"repos/{args.repo}/branches/{default_branch}/protection", allow_missing=True
         ),

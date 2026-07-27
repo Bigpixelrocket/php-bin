@@ -500,6 +500,7 @@ class Verifier:
         evidence = json.loads(admin.read_text())
         assert_true(evidence.get("canary", {}).get("removed") is True, "admin canary was not removed")
         assert_true(evidence.get("protectionRestored") is True, "fixture bypass protection was not restored")
+        assert_true(evidence.get("immutableReleasesEnabled") is True, "immutable releases were not enabled")
         shutil.copy(admin, directory / admin.name)
         return [admin.name]
 

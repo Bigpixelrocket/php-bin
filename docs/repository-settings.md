@@ -20,6 +20,8 @@ Required repository state:
   write scopes.
 - Create the protected `php-maintenance-release` environment, limited to
   protected branches.
+- Enable GitHub immutable releases so future published tags and assets cannot
+  be moved, replaced, or deleted.
 - Set `MAINTENANCE_OWNER=loadinglucian`.
 - Keep distinct repository-scoped `OPENAI_API_KEY` secrets.
 - Keep the `maintenance` and `attention-required` labels.
