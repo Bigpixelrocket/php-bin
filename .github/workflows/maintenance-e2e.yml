@@ -65,6 +65,10 @@ jobs:
           persist-credentials: false
       - name: Install pinned mise
         uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4
+        with:
+          version: 2026.7.13
+          sha256: ef747f4bd944d7cb4efe1832ec6cd29dfdbc217389122fa37c20d116d90c1eb6
+          install: false
       - name: Probe production credential boundaries
         run: |
           test -z "${OPENAI_API_KEY:-}"
