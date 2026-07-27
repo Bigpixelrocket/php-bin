@@ -7,7 +7,7 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from maintenance.control import instruction_digest, utc_now, write_json  # noqa: E402
+from maintenance.control import ControlError, instruction_digest, write_json  # noqa: E402
 
 
 CRITERIA = {
@@ -94,35 +94,47 @@ parser.add_argument("--contract-output", type=pathlib.Path, required=True)
 parser.add_argument("--prompt-output", type=pathlib.Path, required=True)
 args = parser.parse_args()
 
-contract = {
-    "contractVersion": 1,
-    "phase": args.phase,
-    "goal": args.goal,
-    "actionKey": args.action_key,
-    "preconditions": json.loads(args.preconditions.read_text()),
-    "allowedAuthority": args.allowed_authority,
-    "nonGoals": args.non_goal,
-    "completionCriteria": CRITERIA[args.phase],
-    "stopConditions": args.stop_condition,
-}
-write_json(args.contract_output, contract)
-digests = {
-    "shared": instruction_digest(args.shared),
-    "phaseTemplate": instruction_digest(args.phase_template),
-    "eventContract": instruction_digest(args.contract_output),
-}
-prompt = "\n\n".join(
-    [
-        args.shared.read_text().rstrip(),
-        args.phase_template.read_text().rstrip(),
-        "# Event-specific contract\n\n```json\n"
-        + json.dumps(contract, indent=2, sort_keys=True)
-        + "\n```",
-        "# Required instruction digests\n\n```json\n"
-        + json.dumps(digests, indent=2, sort_keys=True)
-        + "\n```",
-    ]
-) + "\n"
-args.prompt_output.parent.mkdir(parents=True, exist_ok=True)
-args.prompt_output.write_text(prompt)
-print(json.dumps({"contract": str(args.contract_output), "prompt": str(args.prompt_output), "instructionDigests": digests}))
+try:
+    contract = {
+        "contractVersion": 1,
+        "phase": args.phase,
+        "goal": args.goal,
+        "actionKey": args.action_key,
+        "preconditions": json.loads(args.preconditions.read_text()),
+        "allowedAuthority": args.allowed_authority,
+        "nonGoals": args.non_goal,
+        "completionCriteria": CRITERIA[args.phase],
+        "stopConditions": args.stop_condition,
+    }
+    write_json(args.contract_output, contract)
+    digests = {
+        "shared": instruction_digest(args.shared),
+        "phaseTemplate": instruction_digest(args.phase_template),
+        "eventContract": instruction_digest(args.contract_output),
+    }
+    prompt = "\n\n".join(
+        [
+            args.shared.read_text().rstrip(),
+            args.phase_template.read_text().rstrip(),
+            "# Event-specific contract\n\n```json\n"
+            + json.dumps(contract, indent=2, sort_keys=True)
+            + "\n```",
+            "# Required instruction digests\n\n```json\n"
+            + json.dumps(digests, indent=2, sort_keys=True)
+            + "\n```",
+        ]
+    ) + "\n"
+    args.prompt_output.parent.mkdir(parents=True, exist_ok=True)
+    args.prompt_output.write_text(prompt)
+    print(
+        json.dumps(
+            {
+                "contract": str(args.contract_output),
+                "prompt": str(args.prompt_output),
+                "instructionDigests": digests,
+            }
+        )
+    )
+except (ControlError, OSError, json.JSONDecodeError) as error:
+    print(f"agent task preparation rejected: {error}", file=sys.stderr)
+    raise SystemExit(1)

@@ -172,5 +172,6 @@ try:
     write_json(args.output, updated)
     print(json.dumps(updated))
 except (ControlError, OSError, subprocess.CalledProcessError) as error:
-    print(f"release transition rejected: {error}", file=sys.stderr)
+    detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) and error.stderr else str(error)
+    print(f"release transition rejected: {detail}", file=sys.stderr)
     raise SystemExit(1)

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://bigpixelrocket.dev/schemas/maintenance-plan.schema.json",
   "type": "object",
-  "required": ["schemaVersion", "actionKey", "action", "agentContract", "evidence", "repositories", "preconditions", "editsRequired", "allowedPaths", "requiredChecks", "notification", "risk", "completionAssessment", "summary"],
+  "required": ["schemaVersion", "actionKey", "action", "agentContract", "evidence", "repositories", "preconditions", "editsRequired", "allowedPaths", "requiredChecks", "agentOperations", "budgets", "notification", "risk", "completionAssessment", "summary"],
   "properties": {
     "schemaVersion": {"const": 1},
     "actionKey": {"type": "string"},
@@ -15,7 +15,24 @@
     "editsRequired": {"type": "boolean"},
     "allowedPaths": {"type": "object"},
     "requiredChecks": {"type": "array", "items": {"type": "string"}},
-    "releaseIntent": {"type": ["object", "null"]},
+    "releaseIntent": {
+      "type": ["object", "null"],
+      "properties": {
+        "version": {"type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[1-9]\\d*)?$"},
+        "sourceIdentifier": {"type": "string", "minLength": 1}
+      },
+      "required": ["version"]
+    },
+    "agentOperations": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "budgets": {
+      "type": "object",
+      "required": ["maxModelCalls", "maxRetries", "timeoutMinutes"],
+      "properties": {
+        "maxModelCalls": {"type": "integer", "minimum": 1, "maximum": 5},
+        "maxRetries": {"type": "integer", "minimum": 1, "maximum": 3},
+        "timeoutMinutes": {"type": "integer", "minimum": 1, "maximum": 60}
+      }
+    },
     "notification": {"type": "object"},
     "risk": {"enum": ["routine", "compatibility", "lifecycle", "recovery", "policy-sensitive"]},
     "completionAssessment": {"type": "object"},

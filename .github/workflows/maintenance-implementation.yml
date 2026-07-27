@@ -81,7 +81,7 @@ jobs:
           safety-strategy: drop-sudo
           allow-users: loadinglucian
           allow-bots: github-actions[bot]
-          codex-args: '["--strict-config","--ephemeral","--profile","implementation","--output-schema","schemas/agent-completion-assessment.schema.json"]'
+          codex-args: '["--strict-config","--ephemeral","--profile","${{ inputs.phase }}","--output-schema","schemas/agent-completion-assessment.schema.json"]'
       - name: Seal exact agent diff
         run: |
           ./scripts/seal-maintenance-patch \
@@ -318,7 +318,7 @@ jobs:
       - name: Restore exact validated commit
         run: |
           validated="$(jq -r .headSha maintenance-run/validation.json)"
-          git fetch maintenance-run/validated.bundle "$validated"
+          git fetch maintenance-run/validated.bundle HEAD
           git checkout --detach "$validated"
           test "$(git rev-parse HEAD)" = "$validated"
       - name: Create or reuse automation PR

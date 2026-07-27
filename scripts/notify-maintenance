@@ -23,7 +23,7 @@ def gh(*arguments: str) -> str:
     return result.stdout.strip()
 
 
-def discover_github_prior(repo: str, action_key: str) -> dict | None:
+def find_issue(repo: str, action_key: str) -> dict | None:
     marker = f"<!-- maintenance-action-key:{action_key} -->"
     issues = json.loads(
         gh(
@@ -46,7 +46,13 @@ def discover_github_prior(repo: str, action_key: str) -> dict | None:
         raise ControlError("multiple issues exist for one action key")
     if not matches:
         return None
-    issue = matches[0]
+    return matches[0]
+
+
+def discover_github_prior(repo: str, action_key: str) -> dict | None:
+    issue = find_issue(repo, action_key)
+    if issue is None:
+        return None
     detail = json.loads(
         gh("issue", "view", str(issue["number"]), "--repo", repo, "--json", "body,comments")
     )
@@ -66,25 +72,6 @@ def discover_github_prior(repo: str, action_key: str) -> dict | None:
 def apply_github(repo: str, owner: str, event: dict, decision: dict) -> dict:
     action_key = event["actionKey"]
     marker = f"<!-- maintenance-action-key:{action_key} -->"
-    issues = json.loads(
-        gh(
-            "issue",
-            "list",
-            "--repo",
-            repo,
-            "--state",
-            "all",
-            "--search",
-            f'"{marker}" in:body',
-            "--json",
-            "number,body,state,url",
-            "--limit",
-            "100",
-        )
-    )
-    matches = [issue for issue in issues if marker in issue.get("body", "")]
-    if len(matches) > 1:
-        raise ControlError("multiple issues exist for one action key")
     summary = event.get("summary", f"Maintenance event {action_key} entered {event.get('state')}.")
     fingerprint_marker = f"<!-- maintenance-fingerprint:{decision['fingerprint']} -->"
     body = f"{marker}\n{fingerprint_marker}\n\n# PHP maintenance event\n\n{summary}\n"
@@ -92,7 +79,7 @@ def apply_github(repo: str, owner: str, event: dict, decision: dict) -> dict:
         f"{fingerprint_marker}\n\nState: `{event.get('state')}`\n\n{summary}\n\n"
         f"Transition fingerprint: `{decision['fingerprint']}`"
     )
-    issue = matches[0] if matches else None
+    issue = find_issue(repo, action_key)
     if decision["action"] in {"create", "create_and_close"}:
         if issue is not None:
             raise ControlError("notification state is missing but issue already exists")
@@ -155,5 +142,6 @@ try:
     write_json(args.output, updated)
     print(json.dumps({**decision, "issue": issue}))
 except (ControlError, OSError, subprocess.CalledProcessError) as error:
-    print(f"notification rejected: {error}", file=sys.stderr)
+    detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) and error.stderr else str(error)
+    print(f"notification rejected: {detail}", file=sys.stderr)
     raise SystemExit(1)

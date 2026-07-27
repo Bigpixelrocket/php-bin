@@ -43,6 +43,7 @@ jobs:
       - name: Reject unreviewed workflow bytes
         working-directory: control
         run: |
+          # This reviewed pin detects workflow edits that omit the corresponding pin update.
           expected="$(jq -r '.workflows[".github/workflows/maintenance-e2e.yml"]' .github/maintenance-pins.json)"
           actual="sha256:$(shasum -a 256 .github/workflows/maintenance-e2e.yml | awk '{print $1}')"
           test "$actual" = "$expected"
@@ -137,13 +138,15 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4
       - name: Verify exact and branch-shorthand public installs
+        env:
+          LIVE_VERSION: ${{ inputs.live_version }}
         run: |
-          [[ "${{ inputs.live_version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]
-          branch="${{ inputs.live_version }}"
+          [[ "$LIVE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]
+          branch="$LIVE_VERSION"
           branch="${branch%%-*}"
           branch="${branch%.*}"
           mise plugin link php "$GITHUB_WORKSPACE"
-          mise install "php@${{ inputs.live_version }}"
+          mise install "php@$LIVE_VERSION"
           mise install "php@$branch"
-          mise exec "php@${{ inputs.live_version }}" -- php -v
+          mise exec "php@$LIVE_VERSION" -- php -v
           mise exec "php@$branch" -- php -v

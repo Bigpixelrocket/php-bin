@@ -20,7 +20,10 @@ Required repository state:
 - Keep the default Actions token read-only while enabling automation PR
   creation. Runtime Codex jobs declare read scopes; only deterministic
   downstream jobs explicitly declare the write scopes they require.
-- Require every third-party Action reference to use a full commit SHA.
+- Do not allow the workflow token to approve pull requests.
+- Allow GitHub-owned Actions plus only `openai/codex-action` and
+  `jdx/mise-action`, and require every Action reference to use a full commit
+  SHA.
 - Create the protected `php-maintenance-release` environment, limited to
   protected branches.
 - Enable GitHub immutable releases so future published tags and assets cannot

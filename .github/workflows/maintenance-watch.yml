@@ -29,6 +29,8 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Capture fixed raw evidence
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           ./maintenance/control.py validate-policy
           ./scripts/capture-maintenance-evidence --output maintenance-run/evidence
@@ -46,9 +48,19 @@ jobs:
         run: |
           jq -n \
             --arg phpBinHead "$(git rev-parse HEAD)" \
+            --arg misePhpHead "$(jq -r .sha maintenance-run/evidence/raw/mise_php_state.body)" \
             --arg supportPolicyDigest "$(./maintenance/control.py digest support-policy.json)" \
-            '{phpBinHead:$phpBinHead,supportPolicyDigest:$supportPolicyDigest}' \
+            '{phpBinHead:$phpBinHead,misePhpHead:$misePhpHead,supportPolicyDigest:$supportPolicyDigest}' \
             > maintenance-run/preconditions.json
+          [[ "$(jq -r .misePhpHead maintenance-run/preconditions.json)" =~ ^[0-9a-f]{40}$ ]]
+          shopt -s nullglob
+          event_files=(maintenance-events/*.json)
+          if (( ${#event_files[@]} )); then
+            jq -s '[.[] | select(.state=="complete") | .actionKey] | sort | unique' \
+              "${event_files[@]}" > maintenance-run/completed-actions.json
+          else
+            printf '[]\n' > maintenance-run/completed-actions.json
+          fi
       - name: Prepare investigation contract
         if: steps.decision.outputs.trigger != 'quiet'
         run: |
@@ -95,7 +107,9 @@ jobs:
             --phase .github/codex/maintenance/investigation.md \
             --event-contract maintenance-run/event-contract.json \
             --php-bin-head "$(git rev-parse HEAD)" \
+            --mise-php-head "$(jq -r .misePhpHead maintenance-run/preconditions.json)" \
             --policy-digest "$(./maintenance/control.py digest support-policy.json)" \
+            --completed-actions maintenance-run/completed-actions.json \
             --output maintenance-run/admission.json
       - name: Expose admitted plan
         id: plan
@@ -241,10 +255,12 @@ jobs:
             action_key="${{ needs.investigate.outputs.action_key }}"
             filename="$(printf '%s' "$action_key" | tr ':/' '--').json"
             if ! gh api "repos/bigpixelrocket/mise-php/contents/readiness/$filename?ref=main" \
-              --jq .content | base64 --decode > maintenance-plan-download/mise-readiness.json; then
+              --jq .content > maintenance-plan-download/mise-readiness.b64; then
               echo "Waiting for exact mise-php EOL readiness for $filename."
               exit 0
             fi
+            base64 --decode < maintenance-plan-download/mise-readiness.b64 \
+              > maintenance-plan-download/mise-readiness.json
             event="maintenance-events/$filename"
             test -f "$event"
             test "$(jq -r .actionKey maintenance-plan-download/mise-readiness.json)" = "$action_key"

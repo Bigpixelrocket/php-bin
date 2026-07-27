@@ -54,6 +54,17 @@ def run(*args: str, cwd: pathlib.Path, check: bool = True) -> subprocess.Complet
     )
 
 
+def load_workflow(path: pathlib.Path) -> dict[str, Any]:
+    script = (
+        "document = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true); "
+        "STDOUT.write(JSON.generate(document))"
+    )
+    result = run("ruby", "-ryaml", "-rjson", "-e", script, str(path), cwd=PHP_ROOT)
+    document = json.loads(result.stdout)
+    assert_true(isinstance(document, dict), f"workflow is not an object: {path}")
+    return document
+
+
 def exact_head(repo: pathlib.Path) -> str:
     return run("git", "rev-parse", "HEAD", cwd=repo).stdout.strip()
 
@@ -194,6 +205,8 @@ def fixture_admission_inputs(directory: pathlib.Path, action: str = "new_patch")
         "allowedPaths": {"php-bin": ["expected-modules/*.txt"] if action != "new_patch" else []},
         "requiredChecks": ["Script checks"],
         "releaseIntent": release_intent,
+        "agentOperations": [],
+        "budgets": {"maxModelCalls": 1, "maxRetries": 1, "timeoutMinutes": 30},
         "notification": {"suggestedSeverity": "info", "summary": "fixture", "humanActionRequired": False},
         "risk": "routine" if action == "new_patch" else "lifecycle",
         "completionAssessment": assessment(contract, digests),
@@ -374,7 +387,11 @@ class Verifier:
         watch = (PHP_ROOT / ".github/workflows/maintenance-watch.yml").read_text()
         implementation = (PHP_ROOT / ".github/workflows/maintenance-implementation.yml").read_text()
         assert_true("sandbox: read-only" in watch and "--profile\",\"investigation" in watch, "investigation sandbox/profile missing")
-        assert_true("sandbox: workspace-write" in implementation and "--profile\",\"implementation" in implementation, "implementation sandbox/profile missing")
+        assert_true(
+            "sandbox: workspace-write" in implementation
+            and '--profile\",\"${{ inputs.phase }}' in implementation,
+            "phase-bound implementation/repair sandbox profile missing",
+        )
         assert_true('network_access = false' in (PHP_ROOT / ".codex/implementation.config.toml").read_text(), "implementation network is not disabled")
         assert_true('allowed_domains = ["php.net", "github.com", "docs.github.com"]' in (PHP_ROOT / ".codex/investigation.config.toml").read_text(), "investigation allowlist changed")
         (directory / "boundary.txt").write_text("investigation=allowlisted-web-only\nimplementation=offline\nshell-network=disabled-by-sandbox\n")
@@ -406,7 +423,13 @@ class Verifier:
                 "allowedPaths": {"php-bin": ["safe.txt"]},
             }
             result = assessment(contract, digests)
-            assert_reject(lambda repo=repo, base=base, plan=plan, result=result, contract=contract, index=index: seal_patch(repo, base, plan, result, contract, directory / f"sealed-{index}"))
+            expected = "unadmitted path" if path == "unadmitted.txt" else "protected path"
+            assert_reject(
+                lambda repo=repo, base=base, plan=plan, result=result, contract=contract, index=index: seal_patch(
+                    repo, base, plan, result, contract, directory / f"sealed-{index}"
+                ),
+                expected,
+            )
             rejected.append(path)
         (directory / "rejected.json").write_bytes(canonical_json(rejected))
         return ["rejected.json"]
@@ -491,9 +514,18 @@ class Verifier:
             pins["workflows"][".github/workflows/maintenance-e2e.yml"] == sha256_file(e2e),
             "reviewed production-parity workflow digest changed",
         )
-        watch = (PHP_ROOT / ".github/workflows/maintenance-watch.yml").read_text()
+        watch_path = PHP_ROOT / ".github/workflows/maintenance-watch.yml"
+        watch = watch_path.read_text()
         release = (PHP_ROOT / ".github/workflows/maintenance-release.yml").read_text()
-        assert_true("permissions:\n  contents: read" in watch, "runtime investigation has write permission")
+        watch_document = load_workflow(watch_path)
+        workflow_permissions = watch_document.get("permissions", {})
+        investigate = watch_document.get("jobs", {}).get("investigate", {})
+        investigate_permissions = investigate.get("permissions", workflow_permissions)
+        assert_true(
+            isinstance(investigate_permissions, dict)
+            and investigate_permissions.get("contents") == "read",
+            "runtime investigation does not have resolved read-only contents permission",
+        )
         assert_true("openai-api-key" not in release, "release job can read OpenAI credential")
         admin = PHP_ROOT / "docs/maintenance-admin-evidence.json"
         assert_true(admin.is_file(), "redacted administrator evidence is missing")
@@ -641,16 +673,15 @@ class Verifier:
             PHP_ROOT / "maintenance/protected-paths.json",
             self.mise_root / "support-snapshot.json",
         ]
-        instruction_paths = [
-            PHP_ROOT / ".github/codex/maintenance/shared.md",
-            PHP_ROOT / ".github/codex/maintenance/investigation.md",
-            PHP_ROOT / ".github/codex/maintenance/implementation.md",
-            PHP_ROOT / ".github/codex/maintenance/repair.md",
-            self.mise_root / ".github/codex/maintenance/shared.md",
-            self.mise_root / ".github/codex/maintenance/investigation.md",
-            self.mise_root / ".github/codex/maintenance/implementation.md",
-            self.mise_root / ".github/codex/maintenance/repair.md",
-        ]
+        instruction_roots = {"php-bin": PHP_ROOT, "mise-php": self.mise_root}
+        instruction_names = ("shared.md", "investigation.md", "implementation.md", "repair.md")
+        instruction_digests = {
+            f"{repo}/.github/codex/maintenance/{name}": sha256_file(
+                root / ".github/codex/maintenance" / name
+            )
+            for repo, root in instruction_roots.items()
+            for name in instruction_names
+        }
         report = {
             "schemaVersion": 1,
             "verifierVersion": "1.0.0",
@@ -658,7 +689,7 @@ class Verifier:
             "finishedAt": finished.isoformat(),
             "repositories": {"php-bin": self.php_sha, "mise-php": self.mise_sha},
             "actionPins": pins,
-            "instructionDigests": {str(path.relative_to(path.parents[3] if ".github" in path.parts else path.parent)): sha256_file(path) for path in instruction_paths},
+            "instructionDigests": instruction_digests,
             "configurationDigests": {path.name: sha256_file(path) for path in configuration_paths},
             "tests": self.results,
             "result": "passed" if all(item["result"] == "passed" for item in self.results) else "failed",

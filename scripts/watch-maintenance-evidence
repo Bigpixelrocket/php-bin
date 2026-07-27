@@ -21,19 +21,27 @@ args = parser.parse_args()
 try:
     manifest = load_json(args.manifest)
     previous = load_json(args.previous) if args.previous.exists() else {}
-    health = load_json(args.health) if args.health and args.health.exists() else {"healthy": True}
+    if args.health:
+        if not args.health.is_file():
+            raise ControlError(f"supplied health input is missing: {args.health}")
+        health = load_json(args.health)
+    else:
+        health = {"healthy": True}
+    if not args.events.is_dir():
+        raise ControlError(f"supplied events directory is missing or invalid: {args.events}")
     events = []
-    if args.events.exists():
-        for path in args.events.glob("*.json"):
-            events.append(load_json(path))
+    for path in sorted(args.events.glob("*.json")):
+        events.append(load_json(path))
     if not previous.get("manifestDigest"):
-        matching = [
+        matching = sorted({
             event.get("evidenceManifestDigest")
             for event in events
             if event.get("evidenceManifestDigest")
-        ]
+        })
+        if len(matching) > 1:
+            raise ControlError("previous evidence state is missing and event reconstruction is ambiguous")
         if matching:
-            previous["manifestDigest"] = matching[-1]
+            previous["manifestDigest"] = matching[0]
     decision = watch_decision(manifest, previous, events, health)
     write_json(args.output, decision)
     print(json.dumps(decision))

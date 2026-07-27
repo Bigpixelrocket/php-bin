@@ -4,6 +4,7 @@
 import argparse
 import json
 import pathlib
+import subprocess
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -29,6 +30,7 @@ try:
         args.output,
     )
     print(json.dumps(manifest))
-except (ControlError, OSError) as error:
-    print(f"patch sealing rejected: {error}", file=sys.stderr)
+except (ControlError, OSError, subprocess.CalledProcessError) as error:
+    detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) and error.stderr else str(error)
+    print(f"patch sealing rejected: {detail}", file=sys.stderr)
     raise SystemExit(1)

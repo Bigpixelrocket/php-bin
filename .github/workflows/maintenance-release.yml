@@ -57,13 +57,18 @@ jobs:
       - name: Verify stable version and exact commit
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          EXACT_COMMIT: ${{ inputs.exact_commit }}
+          ACTION_KEY: ${{ inputs.action_key }}
         run: |
           ./maintenance/control.py validate-policy
-          [[ "${{ inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]
-          test "$(git rev-parse HEAD)" = "${{ inputs.exact_commit }}"
-          test "$(jq -r .actionKey admitted-run/maintenance-plan.json)" = "${{ inputs.action_key }}"
-          test "$(jq -r .releaseIntent.version admitted-run/maintenance-plan.json)" = "${{ inputs.version }}"
-          test "$(jq -r .preconditions.phpBinHead admitted-run/maintenance-plan.json)" = "${{ inputs.exact_commit }}"
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]
+          [[ "$EXACT_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$ACTION_KEY" =~ ^[A-Za-z0-9._:-]+$ ]]
+          test "$(git rev-parse HEAD)" = "$EXACT_COMMIT"
+          test "$(jq -r .actionKey admitted-run/maintenance-plan.json)" = "$ACTION_KEY"
+          test "$(jq -r .releaseIntent.version admitted-run/maintenance-plan.json)" = "$VERSION"
+          test "$(jq -r .preconditions.phpBinHead admitted-run/maintenance-plan.json)" = "$EXACT_COMMIT"
           test "$(jq -r .preconditions.supportPolicyDigest admitted-run/maintenance-plan.json)" = "$(./maintenance/control.py digest support-policy.json)"
           test "$(jq -r .unattendedMutation .github/maintenance-operator.json)" = "enabled"
           mkdir -p release-run
@@ -76,6 +81,8 @@ jobs:
           git -C mise-php checkout --detach "$mise_commit"
           test "$(git -C mise-php rev-parse HEAD)" = "$mise_commit"
       - name: Re-capture authoritative evidence
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           ./scripts/capture-maintenance-evidence --output release-run/evidence
           while IFS= read -r encoded; do
@@ -99,7 +106,7 @@ jobs:
             test "$(jq -r .actionKey release-run/mise-readiness.json)" = "${{ inputs.action_key }}"
             test "$(jq -r .ready release-run/mise-readiness.json)" = "true"
             test "$(jq -r .policyDigest release-run/mise-readiness.json)" = "$(jq -r .supportPolicyDigest "$event")"
-            test "$(jq -r .policyInvariantsDigest release-run/mise-readiness.json)" = "$(jq -r .policyInvariantsDigest support-policy.json)"
+            test "$(jq -r .policyInvariantsDigest release-run/mise-readiness.json)" = "$(jq -r .policyInvariantsDigest "$event")"
             policy_commit="$(jq -r .phpBinPolicyCommit release-run/mise-readiness.json)"
             test "$(jq -r .misePhpCommit release-run/mise-readiness.json)" = "$(git -C mise-php rev-parse HEAD)"
             gh api "repos/${{ github.repository }}/contents/support-policy.json?ref=$policy_commit" \
@@ -199,7 +206,15 @@ jobs:
           ./scripts/serve-maintenance-artifact --port "$port" --assets "$temporary" --version "${{ inputs.version }}" &
           server_pid="$!"
           trap 'kill "$server_pid" 2>/dev/null || true' EXIT
-          for _ in {1..50}; do curl --silent --fail "http://127.0.0.1:$port/health" && break; sleep 0.1; done
+          ready=false
+          for _ in {1..50}; do
+            if curl --silent --fail "http://127.0.0.1:$port/health"; then
+              ready=true
+              break
+            fi
+            sleep 0.1
+          done
+          "$ready" || { echo "staged artifact server did not become healthy" >&2; exit 1; }
           export MISE_PHP_API_BASE_URL="http://127.0.0.1:$port"
           export MISE_DATA_DIR="$temporary/mise/data"
           export MISE_CACHE_DIR="$temporary/mise/cache"

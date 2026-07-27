@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -40,16 +41,24 @@ ACTION_KEY_RE = re.compile(
 STABLE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[1-9]\d*)?$")
 PROTECTED_PATTERNS = (
     ".github/codex/maintenance/*",
+    ".github/maintenance-operator.json",
+    ".github/maintenance-pins.json",
     ".github/workflows/*",
     ".codex/*",
-    "schemas/agent-*",
-    "maintenance/control.py",
-    "maintenance/protected-paths.json",
+    "schemas/*",
+    "maintenance/*",
     "scripts/admit-maintenance-plan",
+    "scripts/capture-maintenance-evidence",
+    "scripts/configure-github-maintenance",
+    "scripts/maintenance-event",
+    "scripts/notify-maintenance",
+    "scripts/prepare-agent-task",
     "scripts/seal-maintenance-patch",
+    "scripts/snapshot-github-admin-state",
+    "scripts/validate-maintenance-archive",
     "scripts/verify-merge-admission",
     "scripts/release-maintenance",
-    "maintenance/policy-invariants.json",
+    "scripts/watch-maintenance-evidence",
     "maintenance-events/*",
     "maintenance-state/*",
     ".github/CODEOWNERS",
@@ -135,6 +144,16 @@ def require(condition: bool, message: str) -> None:
         raise ControlError(message)
 
 
+def contained_path(root: pathlib.Path, value: Any, label: str) -> pathlib.Path:
+    require(isinstance(value, str) and bool(value), f"{label} is missing")
+    relative = pathlib.PurePosixPath(value)
+    require(not relative.is_absolute() and ".." not in relative.parts, f"unsafe {label}: {value}")
+    resolved_root = root.resolve()
+    resolved = (resolved_root / pathlib.Path(*relative.parts)).resolve()
+    require(resolved.is_relative_to(resolved_root), f"unsafe {label}: {value}")
+    return resolved
+
+
 def instruction_digest(path: pathlib.Path) -> str:
     require(path.is_file(), f"instruction file does not exist: {path}")
     return sha256_file(path)
@@ -162,11 +181,16 @@ def validate_task_contract(contract: dict[str, Any]) -> None:
         "allowedAuthority must be an array",
     )
     require(
+        all(isinstance(item, str) for item in contract["allowedAuthority"]),
+        "allowedAuthority must contain only strings",
+    )
+    require(
         not (set(contract["allowedAuthority"]) & PROHIBITED_AGENT_AUTHORITY),
         "agent contract grants prohibited irreversible authority",
     )
     criteria = contract["completionCriteria"]
     require(isinstance(criteria, list) and criteria, "completion criteria are empty")
+    require(all(isinstance(item, dict) for item in criteria), "completion criteria must be objects")
     ids = [criterion.get("id") for criterion in criteria]
     require(all(isinstance(item, str) and item for item in ids), "criterion id is missing")
     require(len(ids) == len(set(ids)), "criterion ids are not unique")
@@ -243,11 +267,13 @@ def resolve_json_pointer(document: Any, pointer: str) -> Any:
 
 def load_capture(manifest_path: pathlib.Path, capture_id: str) -> tuple[dict[str, Any], bytes]:
     manifest = load_json(manifest_path)
+    require(isinstance(manifest, dict), "capture manifest must be an object")
     captures = manifest.get("captures", [])
-    matches = [item for item in captures if item.get("captureId") == capture_id]
+    require(isinstance(captures, list), "capture manifest captures must be an array")
+    matches = [item for item in captures if isinstance(item, dict) and item.get("captureId") == capture_id]
     require(len(matches) == 1, f"capture {capture_id} does not resolve exactly once")
     capture = matches[0]
-    body_path = manifest_path.parent / capture["bodyPath"]
+    body_path = contained_path(manifest_path.parent, capture.get("bodyPath"), "capture body path")
     require(body_path.is_file(), f"capture body is missing: {body_path}")
     body = body_path.read_bytes()
     require(sha256_bytes(body) == capture.get("digest"), f"capture digest mismatch: {capture_id}")
@@ -264,11 +290,56 @@ def path_is_allowed(path: str, patterns: Iterable[str]) -> bool:
     return any(fnmatch.fnmatch(normalized, pattern) for pattern in patterns)
 
 
+def _validate_support_policy_document(
+    policy: Any,
+    invariants_path: pathlib.Path,
+) -> tuple[list[str], list[str]]:
+    require(isinstance(policy, dict), "support policy must be an object")
+    require(
+        set(policy)
+        == {
+            "schemaVersion",
+            "policyInvariantsDigest",
+            "maintainedBranches",
+            "sourceEvidenceDigests",
+            "actionKey",
+            "acceptedAt",
+        },
+        "support policy contains unknown or missing fields",
+    )
+    require(policy.get("schemaVersion") == 1, "unsupported support policy version")
+    require(
+        policy.get("policyInvariantsDigest") == sha256_file(invariants_path),
+        "support policy is not bound to reviewed invariants",
+    )
+    branches = policy.get("maintainedBranches")
+    require(
+        isinstance(branches, list)
+        and all(isinstance(value, str) and re.fullmatch(r"\d+\.\d+", value) for value in branches)
+        and branches == sorted(set(branches), key=lambda value: tuple(map(int, value.split(".")))),
+        "support policy branches are invalid or non-canonical",
+    )
+    evidence = policy.get("sourceEvidenceDigests")
+    require(
+        isinstance(evidence, list)
+        and all(isinstance(value, str) and SHA256_RE.fullmatch(value) for value in evidence)
+        and evidence == sorted(set(evidence)),
+        "support policy contains invalid or non-canonical evidence digests",
+    )
+    try:
+        accepted_at = dt.datetime.strptime(policy.get("acceptedAt", ""), "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        accepted_at = None
+    require(accepted_at is not None, "support policy acceptance time is invalid")
+    return branches, evidence
+
+
 def validate_support_policy(root: pathlib.Path = ROOT) -> dict[str, Any]:
     invariants_path = root / "maintenance/policy-invariants.json"
     policy_path = root / "support-policy.json"
     invariants = load_json(invariants_path)
     policy = load_json(policy_path)
+    require(isinstance(invariants, dict), "policy invariants must be an object")
     require(
         set(invariants)
         == {
@@ -292,37 +363,7 @@ def validate_support_policy(root: pathlib.Path = ROOT) -> dict[str, Any]:
         "historical exact installs must remain enabled",
     )
     require(invariants.get("immutablePublishedAssets") is True, "published assets must remain immutable")
-    require(
-        set(policy)
-        == {
-            "schemaVersion",
-            "policyInvariantsDigest",
-            "maintainedBranches",
-            "sourceEvidenceDigests",
-            "actionKey",
-            "acceptedAt",
-        },
-        "support policy contains unknown or missing fields",
-    )
-    require(policy.get("schemaVersion") == 1, "unsupported support policy version")
-    require(
-        policy.get("policyInvariantsDigest") == sha256_file(invariants_path),
-        "support policy is not bound to reviewed invariants",
-    )
-    branches = policy.get("maintainedBranches")
-    require(
-        isinstance(branches, list)
-        and all(re.fullmatch(r"\d+\.\d+", value) for value in branches)
-        and branches == sorted(set(branches), key=lambda value: tuple(map(int, value.split(".")))),
-        "support policy branches are invalid or non-canonical",
-    )
-    evidence = policy.get("sourceEvidenceDigests")
-    require(
-        isinstance(evidence, list)
-        and all(SHA256_RE.fullmatch(value) for value in evidence)
-        and evidence == sorted(set(evidence)),
-        "support policy contains invalid or non-canonical evidence digests",
-    )
+    _branches, evidence = _validate_support_policy_document(policy, invariants_path)
     action_key = policy.get("actionKey")
     require(
         action_key == "bootstrap"
@@ -330,11 +371,6 @@ def validate_support_policy(root: pathlib.Path = ROOT) -> dict[str, Any]:
         "invalid support policy action key",
     )
     require(action_key == "bootstrap" or bool(evidence), "accepted support policy lacks evidence")
-    try:
-        accepted_at = dt.datetime.strptime(policy.get("acceptedAt", ""), "%Y-%m-%dT%H:%M:%SZ")
-    except (TypeError, ValueError):
-        accepted_at = None
-    require(accepted_at is not None, "support policy acceptance time is invalid")
     return {
         "valid": True,
         "policyDigest": sha256_file(policy_path),
@@ -415,6 +451,7 @@ def validate_plan(
             "only an internally complete agent plan can advance",
         )
     declared_heads = plan.get("preconditions", {})
+    require(isinstance(declared_heads, dict), "preconditions must be an object")
     if repo_heads:
         for key, value in repo_heads.items():
             require(declared_heads.get(key) == value, f"stale repository precondition: {key}")
@@ -440,10 +477,16 @@ def validate_plan(
         else:
             raise ControlError("unsupported evidence locator")
         evidence_refs[f"evidence[{index}]"] = evidence
+    research_sources = plan.get("researchSources", [])
+    require(isinstance(research_sources, list), "researchSources must be an array")
+    precondition_refs = {f"preconditions.{key}" for key in declared_heads}
+    source_refs = {f"researchSources[{index}]" for index in range(len(research_sources))}
     for result in plan["completionAssessment"]["criteria"]:
         for reference in result["evidence"]:
             require(
-                reference in evidence_refs or reference.startswith(("preconditions.", "researchSources[")),
+                reference in evidence_refs
+                or reference in precondition_refs
+                or reference in source_refs,
                 f"criterion evidence reference does not resolve: {reference}",
             )
     allowed_paths = plan.get("allowedPaths", {})
@@ -469,20 +512,29 @@ def validate_plan(
     )
     require(plan.get("requiredChecks") == ["Script checks"], "required deterministic checks changed")
     release_intent = plan.get("releaseIntent")
-    if release_intent:
+    if release_intent is not None:
+        require(isinstance(release_intent, dict), "releaseIntent must be an object or null")
         version = release_intent.get("version", "")
         require(bool(STABLE_VERSION_RE.fullmatch(version)), "release version is not stable")
         require(
             not re.search(r"(?:alpha|beta|rc|dev)", version, re.I),
             "prerelease intent is forbidden",
         )
-    for operation in plan.get("agentOperations", []):
+    operations = plan.get("agentOperations")
+    require(isinstance(operations, list), "agentOperations must be an array")
+    require(all(isinstance(operation, str) for operation in operations), "agentOperations must contain strings")
+    for operation in operations:
         require(operation not in PROHIBITED_AGENT_AUTHORITY, f"prohibited agent operation: {operation}")
-    budgets = plan.get("budgets", {})
-    if budgets:
-        require(0 < int(budgets.get("maxModelCalls", 0)) <= 5, "model-call budget is outside reviewed bound")
-        require(0 < int(budgets.get("maxRetries", 0)) <= 3, "retry budget is outside reviewed bound")
-        require(0 < int(budgets.get("timeoutMinutes", 0)) <= 60, "time budget is outside reviewed bound")
+    budgets = plan.get("budgets")
+    require(isinstance(budgets, dict) and bool(budgets), "plan must declare reviewed budgets")
+    for field, upper, label in (
+        ("maxModelCalls", 5, "model-call"),
+        ("maxRetries", 3, "retry"),
+        ("timeoutMinutes", 60, "time"),
+    ):
+        value = budgets.get(field)
+        require(isinstance(value, int) and not isinstance(value, bool), f"{field} must be an integer")
+        require(0 < value <= upper, f"{label} budget is outside reviewed bound")
     return {
         "admitted": True,
         "admittedAt": utc_now(),
@@ -521,6 +573,7 @@ def seal_patch(
     expected_digests = plan["agentContract"]["instructionDigests"]
     validate_completion_assessment(result, contract, expected_digests)
     require(result["goNoGo"] == "go", "implementation result is no-go")
+    require(bool(re.fullmatch(r"[0-9a-f]{40}", base or "")), "base is not an exact commit SHA")
     require(git(repo, "rev-parse", f"{base}^{{commit}}").stdout.strip() == base, "base is not an exact commit")
     paths = changed_paths(repo, base)
     require(bool(paths), "implementation produced no patch")
@@ -542,57 +595,36 @@ def seal_patch(
             require(mode != 0o755 or path.startswith("scripts/"), f"unexpected executable path: {path}")
             body = candidate.read_bytes()
             require(b"\0" not in body, f"patch contains binary file: {path}")
-            decoded = body.decode("utf-8")
+            try:
+                decoded = body.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise ControlError(f"patch file is not valid UTF-8: {path}") from error
             for pattern in SECRET_PATTERNS:
                 require(not pattern.search(decoded), f"patch contains secret-like material: {path}")
             if path == "support-policy.json":
-                policy = json.loads(decoded)
-                require(
-                    set(policy)
-                    == {
-                        "schemaVersion",
-                        "policyInvariantsDigest",
-                        "maintainedBranches",
-                        "sourceEvidenceDigests",
-                        "actionKey",
-                        "acceptedAt",
-                    },
-                    "support policy contains unknown or missing fields",
-                )
-                require(policy.get("schemaVersion") == 1, "unsupported support policy version")
-                require(
-                    policy.get("policyInvariantsDigest")
-                    == sha256_file(repo / "maintenance/policy-invariants.json"),
-                    "support policy is not bound to reviewed invariants",
-                )
-                branches = policy.get("maintainedBranches")
-                require(
-                    isinstance(branches, list)
-                    and all(re.fullmatch(r"\d+\.\d+", value) for value in branches)
-                    and branches
-                    == sorted(set(branches), key=lambda value: tuple(map(int, value.split(".")))),
-                    "support policy branches are invalid or non-canonical",
+                try:
+                    policy = json.loads(decoded)
+                except json.JSONDecodeError as error:
+                    raise ControlError("support policy is not valid JSON") from error
+                _branches, policy_evidence = _validate_support_policy_document(
+                    policy,
+                    repo / "maintenance/policy-invariants.json",
                 )
                 evidence_digests = sorted(
                     {item.get("digest") for item in plan.get("evidence", []) if item.get("digest")}
                 )
                 require(
-                    policy.get("sourceEvidenceDigests") == evidence_digests and bool(evidence_digests),
+                    policy_evidence == evidence_digests and bool(evidence_digests),
                     "support policy is not bound to admitted captured evidence",
                 )
                 require(policy.get("actionKey") == plan.get("actionKey"), "support policy action key changed")
-                try:
-                    accepted_at = dt.datetime.strptime(policy.get("acceptedAt", ""), "%Y-%m-%dT%H:%M:%SZ")
-                except (TypeError, ValueError):
-                    accepted_at = None
-                require(accepted_at is not None, "support policy acceptance time is invalid")
     output_dir.mkdir(parents=True, exist_ok=True)
     patch_path = output_dir / "sealed.patch"
     tracked_patch = git(repo, "diff", "--binary", "--full-index", base, "--").stdout
     untracked_patch_parts = []
     for path in git(repo, "ls-files", "--others", "--exclude-standard").stdout.splitlines():
         proc = subprocess.run(
-            ["git", "diff", "--binary", "--no-index", "/dev/null", path],
+            ["git", "diff", "--binary", "--no-index", "--", "/dev/null", path],
             cwd=repo,
             check=False,
             text=True,
@@ -635,6 +667,7 @@ def verify_merge(
     current: dict[str, str],
     readiness: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    require(bool(re.fullmatch(r"[0-9a-f]{40}", expected_head or "")), "expected head is not an exact commit SHA")
     actual_head = git(repo, "rev-parse", "HEAD").stdout.strip()
     require(actual_head == expected_head, "PR head does not equal validated SHA")
     require(checks and all(value == "success" for value in checks.values()), "required checks did not succeed")
@@ -795,13 +828,17 @@ def mutation_allowed(operator_state: dict[str, Any]) -> bool:
 
 def audit_reconstruction(event: dict[str, Any], root: pathlib.Path) -> dict[str, Any]:
     required = event.get("auditEvidence", [])
-    require(bool(required), "event has no audit evidence")
+    require(isinstance(required, list) and bool(required), "event has no audit evidence")
     verified = []
     for item in required:
-        path = root / item["path"]
-        require(path.is_file(), f"audit evidence is unavailable: {item['path']}")
-        require(sha256_file(path) == item["digest"], f"audit evidence digest mismatch: {item['path']}")
-        verified.append(item["path"])
+        require(isinstance(item, dict), "audit evidence entry must be an object")
+        item_path = item.get("path")
+        item_digest = item.get("digest")
+        require(isinstance(item_digest, str) and SHA256_RE.fullmatch(item_digest), "audit evidence digest is missing")
+        path = contained_path(root, item_path, "audit evidence path")
+        require(path.is_file(), f"audit evidence is unavailable: {item_path}")
+        require(sha256_file(path) == item_digest, f"audit evidence digest mismatch: {item_path}")
+        verified.append(item_path)
     require(bool(event.get("actionKey")), "audit event has no action key")
     require(bool(event.get("history")), "audit event has no transition history")
     return {"reconstructed": True, "actionKey": event["actionKey"], "evidence": verified}
@@ -834,20 +871,29 @@ EVIDENCE_SOURCES = (
 )
 
 
-def capture_evidence(output_dir: pathlib.Path, sources: Iterable[EvidenceSource] = EVIDENCE_SOURCES) -> dict[str, Any]:
+def capture_evidence(
+    output_dir: pathlib.Path,
+    sources: Iterable[EvidenceSource] = EVIDENCE_SOURCES,
+    token: str | None = None,
+) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     opener = urllib.request.build_opener(RestrictedRedirect)
     captures = []
     for source in sources:
+        headers = {
+            "Accept": "application/vnd.github+json, application/json, text/html",
+            "User-Agent": "bigpixelrocket-maintenance/1",
+        }
+        if token and urllib.parse.urlparse(source.url).hostname == "api.github.com":
+            headers["Authorization"] = f"Bearer {token}"
         request = urllib.request.Request(
             source.url,
-            headers={
-                "Accept": "application/vnd.github+json, application/json, text/html",
-                "User-Agent": "bigpixelrocket-maintenance/1",
-            },
+            headers=headers,
         )
         last_error: Exception | None = None
-        for _attempt in range(3):
+        for attempt in range(3):
+            if attempt:
+                time.sleep(2**attempt)
             try:
                 with opener.open(request, timeout=30) as response:
                     body = response.read(source.max_bytes + 1)
@@ -871,7 +917,14 @@ def capture_evidence(output_dir: pathlib.Path, sources: Iterable[EvidenceSource]
                     )
                     last_error = None
                     break
-            except (OSError, urllib.error.URLError, ControlError) as error:
+            except ControlError as error:
+                last_error = error
+                break
+            except urllib.error.HTTPError as error:
+                last_error = error
+                if error.code not in {408, 429} and not 500 <= error.code < 600:
+                    break
+            except (OSError, urllib.error.URLError) as error:
                 last_error = error
         if last_error is not None:
             body_path = pathlib.Path("raw") / f"{source.capture_id}.body"
@@ -911,15 +964,29 @@ def capture_evidence(output_dir: pathlib.Path, sources: Iterable[EvidenceSource]
     return manifest
 
 
+def _archive_member_name(name: str) -> str:
+    return name[2:] if name.startswith("./") else name
+
+
 def validate_archive(archive: pathlib.Path, version: str) -> None:
     require(archive.name == f"php-{version}-cli-macos-aarch64.tar.gz", "unexpected archive name")
-    with tarfile.open(archive, "r:gz") as handle:
-        names = {member.name.lstrip("./") for member in handle.getmembers()}
-        require("bin/php" in names, "archive does not contain bin/php")
-        for member in handle.getmembers():
-            normalized = pathlib.PurePosixPath(member.name.lstrip("./"))
-            require(".." not in normalized.parts and not normalized.is_absolute(), "unsafe archive path")
-            require(not member.issym() and not member.islnk(), "archive contains a link")
+    try:
+        with tarfile.open(archive, "r:gz") as handle:
+            members = handle.getmembers()
+    except tarfile.TarError as error:
+        raise ControlError(f"cannot read archive {archive}: {error}") from error
+    names = set()
+    for member in members:
+        normalized = pathlib.PurePosixPath(_archive_member_name(member.name))
+        require(
+            ".." not in normalized.parts
+            and not normalized.is_absolute()
+            and not member.name.startswith("/"),
+            f"unsafe archive path: {member.name}",
+        )
+        require(not member.issym() and not member.islnk(), "archive contains a link")
+        names.add(normalized.as_posix())
+    require("bin/php" in names, "archive does not contain bin/php")
 
 
 def cli_error(error: Exception) -> int:
@@ -963,7 +1030,7 @@ def main(argv: list[str] | None = None) -> int:
             validate_completion_assessment(assessment, contract, assessment.get("instructionDigests"))
             print(json.dumps({"valid": True}))
         elif args.command == "capture-evidence":
-            print(json.dumps(capture_evidence(args.output)))
+            print(json.dumps(capture_evidence(args.output, token=os.environ.get("GITHUB_TOKEN"))))
         elif args.command == "transition-event":
             updated = transition_event(load_json(args.event), args.target, load_json(args.evidence))
             write_json(args.output, updated)
