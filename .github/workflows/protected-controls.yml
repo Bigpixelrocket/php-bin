@@ -1,0 +1,76 @@
+name: Protected controls
+
+on:
+  pull_request_target:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  protected-controls:
+    name: Protected controls
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Require exact-head owner approval for protected paths
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PROTECTED_REVIEWER: ${{ vars.MAINTENANCE_OWNER }}
+        run: |
+          python3 - <<'PY'
+          import fnmatch
+          import json
+          import os
+          import pathlib
+          import subprocess
+          import sys
+
+          def api(path):
+              result = subprocess.run(
+                  ["gh", "api", path, "--paginate", "--slurp"],
+                  check=True,
+                  text=True,
+                  stdout=subprocess.PIPE,
+              )
+              pages = json.loads(result.stdout)
+              if not isinstance(pages, list):
+                  raise RuntimeError("GitHub API returned an invalid paginated response")
+              return [item for page in pages for item in page]
+
+          repo = os.environ["REPOSITORY"]
+          number = os.environ["PR_NUMBER"]
+          head = os.environ["HEAD_SHA"]
+          reviewer = os.environ["PROTECTED_REVIEWER"].lower()
+          manifest = json.loads(pathlib.Path("maintenance/protected-paths.json").read_text())
+          patterns = manifest["patterns"]
+          files = api(f"repos/{repo}/pulls/{number}/files")
+          protected = sorted(
+              item["filename"]
+              for item in files
+              if any(fnmatch.fnmatchcase(item["filename"], pattern) for pattern in patterns)
+          )
+          if not protected:
+              print("No protected control path changed.")
+              raise SystemExit(0)
+
+          reviews = api(f"repos/{repo}/pulls/{number}/reviews")
+          approved = any(
+              review.get("state") == "APPROVED"
+              and review.get("commit_id") == head
+              and review.get("user", {}).get("login", "").lower() == reviewer
+              for review in reviews
+          )
+          if not approved:
+              print("Protected controls require exact-head approval from the configured owner.", file=sys.stderr)
+              print("\n".join(protected), file=sys.stderr)
+              raise SystemExit(1)
+          print(f"Protected controls approved at {head} by {reviewer}.")
+          PY

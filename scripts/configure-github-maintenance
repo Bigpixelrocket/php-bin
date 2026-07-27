@@ -34,7 +34,7 @@ def ensure_label(repo: str, name: str, color: str, description: str) -> None:
         text=True,
         stdout=subprocess.PIPE,
     )
-    names = {item["name"] for item in json.loads(existing.stdout)}
+    names = {item["name"] for item in json.loads(existing.stdout or "[]")}
     if name in names:
         gh("label", "edit", name, "--repo", repo, "--color", color, "--description", description)
     else:
@@ -65,8 +65,10 @@ try:
         "allow_rebase_merge=false",
         "-F",
         "allow_update_branch=true",
-        "-F",
-        "use_squash_pr_title_as_default=true",
+        "-f",
+        "squash_merge_commit_title=PR_TITLE",
+        "-f",
+        "squash_merge_commit_message=PR_BODY",
     )
     gh(
         "api",
@@ -118,7 +120,10 @@ try:
     protection = {
         "required_status_checks": {
             "strict": True,
-            "checks": [{"context": args.required_check, "app_id": 15368}],
+            "checks": [
+                {"context": args.required_check, "app_id": 15368},
+                {"context": "Protected controls", "app_id": 15368},
+            ],
         },
         "enforce_admins": True,
         "required_pull_request_reviews": {
