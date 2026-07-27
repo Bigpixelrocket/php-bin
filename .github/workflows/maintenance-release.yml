@@ -219,6 +219,17 @@ jobs:
               --output release-run/next.json
             mv release-run/next.json release-run/transaction.json
           done
+          test "$(gh release view "${{ inputs.version }}" --repo "${{ github.repository }}" --json isImmutable --jq .isImmutable)" = "true"
+          verified=false
+          for _ in {1..12}; do
+            if gh release verify "${{ inputs.version }}" --repo "${{ github.repository }}" --format json \
+              > release-run/release-attestation.json; then
+              verified=true
+              break
+            fi
+            sleep 5
+          done
+          test "$verified" = "true"
       - name: Verify fresh public exact-version and branch-shorthand installs
         run: |
           unset MISE_PHP_API_BASE_URL
