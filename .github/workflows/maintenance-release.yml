@@ -55,6 +55,8 @@ jobs:
             --name "maintenance-investigation-${{ inputs.investigation_run_id }}" \
             --dir admitted-run
       - name: Verify stable version and exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           ./maintenance/control.py validate-policy
           [[ "${{ inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]
@@ -64,6 +66,10 @@ jobs:
           test "$(jq -r .preconditions.phpBinHead admitted-run/maintenance-plan.json)" = "${{ inputs.exact_commit }}"
           test "$(jq -r .preconditions.supportPolicyDigest admitted-run/maintenance-plan.json)" = "$(./maintenance/control.py digest support-policy.json)"
           test "$(jq -r .unattendedMutation .github/maintenance-operator.json)" = "enabled"
+          mkdir -p release-run
+          gh api "repos/${{ github.repository }}/contents/.github/maintenance-operator.json?ref=main" \
+            --jq .content | base64 --decode > release-run/current-operator.json
+          test "$(jq -r .unattendedMutation release-run/current-operator.json)" = "enabled"
           mise_commit="$(jq -r .sha admitted-run/evidence/raw/mise_php_state.body)"
           [[ "$mise_commit" =~ ^[0-9a-f]{40}$ ]]
           git -C mise-php fetch origin "$mise_commit"
@@ -168,6 +174,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          gh api "repos/${{ github.repository }}/contents/.github/maintenance-operator.json?ref=main" \
+            --jq .content | base64 --decode > release-run/current-operator.json
+          test "$(jq -r .unattendedMutation release-run/current-operator.json)" = "enabled"
           for target in built draft_created draft_verified; do
             ./scripts/release-maintenance \
               --transaction release-run/transaction.json \
@@ -207,6 +216,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          gh api "repos/${{ github.repository }}/contents/.github/maintenance-operator.json?ref=main" \
+            --jq .content | base64 --decode > release-run/current-operator.json
+          test "$(jq -r .unattendedMutation release-run/current-operator.json)" = "enabled"
           for target in published public_verified complete; do
             ./scripts/release-maintenance \
               --transaction release-run/transaction.json \

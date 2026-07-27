@@ -144,6 +144,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          if [[ "$(jq -r .unattendedMutation .github/maintenance-operator.json)" != "enabled" ]]; then
+            echo "Unattended mutation is paused; retained investigation remains read-only."
+            exit 0
+          fi
           action="${{ needs.investigate.outputs.action }}"
           if [[ "$action" == "blocked" || "$action" == "needs_human" ]]; then
             jq -n \

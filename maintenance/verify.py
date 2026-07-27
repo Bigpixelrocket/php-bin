@@ -551,6 +551,21 @@ class Verifier:
     def a18(self, directory: pathlib.Path) -> list[str]:
         assert_true(not mutation_allowed({"unattendedMutation": "paused"}), "paused control allowed mutation")
         assert_true(mutation_allowed({"unattendedMutation": "enabled"}), "enabled control blocked mutation")
+        watch_workflow = (PHP_ROOT / ".github/workflows/maintenance-watch.yml").read_text()
+        release_workflow = (PHP_ROOT / ".github/workflows/maintenance-release.yml").read_text()
+        mise_workflow = (self.mise_root / ".github/workflows/maintenance-consumer.yml").read_text()
+        assert_true(
+            "Unattended mutation is paused" in watch_workflow,
+            "watcher pause does not stop downstream mutation",
+        )
+        assert_true(
+            release_workflow.count("current-operator.json") >= 3,
+            "release effects are not guarded by the live operator state",
+        )
+        assert_true(
+            "phpBinOperatorCommit" in mise_workflow and "operatorState" in mise_workflow,
+            "mise synchronization is not bound to the php-bin operator control",
+        )
         event = {"actionKey": "new_patch:8.5.9", "state": "release_requested", "history": []}
         resumed = transition_event(event, "released", [{"digest": "sha256:" + "a" * 64}])
         assert_true(resumed["state"] == "released", "resume did not take next legal transition")

@@ -69,6 +69,7 @@ try:
         "actionsPermissions": gh_api(f"repos/{args.repo}/actions/permissions"),
         "workflowPermissions": gh_api(f"repos/{args.repo}/actions/permissions/workflow"),
         "immutableReleases": gh_api(f"repos/{args.repo}/immutable-releases"),
+        "authenticatedUserSubscription": gh_api(f"repos/{args.repo}/subscription"),
         "branchProtection": gh_api(
             f"repos/{args.repo}/branches/{default_branch}/protection", allow_missing=True
         ),
@@ -82,6 +83,7 @@ try:
             item["name"]
             for item in (gh_api(f"repos/{args.repo}/actions/secrets") or {}).get("secrets", [])
         ),
+        "labels": sorted(item["name"] for item in (gh_api(f"repos/{args.repo}/labels") or [])),
     }
     snapshot["snapshotDigest"] = digest(snapshot)
     args.output.parent.mkdir(parents=True, exist_ok=True)
