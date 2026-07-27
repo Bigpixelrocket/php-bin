@@ -63,6 +63,8 @@ jobs:
           path: mise-php
           fetch-depth: 0
           persist-credentials: false
+      - name: Install pinned mise
+        uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4
       - name: Probe production credential boundaries
         run: |
           test -z "${OPENAI_API_KEY:-}"
@@ -76,6 +78,7 @@ jobs:
             --mise-php-sha "${{ inputs.mise_php_sha }}" \
             --output ./verification-results
       - name: Retain production-parity report
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: maintenance-production-parity-${{ github.run_id }}
@@ -119,6 +122,7 @@ jobs:
           ./scripts/notify-maintenance --event canary/complete.json --state canary/state.json --output canary/closed.json \
             --backend github --repo "${{ github.repository }}" --owner "${{ vars.MAINTENANCE_OWNER }}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
         with:
           name: maintenance-notification-canary-${{ github.run_id }}
           path: canary/

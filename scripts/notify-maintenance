@@ -9,7 +9,13 @@ import sys
 import re
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from maintenance.control import ControlError, load_json, notification_decision, write_json  # noqa: E402
+from maintenance.control import (  # noqa: E402
+    ControlError,
+    load_json,
+    notification_decision,
+    retained_notification_issue,
+    write_json,
+)
 
 
 def gh(*arguments: str) -> str:
@@ -69,7 +75,7 @@ def discover_github_prior(repo: str, action_key: str) -> dict | None:
     }
 
 
-def apply_github(repo: str, owner: str, event: dict, decision: dict) -> dict:
+def apply_github(repo: str, owner: str, event: dict, decision: dict, prior: dict | None) -> dict:
     action_key = event["actionKey"]
     marker = f"<!-- maintenance-action-key:{action_key} -->"
     summary = event.get("summary", f"Maintenance event {action_key} entered {event.get('state')}.")
@@ -79,7 +85,11 @@ def apply_github(repo: str, owner: str, event: dict, decision: dict) -> dict:
         f"{fingerprint_marker}\n\nState: `{event.get('state')}`\n\n{summary}\n\n"
         f"Transition fingerprint: `{decision['fingerprint']}`"
     )
-    issue = find_issue(repo, action_key)
+    # GitHub issue search is eventually consistent. A transition immediately
+    # after creation must use the issue identity already retained in state.
+    issue = retained_notification_issue(prior) if decision["action"] in {"comment", "comment_and_close"} else None
+    if not issue:
+        issue = find_issue(repo, action_key)
     if decision["action"] in {"create", "create_and_close"}:
         if issue is not None:
             raise ControlError("notification state is missing but issue already exists")
@@ -131,7 +141,7 @@ try:
     if args.backend == "github" and decision["action"] != "none":
         if not args.owner:
             raise ControlError("MAINTENANCE_OWNER is required")
-        issue = apply_github(args.repo, args.owner, event, decision)
+        issue = apply_github(args.repo, args.owner, event, decision, prior)
     updated = {
         "schemaVersion": 1,
         "actionKey": event["actionKey"],
