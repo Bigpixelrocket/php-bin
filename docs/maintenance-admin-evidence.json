@@ -76,7 +76,17 @@
     "watchingEmail": true,
     "failedActionsEmail": true,
     "failedActionsOnly": true,
-    "verifiedThroughAccountSettingsAt": "2026-07-27T09:35:00Z"
+    "verifiedThroughAccountSettingsAt": "2026-07-27T09:35:00Z",
+    "deliveryObservation": {
+      "acceptanceTest": "A21",
+      "result": "passed",
+      "observedBy": "loadinglucian",
+      "observedAt": "2026-07-27T15:44:09+03:00",
+      "assignedIssue": "https://github.com/Bigpixelrocket/php-bin/issues/12",
+      "assignedIssueRun": "https://github.com/Bigpixelrocket/php-bin/actions/runs/30263155155",
+      "failedActionsRun": "https://github.com/Bigpixelrocket/php-bin/actions/runs/30263272377",
+      "evidenceDescription": "Maintainer-provided inbox screenshot shows the assigned issue #12 email at 14:46 and the isolated maintenance end-to-end failure email at 14:48."
+    }
   },
   "secrets": {
     "valuesCaptured": false,

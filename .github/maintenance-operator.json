@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "unattendedMutation": "paused",
-  "reason": "Initial rollout remains paused until A21 notification delivery is observed.",
-  "changedAt": "2026-07-27T00:00:00Z"
+  "unattendedMutation": "enabled",
+  "reason": "A21 notification delivery was observed by loadinglucian; awaiting the next real stable PHP patch for A22.",
+  "changedAt": "2026-07-27T15:45:14+03:00"
 }
