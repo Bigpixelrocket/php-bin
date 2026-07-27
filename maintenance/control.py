@@ -777,6 +777,15 @@ def notification_decision(event: dict[str, Any], prior: dict[str, Any] | None) -
     }
 
 
+def retained_notification_issue(prior: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return a usable retained issue identity without relying on search indexing."""
+    issue = (prior or {}).get("issue")
+    number = issue.get("number") if isinstance(issue, dict) else None
+    if not isinstance(number, bool) and isinstance(number, int) and number > 0:
+        return issue
+    return None
+
+
 def watch_decision(
     manifest: dict[str, Any],
     previous: dict[str, Any],

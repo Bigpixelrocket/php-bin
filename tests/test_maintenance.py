@@ -1,16 +1,19 @@
 import io
 import json
 import pathlib
+import runpy
 import subprocess
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 from maintenance.control import (
     ControlError,
     canonical_json,
     mutation_allowed,
     notification_decision,
+    retained_notification_issue,
     release_transition,
     retry_decision,
     seal_patch,
@@ -114,6 +117,31 @@ class MaintenanceControlTests(unittest.TestCase):
         first = notification_decision(event, None)
         replay = notification_decision(event, {"fingerprint": first["fingerprint"]})
         self.assertEqual("none", replay["action"])
+
+    def test_notification_transition_reuses_retained_issue_identity(self):
+        issue = {"number": 10, "url": "https://example.invalid/issues/10", "state": "OPEN"}
+        self.assertEqual(issue, retained_notification_issue({"issue": issue}))
+        self.assertIsNone(retained_notification_issue({"issue": {}}))
+        self.assertIsNone(retained_notification_issue({"issue": {"number": True}}))
+
+        namespace = runpy.run_path(
+            str(pathlib.Path(__file__).resolve().parents[1] / "scripts/notify-maintenance")
+        )
+        apply_github = namespace["apply_github"]
+        gh = mock.Mock(return_value="")
+        find_issue = mock.Mock(side_effect=AssertionError("search must not run"))
+        decision = {
+            "action": "comment_and_close",
+            "fingerprint": "sha256:" + "a" * 64,
+            "labels": ["maintenance"],
+        }
+        event = {"actionKey": "fixture", "state": "complete", "summary": "Done."}
+        with mock.patch.dict(apply_github.__globals__, {"gh": gh, "find_issue": find_issue}):
+            result = apply_github("Bigpixelrocket/php-bin", "loadinglucian", event, decision, {"issue": issue})
+        find_issue.assert_not_called()
+        self.assertEqual("CLOSED", result["state"])
+        self.assertEqual("10", gh.call_args_list[0].args[2])
+        self.assertEqual("10", gh.call_args_list[1].args[2])
 
     def test_retry_and_pause_bounds(self):
         self.assertFalse(retry_decision({"attemptCount": 2, "failureFingerprint": "x"}, "x", 2)["recallAgent"])
