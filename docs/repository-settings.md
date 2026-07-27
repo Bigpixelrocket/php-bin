@@ -17,9 +17,10 @@ Required repository state:
   protected control paths.
 - Enable squash merge, auto-merge, update branch, and automatic head-branch
   deletion; disable merge commits and rebase merge.
-- Allow Actions write permission and automation PR approval. Runtime Codex jobs
-  still declare `contents: read`; only deterministic downstream jobs declare
-  write scopes.
+- Keep the default Actions token read-only while enabling automation PR
+  creation. Runtime Codex jobs declare read scopes; only deterministic
+  downstream jobs explicitly declare the write scopes they require.
+- Require every third-party Action reference to use a full commit SHA.
 - Create the protected `php-maintenance-release` environment, limited to
   protected branches.
 - Enable GitHub immutable releases so future published tags and assets cannot
