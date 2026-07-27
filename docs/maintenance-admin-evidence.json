@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-07-27T10:18:59Z",
+  "planExecutor": "OpenAI Codex under loadinglucian authorization",
+  "repositories": {
+    "php-bin": {
+      "beforeSnapshot": {
+        "path": "docs/admin-state/php-bin-before.json",
+        "digest": "sha256:a009d47111f3453092ab5af2bce030583cb0df64eca6931a970aeb00d2e3a269"
+      },
+      "afterSnapshot": {
+        "path": "docs/admin-state/php-bin-after.json",
+        "digest": "sha256:bb2d331fb7bb26c24d74a642e3922a4e944b1d1704b5f8ad60a070becb99e429"
+      },
+      "settingsPullRequests": [
+        "https://github.com/Bigpixelrocket/php-bin/pull/8",
+        "https://github.com/Bigpixelrocket/php-bin/pull/9"
+      ]
+    },
+    "mise-php": {
+      "beforeSnapshot": {
+        "path": "../mise-php/docs/admin-state/mise-php-before.json",
+        "digest": "sha256:3c3b85e859411bf0262a643895d017150995eb0879c69ec6487338c7c72a74bc"
+      },
+      "afterSnapshot": {
+        "path": "../mise-php/docs/admin-state/mise-php-after.json",
+        "digest": "sha256:c403c9c4c6abab5518aed00a89f5d89b3233921e6a49627e12c2b7d953da6086"
+      },
+      "settingsPullRequests": [
+        "https://github.com/Bigpixelrocket/mise-php/pull/9",
+        "https://github.com/Bigpixelrocket/mise-php/pull/12"
+      ]
+    }
+  },
+  "canary": {
+    "variableName": "MAINTENANCE_ADMIN_CANARY",
+    "repositories": [
+      "Bigpixelrocket/php-bin",
+      "Bigpixelrocket/mise-php"
+    ],
+    "created": true,
+    "readBack": true,
+    "removed": true,
+    "absenceVerified": true,
+    "protectedPath": {
+      "repository": "Bigpixelrocket/mise-php",
+      "path": "maintenance/MAINTENANCE_ADMIN_CANARY.json",
+      "additionPullRequest": "https://github.com/Bigpixelrocket/mise-php/pull/10",
+      "expectedGateFailure": "https://github.com/Bigpixelrocket/mise-php/actions/runs/30255504107/job/89943039916",
+      "additionMergeCommit": "4160680862fe247addd4008b5fd71a7d8ff35019",
+      "cleanupPullRequest": "https://github.com/Bigpixelrocket/mise-php/pull/11",
+      "cleanupMergeCommit": "70056014eed224b7e085b757252b55a83132482f",
+      "contentAbsentFromMain": true
+    },
+    "temporaryRuleException": {
+      "scope": "Protected controls required check only",
+      "reason": "Authorized fixture merge and cleanup after the gate proved the protected-path rejection",
+      "allOtherProtectionsRetained": true,
+      "restoredImmediately": true
+    }
+  },
+  "protectionRestored": true,
+  "immutableReleasesEnabled": true,
+  "releaseEnvironment": {
+    "protectedBranchesOnly": true,
+    "administratorBypass": false
+  },
+  "securityControls": {
+    "dependabotSecurityUpdates": true,
+    "providerSecretScanning": true,
+    "secretScanningPushProtection": true,
+    "capabilityExceptionReviewDate": "2026-10-27"
+  },
+  "accountNotifications": {
+    "participatingEmail": true,
+    "watchingEmail": true,
+    "failedActionsEmail": true,
+    "failedActionsOnly": true,
+    "verifiedThroughAccountSettingsAt": "2026-07-27T09:35:00Z"
+  },
+  "secrets": {
+    "valuesCaptured": false,
+    "names": [
+      "OPENAI_API_KEY"
+    ]
+  }
+}
