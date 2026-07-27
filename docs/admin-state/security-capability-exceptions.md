@@ -1,6 +1,7 @@
 # Administrator-state capability exceptions
 
-Captured: 2026-07-27  
+Captured: 2026-07-27
+
 Review by: 2026-10-27
 
 The repository settings installer requests secret-scanning validity checks and
