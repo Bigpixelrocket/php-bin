@@ -48,27 +48,41 @@ parser.add_argument("--required-check", required=True)
 args = parser.parse_args()
 
 try:
-    gh(
+    repository = json.loads(gh(
         "api",
         f"repos/{args.repo}",
         "--method",
         "PATCH",
-        "-F",
-        "allow_auto_merge=true",
-        "-F",
-        "delete_branch_on_merge=true",
-        "-F",
-        "allow_squash_merge=true",
-        "-F",
-        "allow_merge_commit=false",
-        "-F",
-        "allow_rebase_merge=false",
-        "-F",
-        "allow_update_branch=true",
-        "-f",
-        "squash_merge_commit_title=PR_TITLE",
-        "-f",
-        "squash_merge_commit_message=PR_BODY",
+        input_value={
+            "allow_auto_merge": True,
+            "delete_branch_on_merge": True,
+            "allow_squash_merge": True,
+            "allow_merge_commit": False,
+            "allow_rebase_merge": False,
+            "allow_update_branch": True,
+            "squash_merge_commit_title": "PR_TITLE",
+            "squash_merge_commit_message": "PR_BODY",
+            "security_and_analysis": {
+                "dependabot_security_updates": {"status": "enabled"},
+                "secret_scanning": {"status": "enabled"},
+                "secret_scanning_push_protection": {"status": "enabled"},
+                "secret_scanning_validity_checks": {"status": "enabled"},
+                "secret_scanning_non_provider_patterns": {"status": "enabled"},
+            },
+        },
+    ))
+    security = repository.get("security_and_analysis", {})
+    required_security = (
+        "dependabot_security_updates",
+        "secret_scanning",
+        "secret_scanning_push_protection",
+    )
+    if any(security.get(name, {}).get("status") != "enabled" for name in required_security):
+        raise RuntimeError("GitHub did not enable the supported baseline security controls")
+    unavailable_security = sorted(
+        name
+        for name in ("secret_scanning_validity_checks", "secret_scanning_non_provider_patterns")
+        if security.get(name, {}).get("status") != "enabled"
     )
     gh(
         "api",
@@ -102,7 +116,7 @@ try:
     gh("variable", "set", "MAINTENANCE_OWNER", "--repo", args.repo, "--body", args.owner)
     ensure_label(args.repo, "maintenance", "1d76db", "Guarded PHP maintenance event")
     ensure_label(args.repo, "attention-required", "d73a4a", "Owner action is required")
-    gh(
+    environment = json.loads(gh(
         "api",
         f"repos/{args.repo}/environments/php-maintenance-release",
         "--method",
@@ -111,12 +125,15 @@ try:
             "wait_timer": 0,
             "prevent_self_review": False,
             "reviewers": [],
+            "can_admins_bypass": False,
             "deployment_branch_policy": {
                 "protected_branches": True,
                 "custom_branch_policies": False,
             },
         },
-    )
+    ))
+    if environment.get("can_admins_bypass") is not False:
+        raise RuntimeError("GitHub did not disable administrator environment bypass")
     protection = {
         "required_status_checks": {
             "strict": True,
@@ -148,8 +165,18 @@ try:
         "PUT",
         input_value=protection,
     )
-    print(json.dumps({"configured": True, "repo": args.repo, "owner": args.owner, "requiredCheck": args.required_check}))
-except (subprocess.CalledProcessError, OSError, json.JSONDecodeError) as error:
+    print(
+        json.dumps(
+            {
+                "configured": True,
+                "repo": args.repo,
+                "owner": args.owner,
+                "requiredCheck": args.required_check,
+                "unavailableSecurityFeatures": unavailable_security,
+            }
+        )
+    )
+except (subprocess.CalledProcessError, OSError, RuntimeError, json.JSONDecodeError) as error:
     detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) and error.stderr else str(error)
     print(f"GitHub maintenance configuration failed: {detail}", file=sys.stderr)
     raise SystemExit(1)

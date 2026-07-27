@@ -28,7 +28,11 @@ Required repository state:
   `jdx/mise-action`, and require every Action reference to use a full commit
   SHA.
 - Create the protected `php-maintenance-release` environment, limited to
-  protected branches.
+  protected branches, and disable administrator bypass.
+- Enable Dependabot security updates, provider-pattern secret scanning, and
+  secret-scanning push protection. Request validity checks and non-provider
+  patterns as well; GitHub may retain those two as disabled until the
+  organization has GitHub Secret Protection.
 - Enable GitHub immutable releases so future published tags and assets cannot
   be moved, replaced, or deleted.
 - Set `MAINTENANCE_OWNER=loadinglucian`.
