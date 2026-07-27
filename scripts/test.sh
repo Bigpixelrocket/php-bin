@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 "$SCRIPT_DIR/check-public-language.sh"
+"$PROJECT_ROOT/maintenance/control.py" validate-policy
 "$SCRIPT_DIR/compare-modules.sh" \
   "$PROJECT_ROOT/tests/fixtures/modules.txt" \
   "$PROJECT_ROOT/tests/fixtures/expected-exact.txt" \

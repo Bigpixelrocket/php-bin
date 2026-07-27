@@ -10,4 +10,4 @@
 /scripts/seal-maintenance-patch @loadinglucian
 /scripts/verify-merge-admission @loadinglucian
 /scripts/release-maintenance @loadinglucian
-/support-policy.json @loadinglucian
+/maintenance/policy-invariants.json @loadinglucian

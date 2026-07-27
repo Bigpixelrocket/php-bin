@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "target": {
+    "os": "macOS",
+    "minimumVersion": "26.0",
+    "architecture": "arm64",
+    "sapi": "cli"
+  },
+  "allowPrereleases": false,
+  "historicalExactVersionsRemainInstallable": true,
+  "immutablePublishedAssets": true
+}

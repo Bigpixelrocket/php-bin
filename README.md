@@ -103,7 +103,8 @@ gh workflow run maintenance-e2e.yml \
   -f suite=production-parity
 ```
 
-Inspect `maintenance-events/`, `support-policy.json`, retained workflow
+Inspect `maintenance-events/`, generated `support-policy.json`, the reviewed
+`maintenance/policy-invariants.json`, retained workflow
 artifacts, the event issue marker, and `docs/maintenance-verification.md` to
 reconstruct a decision. `scripts/snapshot-github-admin-state` captures settings,
 variables, and secret names without secret values. Recovery never skips

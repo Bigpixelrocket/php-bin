@@ -105,8 +105,13 @@ try:
     )
     protection = {
         "required_status_checks": {"strict": True, "contexts": [args.required_check]},
-        "enforce_admins": False,
-        "required_pull_request_reviews": None,
+        "enforce_admins": True,
+        "required_pull_request_reviews": {
+            "dismiss_stale_reviews": True,
+            "require_code_owner_reviews": True,
+            "required_approving_review_count": 0,
+            "require_last_push_approval": False,
+        },
         "restrictions": None,
         "required_linear_history": True,
         "allow_force_pushes": False,

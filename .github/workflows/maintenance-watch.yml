@@ -29,7 +29,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Capture fixed raw evidence
-        run: ./scripts/capture-maintenance-evidence --output maintenance-run/evidence
+        run: |
+          ./maintenance/control.py validate-policy
+          ./scripts/capture-maintenance-evidence --output maintenance-run/evidence
       - name: Decide whether an agent call is required
         id: decision
         run: |
@@ -81,7 +83,7 @@ jobs:
           safety-strategy: drop-sudo
           allow-users: loadinglucian
           allow-bots: github-actions[bot]
-          codex-args: '["--ephemeral","--profile","investigation","--output-schema","schemas/maintenance-plan.schema.json"]'
+          codex-args: '["--strict-config","--ephemeral","--profile","investigation","--output-schema","schemas/maintenance-plan.schema.json"]'
       - name: Admit plan against exact evidence
         if: steps.decision.outputs.trigger != 'quiet'
         run: |
@@ -159,8 +161,26 @@ jobs:
               --repo "${{ github.repository }}" \
               --owner "${{ vars.MAINTENANCE_OWNER }}"
             exit 0
-          elif [[ "$action" == "no_change" ]]; then
+          elif [[ "$action" == "new_branch" || "$action" == "branch_eol" ]]; then
+            jq -n \
+              --arg actionKey "${{ needs.investigate.outputs.action_key }}" \
+              --arg summary "$(jq -r .notification.summary maintenance-plan-download/maintenance-plan.json)" \
+              --arg evidenceDigest "$(jq -r .manifestDigest maintenance-plan-download/evidence/evidence-manifest.json)" \
+              '{actionKey:$actionKey,state:"detected",severity:"info",humanActionRequired:false,summary:$summary,evidenceDigest:$evidenceDigest}' \
+              > maintenance-plan-download/lifecycle-notification.json
+            ./scripts/notify-maintenance \
+              --event maintenance-plan-download/lifecycle-notification.json \
+              --state maintenance-plan-download/lifecycle-notification-state.json \
+              --output maintenance-plan-download/lifecycle-notification-next.json \
+              --backend github \
+              --repo "${{ github.repository }}" \
+              --owner "${{ vars.MAINTENANCE_OWNER }}"
+          fi
+
+          if [[ "$action" == "no_change" ]]; then
+            :
             git checkout -B "maintenance/evidence-${{ github.run_id }}" origin/main
+            base="$(git rev-parse HEAD)"
             mkdir -p maintenance-state
             jq -n \
               --arg manifestDigest "$(jq -r .manifestDigest maintenance-plan-download/evidence/evidence-manifest.json)" \
@@ -171,6 +191,8 @@ jobs:
             git add maintenance-state/last-evidence.json
             git -c user.name=maintenance-watcher -c user.email=maintenance@invalid \
               commit -m "chore: record reviewed maintenance evidence"
+            head="$(git rev-parse HEAD)"
+            record_digest="sha256:$(shasum -a 256 maintenance-state/last-evidence.json | awk '{print $1}')"
             gh auth setup-git
             git push origin HEAD
             url="$(gh pr create --base main --head "maintenance/evidence-${{ github.run_id }}" \
@@ -178,6 +200,14 @@ jobs:
               --body "Opaque evidence state for a reviewed no-change result.")"
             number="${url##*/}"
             gh pr checks "$number" --watch --fail-fast --interval 10
+            gh pr checks "$number" --json name,bucket,link > maintenance-plan-download/no-change-checks.json
+            jq -e '[.[] | select(.name=="Script checks") | .bucket] == ["pass"]' maintenance-plan-download/no-change-checks.json
+            test "$(gh pr view "$number" --json headRefOid --jq .headRefOid)" = "$head"
+            git fetch origin main
+            test "$(git rev-parse origin/main)" = "$base"
+            test "$(git rev-list --parents -n 1 "$head")" = "$head $base"
+            test "$(git diff --name-only "$base" "$head")" = "maintenance-state/last-evidence.json"
+            test "sha256:$(git show "$head:maintenance-state/last-evidence.json" | shasum -a 256 | awk '{print $1}')" = "$record_digest"
             gh pr merge "$number" --squash --delete-branch
             exit 0
           elif [[ "${{ needs.investigate.outputs.edits_required }}" == "true" ]]; then
@@ -187,7 +217,14 @@ jobs:
               -f investigation_run_id="${{ github.run_id }}" \
               -f exact_base_sha="${{ needs.investigate.outputs.base_sha }}" \
               -f phase=implementation
-          elif [[ "$action" == "new_patch" || "$action" == "reconcile_partial" ]]; then
+          elif [[ "$action" == "new_patch" || "$action" == "new_branch" || "$action" == "reconcile_partial" ]]; then
+            if [[ "$action" == "new_branch" ]]; then
+              filename="$(printf '%s' "${{ needs.investigate.outputs.action_key }}" | tr ':/' '--').json"
+              if ! gh api "repos/bigpixelrocket/mise-php/contents/readiness/$filename?ref=main" >/dev/null 2>&1; then
+                echo "Waiting for exact mise-php readiness for $filename."
+                exit 0
+              fi
+            fi
             version="$(jq -r .releaseIntent.version maintenance-plan-download/maintenance-plan.json)"
             gh workflow run maintenance-release.yml \
               --repo "${{ github.repository }}" \
@@ -196,6 +233,67 @@ jobs:
               -f investigation_run_id="${{ github.run_id }}" \
               -f version="$version" \
               -f exact_commit="${{ needs.investigate.outputs.base_sha }}"
+          elif [[ "$action" == "branch_eol" ]]; then
+            action_key="${{ needs.investigate.outputs.action_key }}"
+            filename="$(printf '%s' "$action_key" | tr ':/' '--').json"
+            if ! gh api "repos/bigpixelrocket/mise-php/contents/readiness/$filename?ref=main" \
+              --jq .content | base64 --decode > maintenance-plan-download/mise-readiness.json; then
+              echo "Waiting for exact mise-php EOL readiness for $filename."
+              exit 0
+            fi
+            event="maintenance-events/$filename"
+            test -f "$event"
+            test "$(jq -r .actionKey maintenance-plan-download/mise-readiness.json)" = "$action_key"
+            test "$(jq -r .ready maintenance-plan-download/mise-readiness.json)" = "true"
+            test "$(jq -r .supportPolicyDigest "$event")" = "$(jq -r .policyDigest maintenance-plan-download/mise-readiness.json)"
+            test "$(jq -r .policyInvariantsDigest "$event")" = "$(jq -r .policyInvariantsDigest maintenance-plan-download/mise-readiness.json)"
+            policy_commit="$(jq -r .phpBinPolicyCommit maintenance-plan-download/mise-readiness.json)"
+            gh api "repos/${{ github.repository }}/contents/support-policy.json?ref=$policy_commit" \
+              --jq .content | base64 --decode > maintenance-plan-download/readiness-policy.json
+            test "sha256:$(shasum -a 256 maintenance-plan-download/readiness-policy.json | awk '{print $1}')" = "$(jq -r .policyDigest maintenance-plan-download/mise-readiness.json)"
+            jq -n --slurpfile ready maintenance-plan-download/mise-readiness.json \
+              '[{kind:"mise_eol_readiness",record:$ready[0]}]' > maintenance-plan-download/transition-evidence.json
+            if [[ "$(jq -r .state "$event")" == "php_bin_ready" ]]; then
+              ./scripts/maintenance-event --event "$event" --target mise_ready \
+                --evidence maintenance-plan-download/transition-evidence.json --output "$event.next"
+              mv "$event.next" "$event"
+            fi
+            test "$(jq -r .state "$event")" = "mise_ready"
+            jq -n '[{kind:"eol_support_and_publication_cleanup_verified"}]' \
+              > maintenance-plan-download/transition-evidence.json
+            ./scripts/maintenance-event --event "$event" --target complete \
+              --evidence maintenance-plan-download/transition-evidence.json --output "$event.next"
+            mv "$event.next" "$event"
+            base="$(git rev-parse HEAD)"
+            branch="maintenance/eol-complete-${{ github.run_id }}"
+            git checkout -B "$branch"
+            git add "$event"
+            git -c user.name=maintenance-lifecycle -c user.email=maintenance@invalid \
+              commit -m "chore: complete $action_key"
+            head="$(git rev-parse HEAD)"
+            digest="sha256:$(shasum -a 256 "$event" | awk '{print $1}')"
+            gh auth setup-git
+            git push origin HEAD
+            url="$(gh pr create --base main --head "$branch" --title "chore: complete $action_key" \
+              --body "Deterministic EOL completion bound to exact cross-repository readiness.")"
+            number="${url##*/}"
+            gh pr checks "$number" --watch --fail-fast --interval 10
+            gh pr checks "$number" --json name,bucket,link > maintenance-plan-download/eol-checks.json
+            jq -e '[.[] | select(.name=="Script checks") | .bucket] == ["pass"]' maintenance-plan-download/eol-checks.json
+            test "$(gh pr view "$number" --json headRefOid --jq .headRefOid)" = "$head"
+            git fetch origin main
+            test "$(git rev-parse origin/main)" = "$base"
+            test "$(git rev-list --parents -n 1 "$head")" = "$head $base"
+            test "$(git diff --name-only "$base" "$head")" = "$event"
+            test "sha256:$(git show "$head:$event" | shasum -a 256 | awk '{print $1}')" = "$digest"
+            gh pr merge "$number" --squash --delete-branch
+            jq '.severity="info" | .summary="Branch EOL support cleanup completed at exact php-bin and mise-php commits." | .finalResult="passed"' \
+              "$event" > maintenance-plan-download/eol-notification.json
+            ./scripts/notify-maintenance \
+              --event maintenance-plan-download/eol-notification.json \
+              --state maintenance-plan-download/eol-notification-state.json \
+              --output maintenance-plan-download/eol-notification-next.json \
+              --backend github --repo "${{ github.repository }}" --owner "${{ vars.MAINTENANCE_OWNER }}"
           else
             echo "Action $action requires repository readiness before release." >&2
           fi

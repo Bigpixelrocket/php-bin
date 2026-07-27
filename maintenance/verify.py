@@ -349,7 +349,25 @@ class Verifier:
         repeated = retry_decision({**event, "lastRejectionRepeated": True}, "fp", 2)
         assert_true(first["recallAgent"], "bounded repair was not allowed")
         assert_true(not exhausted["recallAgent"] and not repeated["recallAgent"], "exhausted identical failure recalled agent")
-        (directory / "retry.json").write_bytes(canonical_json({"first": first, "exhausted": exhausted, "repeated": repeated}))
+        php_workflow = (PHP_ROOT / ".github/workflows/maintenance-implementation.yml").read_text()
+        mise_workflow = (self.mise_root / ".github/workflows/maintenance-consumer.yml").read_text()
+        for name, workflow in {"php-bin": php_workflow, "mise-php": mise_workflow}.items():
+            assert_true("authoritative-checks.log" in workflow, f"{name} does not retain deterministic failure logs")
+            assert_true("Run one offline Codex repair" in workflow, f"{name} has no bounded repair invocation")
+            assert_true("validate-repair:" in workflow, f"{name} does not cleanly validate repaired bytes")
+        assert_true(
+            'network_access = false' in (PHP_ROOT / ".codex/repair.config.toml").read_text()
+            and 'network_access = false' in (self.mise_root / ".codex/repair.config.toml").read_text(),
+            "repair network access is not disabled",
+        )
+        evidence = {
+            "first": first,
+            "exhausted": exhausted,
+            "repeated": repeated,
+            "phpWorkflowDigest": sha256_file(PHP_ROOT / ".github/workflows/maintenance-implementation.yml"),
+            "miseWorkflowDigest": sha256_file(self.mise_root / ".github/workflows/maintenance-consumer.yml"),
+        }
+        (directory / "retry.json").write_bytes(canonical_json(evidence))
         return ["retry.json"]
 
     def a07(self, directory: pathlib.Path) -> list[str]:
@@ -368,7 +386,7 @@ class Verifier:
             ".github/codex/maintenance/shared.md",
             "schemas/agent-task-contract.schema.json",
             "maintenance/control.py",
-            "support-policy.json",
+            "maintenance/policy-invariants.json",
             "unadmitted.txt",
         ]
         rejected = []
@@ -395,8 +413,15 @@ class Verifier:
 
     def a09(self, directory: pathlib.Path) -> list[str]:
         repo = directory / "repo"
-        head = init_repo(repo)
-        manifest = {"files": [{"path": "src.txt", "digest": sha256_file(repo / "src.txt")}]}
+        base = init_repo(repo)
+        (repo / "src.txt").write_text("coordinated\n")
+        run("git", "add", "src.txt", cwd=repo)
+        run("git", "commit", "-q", "-m", "validated maintenance", cwd=repo)
+        head = run("git", "rev-parse", "HEAD", cwd=repo).stdout.strip()
+        manifest = {
+            "baseSha": base,
+            "files": [{"path": "src.txt", "digest": sha256_file(repo / "src.txt"), "mode": "0o644"}],
+        }
         checks = {"Script checks": "success"}
         preconditions = {"policy": "same"}
         assert_reject(lambda: verify_merge(repo, head, manifest, checks, preconditions, preconditions, [{"ready": False}]))
@@ -433,13 +458,25 @@ class Verifier:
 
     def a12(self, directory: pathlib.Path) -> list[str]:
         repo = directory / "repo"
-        head = init_repo(repo)
-        manifest = {"files": [{"path": "src.txt", "digest": sha256_file(repo / "src.txt")}]}
+        base = init_repo(repo)
+        (repo / "src.txt").write_text("validated\n")
+        run("git", "add", "src.txt", cwd=repo)
+        run("git", "commit", "-q", "-m", "validated maintenance", cwd=repo)
+        head = run("git", "rev-parse", "HEAD", cwd=repo).stdout.strip()
+        manifest = {
+            "baseSha": base,
+            "files": [{"path": "src.txt", "digest": sha256_file(repo / "src.txt"), "mode": "0o644"}],
+        }
         checks = {"Script checks": "success"}
         run("git", "commit", "--allow-empty", "-q", "-m", "post-validation mutation", cwd=repo)
         assert_reject(lambda: verify_merge(repo, head, manifest, checks, {}, {}), "head")
         run("git", "reset", "--hard", "-q", head, cwd=repo)
         result = verify_merge(repo, head, manifest, checks, {}, {})
+        (repo / "extra.txt").write_text("unsealed\n")
+        run("git", "add", "extra.txt", cwd=repo)
+        run("git", "commit", "-q", "--amend", "--no-edit", cwd=repo)
+        mutated_head = run("git", "rev-parse", "HEAD", cwd=repo).stdout.strip()
+        assert_reject(lambda: verify_merge(repo, mutated_head, manifest, checks, {}, {}), "final diff")
         (directory / "merge.json").write_bytes(canonical_json(result))
         return ["merge.json"]
 

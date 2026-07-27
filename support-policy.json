@@ -1,13 +1,8 @@
 {
   "schemaVersion": 1,
-  "target": {
-    "os": "macOS",
-    "minimumVersion": "26.0",
-    "architecture": "arm64",
-    "sapi": "cli"
-  },
+  "policyInvariantsDigest": "sha256:2d8dd3f372f5f409ad0e4badf7cc68f8c2ed3d49fa73ab88153152efeeff57b9",
   "maintainedBranches": ["8.2", "8.3", "8.4", "8.5"],
-  "allowPrereleases": false,
-  "historicalExactVersionsRemainInstallable": true,
-  "immutablePublishedAssets": true
+  "sourceEvidenceDigests": [],
+  "actionKey": "bootstrap",
+  "acceptedAt": "2026-07-27T00:00:00Z"
 }

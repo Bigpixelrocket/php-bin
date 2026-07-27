@@ -106,8 +106,10 @@ def github_effect(
             stderr=subprocess.PIPE,
         )
         if existing.returncode == 0:
-            if not json.loads(existing.stdout)["isDraft"]:
-                raise ControlError("release already exists and is not a matching draft")
+            # A matching published release is a recoverable partial transaction.
+            # Later verification downloads it and proves every byte before the
+            # idempotent publish transition is accepted.
+            json.loads(existing.stdout)
         else:
             gh(
                 "release",

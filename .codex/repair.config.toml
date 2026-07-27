@@ -1,0 +1,4 @@
+web_search = "disabled"
+
+[sandbox_workspace_write]
+network_access = false

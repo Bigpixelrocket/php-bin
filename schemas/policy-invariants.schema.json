@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bigpixelrocket.dev/schemas/policy-invariants.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "target", "allowPrereleases", "historicalExactVersionsRemainInstallable", "immutablePublishedAssets"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "minimumVersion", "architecture", "sapi"],
+      "properties": {
+        "os": {"const": "macOS"},
+        "minimumVersion": {"const": "26.0"},
+        "architecture": {"const": "arm64"},
+        "sapi": {"const": "cli"}
+      }
+    },
+    "allowPrereleases": {"const": false},
+    "historicalExactVersionsRemainInstallable": {"const": true},
+    "immutablePublishedAssets": {"const": true}
+  }
+}

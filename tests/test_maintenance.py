@@ -13,6 +13,7 @@ from maintenance.control import (
     transition_event,
     validate_completion_assessment,
     watch_decision,
+    path_is_protected,
 )
 
 
@@ -82,6 +83,12 @@ class MaintenanceControlTests(unittest.TestCase):
         self.assertFalse(retry_decision({"attemptCount": 2, "failureFingerprint": "x"}, "x", 2)["recallAgent"])
         self.assertFalse(mutation_allowed({"unattendedMutation": "paused"}))
         self.assertTrue(mutation_allowed({"unattendedMutation": "enabled"}))
+
+    def test_invariants_and_durable_state_are_protected(self):
+        self.assertTrue(path_is_protected("maintenance/policy-invariants.json"))
+        self.assertTrue(path_is_protected("maintenance-events/new-branch.json"))
+        self.assertTrue(path_is_protected("maintenance-state/last-evidence.json"))
+        self.assertFalse(path_is_protected("support-policy.json"))
 
 
 if __name__ == "__main__":

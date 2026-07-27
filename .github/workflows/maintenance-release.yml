@@ -56,11 +56,19 @@ jobs:
             --dir admitted-run
       - name: Verify stable version and exact commit
         run: |
+          ./maintenance/control.py validate-policy
           [[ "${{ inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]
           test "$(git rev-parse HEAD)" = "${{ inputs.exact_commit }}"
           test "$(jq -r .actionKey admitted-run/maintenance-plan.json)" = "${{ inputs.action_key }}"
           test "$(jq -r .releaseIntent.version admitted-run/maintenance-plan.json)" = "${{ inputs.version }}"
+          test "$(jq -r .preconditions.phpBinHead admitted-run/maintenance-plan.json)" = "${{ inputs.exact_commit }}"
+          test "$(jq -r .preconditions.supportPolicyDigest admitted-run/maintenance-plan.json)" = "$(./maintenance/control.py digest support-policy.json)"
           test "$(jq -r .unattendedMutation .github/maintenance-operator.json)" = "enabled"
+          mise_commit="$(jq -r .sha admitted-run/evidence/raw/mise_php_state.body)"
+          [[ "$mise_commit" =~ ^[0-9a-f]{40}$ ]]
+          git -C mise-php fetch origin "$mise_commit"
+          git -C mise-php checkout --detach "$mise_commit"
+          test "$(git -C mise-php rev-parse HEAD)" = "$mise_commit"
       - name: Re-capture authoritative evidence
         run: |
           ./scripts/capture-maintenance-evidence --output release-run/evidence
@@ -85,29 +93,55 @@ jobs:
             test "$(jq -r .actionKey release-run/mise-readiness.json)" = "${{ inputs.action_key }}"
             test "$(jq -r .ready release-run/mise-readiness.json)" = "true"
             test "$(jq -r .policyDigest release-run/mise-readiness.json)" = "$(jq -r .supportPolicyDigest "$event")"
+            test "$(jq -r .policyInvariantsDigest release-run/mise-readiness.json)" = "$(jq -r .policyInvariantsDigest support-policy.json)"
             policy_commit="$(jq -r .phpBinPolicyCommit release-run/mise-readiness.json)"
+            test "$(jq -r .misePhpCommit release-run/mise-readiness.json)" = "$(git -C mise-php rev-parse HEAD)"
             gh api "repos/${{ github.repository }}/contents/support-policy.json?ref=$policy_commit" \
               --jq .content | base64 --decode > release-run/readiness-policy.json
             test "sha256:$(shasum -a 256 release-run/readiness-policy.json | awk '{print $1}')" = "$(jq -r .policyDigest release-run/mise-readiness.json)"
           fi
+      - name: Reconcile existing immutable release assets
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p .artifacts
+          if gh release view "${{ inputs.version }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release download "${{ inputs.version }}" --repo "${{ github.repository }}" --dir .artifacts
+            ./scripts/validate-maintenance-archive \
+              --archive ".artifacts/php-${{ inputs.version }}-cli-macos-aarch64.tar.gz" \
+              --version "${{ inputs.version }}"
+            archive_digest="$(shasum -a 256 ".artifacts/php-${{ inputs.version }}-cli-macos-aarch64.tar.gz" | awk '{print $1}')"
+            grep -Fx "$archive_digest  php-${{ inputs.version }}-cli-macos-aarch64.tar.gz" .artifacts/SHA256SUMS
+            echo "reuse=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Install build dependencies
+        if: steps.existing.outputs.reuse != 'true'
         run: ./scripts/install-build-deps.sh
       - name: Install pinned StaticPHP
+        if: steps.existing.outputs.reuse != 'true'
         run: ./scripts/install-spc.sh
       - name: Build exact patch
+        if: steps.existing.outputs.reuse != 'true'
         run: ./scripts/build.sh "${{ inputs.version }}" s4
       - name: Package and validate staged bytes
+        if: steps.existing.outputs.reuse != 'true'
         run: |
           ./scripts/package.sh ".build/${{ inputs.version }}/s4/buildroot/bin/php" "${{ inputs.version }}"
           ./scripts/validate-maintenance-archive \
             --archive ".artifacts/php-${{ inputs.version }}-cli-macos-aarch64.tar.gz" \
             --version "${{ inputs.version }}"
+      - name: Initialize release transaction and event
+        run: |
           mkdir -p release-run
           printf '{"schemaVersion":1,"state":"requested","history":[]}\n' > release-run/transaction.json
           filename="$(printf '%s' "${{ inputs.action_key }}" | tr ':/' '--').json"
           if [[ -f "maintenance-events/$filename" ]]; then
             cp "maintenance-events/$filename" release-run/event.json
-            if [[ "$(jq -r .state release-run/event.json)" == "php_bin_ready" ]]; then
+            if [[ "$(jq -r .state release-run/event.json)" == "php_bin_ready" \
+              && "$(jq -r .action admitted-run/maintenance-plan.json)" == "new_branch" ]]; then
               jq -n --slurpfile ready release-run/mise-readiness.json \
                 '[{kind:"mise_readiness",record:$ready[0]}]' > release-run/evidence.json
               ./scripts/maintenance-event --event release-run/event.json --target mise_ready \
@@ -235,22 +269,39 @@ jobs:
         run: |
           git fetch origin main
           git checkout -B "maintenance/event-${{ github.run_id }}" origin/main
+          base="$(git rev-parse HEAD)"
           filename="$(printf '%s' "${{ inputs.action_key }}" | tr ':/' '--').json"
           cp release-run/event.json "maintenance-events/$filename"
           git add "maintenance-events/$filename"
           git -c user.name=maintenance-release -c user.email=maintenance@invalid \
             commit -m "chore: complete ${{ inputs.action_key }}"
+          head="$(git rev-parse HEAD)"
+          record="maintenance-events/$filename"
+          digest="sha256:$(shasum -a 256 "$record" | awk '{print $1}')"
           gh auth setup-git
           git push origin HEAD
           url="$(gh pr create --base main --head "maintenance/event-${{ github.run_id }}" \
             --title "chore: complete ${{ inputs.action_key }}" \
             --body "Durable event record for the immutable verified release transaction.")"
           echo "number=${url##*/}" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head" >> "$GITHUB_OUTPUT"
+          echo "record=$record" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: Validate and merge final event record
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh pr checks "${{ steps.event_pr.outputs.number }}" --watch --fail-fast --interval 10
+          gh pr checks "${{ steps.event_pr.outputs.number }}" --json name,bucket,link > release-run/event-checks.json
+          jq -e '[.[] | select(.name=="Script checks") | .bucket] == ["pass"]' release-run/event-checks.json
+          actual="$(gh pr view "${{ steps.event_pr.outputs.number }}" --json headRefOid --jq .headRefOid)"
+          test "$actual" = "${{ steps.event_pr.outputs.head_sha }}"
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "${{ steps.event_pr.outputs.base_sha }}"
+          test "$(git rev-list --parents -n 1 "$actual")" = "$actual ${{ steps.event_pr.outputs.base_sha }}"
+          test "$(git diff --name-only "${{ steps.event_pr.outputs.base_sha }}" "$actual")" = "${{ steps.event_pr.outputs.record }}"
+          test "sha256:$(git show "$actual:${{ steps.event_pr.outputs.record }}" | shasum -a 256 | awk '{print $1}')" = "${{ steps.event_pr.outputs.digest }}"
           gh pr merge "${{ steps.event_pr.outputs.number }}" --squash --delete-branch
       - name: Retain transaction and exact staging bytes
         if: always()

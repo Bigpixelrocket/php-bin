@@ -11,7 +11,9 @@
     "scripts/seal-maintenance-patch",
     "scripts/verify-merge-admission",
     "scripts/release-maintenance",
-    "support-policy.json",
+    "maintenance/policy-invariants.json",
+    "maintenance-events/**",
+    "maintenance-state/**",
     ".github/CODEOWNERS"
   ]
 }

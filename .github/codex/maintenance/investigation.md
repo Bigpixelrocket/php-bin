@@ -14,3 +14,7 @@ captured evidence.
 Return GO only when the action is unambiguous, all criteria passed with
 resolving evidence, preconditions remain exact, and unresolved is empty.
 Otherwise return `blocked` or `needs_human` and NO-GO. Make no edit.
+
+If changed evidence has no maintenance consequence, use action `no_change` and
+the key `no_change:<first 16 hexadecimal characters of the evidence manifest
+digest>` so the reviewed snapshot remains uniquely auditable.

@@ -11,6 +11,8 @@ Required repository state:
 - Require the `Script checks` status check.
 - Require conversation resolution.
 - Require linear history; block force pushes and branch deletion.
+- Enforce protection for administrators and require CODEOWNER approval for
+  protected control paths.
 - Enable squash merge, auto-merge, update branch, and automatic head-branch
   deletion; disable merge commits and rebase merge.
 - Allow Actions write permission and automation PR approval. Runtime Codex jobs
@@ -22,8 +24,10 @@ Required repository state:
 - Keep distinct repository-scoped `OPENAI_API_KEY` secrets.
 - Keep the `maintenance` and `attention-required` labels.
 
-CODEOWNERS covers prompts, contracts, workflows, policy, authority controls,
-and release code. Runtime sealing rejects those paths before a branch or PR is
+CODEOWNERS covers prompts, contracts, workflows, policy invariants, authority
+controls, and release code. Deterministic event/state records and admitted
+runtime paths are deliberately outside CODEOWNERS so their exact-SHA PRs can
+merge. Runtime sealing rejects protected controls before a branch or PR is
 created. Initial and later protected-control changes require an explicit
 reviewed PR outside the runtime agent.
 
