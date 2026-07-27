@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""Verify exact-SHA merge admission."""
+
+import argparse
+import json
+import pathlib
+import subprocess
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from maintenance.control import ControlError, load_json, verify_merge  # noqa: E402
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--repo", type=pathlib.Path, default=pathlib.Path.cwd())
+parser.add_argument("--head", required=True)
+parser.add_argument("--manifest", type=pathlib.Path, required=True)
+parser.add_argument("--checks", type=pathlib.Path, required=True)
+parser.add_argument("--preconditions", type=pathlib.Path, required=True)
+parser.add_argument("--current", type=pathlib.Path, required=True)
+parser.add_argument("--readiness", type=pathlib.Path)
+args = parser.parse_args()
+
+try:
+    result = verify_merge(
+        args.repo,
+        args.head,
+        load_json(args.manifest),
+        load_json(args.checks),
+        load_json(args.preconditions),
+        load_json(args.current),
+        load_json(args.readiness) if args.readiness else None,
+    )
+    print(json.dumps(result))
+except (ControlError, OSError, subprocess.CalledProcessError) as error:
+    detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) and error.stderr else str(error)
+    print(f"merge admission rejected: {detail}", file=sys.stderr)
+    raise SystemExit(1)

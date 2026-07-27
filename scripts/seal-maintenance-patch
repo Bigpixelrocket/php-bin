@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""Seal an admitted runtime-agent diff."""
+
+import argparse
+import json
+import pathlib
+import subprocess
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from maintenance.control import ControlError, load_json, seal_patch  # noqa: E402
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--repo", type=pathlib.Path, default=pathlib.Path.cwd())
+parser.add_argument("--base", required=True)
+parser.add_argument("--plan", type=pathlib.Path, required=True)
+parser.add_argument("--result", type=pathlib.Path, required=True)
+parser.add_argument("--contract", type=pathlib.Path, required=True)
+parser.add_argument("--output", type=pathlib.Path, required=True)
+args = parser.parse_args()
+
+try:
+    manifest = seal_patch(
+        args.repo,
+        args.base,
+        load_json(args.plan),
+        load_json(args.result),
+        load_json(args.contract),
+        args.output,
+    )
+    print(json.dumps(manifest))
+except (ControlError, OSError, subprocess.CalledProcessError) as error:
+    detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) and error.stderr else str(error)
+    print(f"patch sealing rejected: {detail}", file=sys.stderr)
+    raise SystemExit(1)

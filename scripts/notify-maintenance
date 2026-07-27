@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Deduplicate maintenance issue creation and transition comments."""
+
+import argparse
+import json
+import pathlib
+import subprocess
+import sys
+import re
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from maintenance.control import ControlError, load_json, notification_decision, write_json  # noqa: E402
+
+
+def gh(*arguments: str) -> str:
+    result = subprocess.run(
+        ["gh", *arguments],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return result.stdout.strip()
+
+
+def find_issue(repo: str, action_key: str) -> dict | None:
+    marker = f"<!-- maintenance-action-key:{action_key} -->"
+    issues = json.loads(
+        gh(
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "all",
+            "--search",
+            f'"{marker}" in:body',
+            "--json",
+            "number,body,state,url",
+            "--limit",
+            "100",
+        )
+    )
+    matches = [issue for issue in issues if marker in issue.get("body", "")]
+    if len(matches) > 1:
+        raise ControlError("multiple issues exist for one action key")
+    if not matches:
+        return None
+    return matches[0]
+
+
+def discover_github_prior(repo: str, action_key: str) -> dict | None:
+    issue = find_issue(repo, action_key)
+    if issue is None:
+        return None
+    detail = json.loads(
+        gh("issue", "view", str(issue["number"]), "--repo", repo, "--json", "body,comments")
+    )
+    bodies = [detail.get("body", "")]
+    bodies.extend(comment.get("body", "") for comment in detail.get("comments", []))
+    fingerprints = [
+        match.group(1)
+        for body in bodies
+        for match in re.finditer(r"<!-- maintenance-fingerprint:(sha256:[0-9a-f]{64}) -->", body)
+    ]
+    return {
+        "fingerprint": fingerprints[-1] if fingerprints else None,
+        "issue": issue,
+    }
+
+
+def apply_github(repo: str, owner: str, event: dict, decision: dict) -> dict:
+    action_key = event["actionKey"]
+    marker = f"<!-- maintenance-action-key:{action_key} -->"
+    summary = event.get("summary", f"Maintenance event {action_key} entered {event.get('state')}.")
+    fingerprint_marker = f"<!-- maintenance-fingerprint:{decision['fingerprint']} -->"
+    body = f"{marker}\n{fingerprint_marker}\n\n# PHP maintenance event\n\n{summary}\n"
+    comment = (
+        f"{fingerprint_marker}\n\nState: `{event.get('state')}`\n\n{summary}\n\n"
+        f"Transition fingerprint: `{decision['fingerprint']}`"
+    )
+    issue = find_issue(repo, action_key)
+    if decision["action"] in {"create", "create_and_close"}:
+        if issue is not None:
+            raise ControlError("notification state is missing but issue already exists")
+        url = gh(
+            "issue",
+            "create",
+            "--repo",
+            repo,
+            "--title",
+            f"[maintenance] {action_key}",
+            "--body",
+            body,
+            "--assignee",
+            owner,
+            "--label",
+            ",".join(decision["labels"]),
+        )
+        number = int(url.rstrip("/").split("/")[-1])
+        issue = {"number": number, "url": url, "state": "OPEN"}
+        if decision["action"] == "create_and_close":
+            gh("issue", "close", str(number), "--repo", repo, "--reason", "completed")
+            issue["state"] = "CLOSED"
+    elif decision["action"] in {"comment", "comment_and_close"}:
+        if issue is None:
+            raise ControlError("cannot comment because event issue is missing")
+        gh("issue", "comment", str(issue["number"]), "--repo", repo, "--body", comment)
+        if decision["action"] == "comment_and_close":
+            gh("issue", "close", str(issue["number"]), "--repo", repo, "--reason", "completed")
+            issue["state"] = "CLOSED"
+    return issue or {}
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--event", type=pathlib.Path, required=True)
+parser.add_argument("--state", type=pathlib.Path, required=True)
+parser.add_argument("--output", type=pathlib.Path, required=True)
+parser.add_argument("--backend", choices=["filesystem", "github"], default="filesystem")
+parser.add_argument("--repo", default="bigpixelrocket/php-bin")
+parser.add_argument("--owner")
+args = parser.parse_args()
+
+try:
+    event = load_json(args.event)
+    prior = load_json(args.state) if args.state.exists() else None
+    if prior is None and args.backend == "github":
+        prior = discover_github_prior(args.repo, event["actionKey"])
+    decision = notification_decision(event, prior)
+    issue = {}
+    if args.backend == "github" and decision["action"] != "none":
+        if not args.owner:
+            raise ControlError("MAINTENANCE_OWNER is required")
+        issue = apply_github(args.repo, args.owner, event, decision)
+    updated = {
+        "schemaVersion": 1,
+        "actionKey": event["actionKey"],
+        "fingerprint": decision["fingerprint"],
+        "lastAction": decision["action"],
+        "issue": issue or (prior or {}).get("issue", {}),
+    }
+    write_json(args.output, updated)
+    print(json.dumps({**decision, "issue": issue}))
+except (ControlError, OSError, subprocess.CalledProcessError) as error:
+    detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) and error.stderr else str(error)
+    print(f"notification rejected: {detail}", file=sys.stderr)
+    raise SystemExit(1)

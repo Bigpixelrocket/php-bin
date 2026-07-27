@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 "$SCRIPT_DIR/check-public-language.sh"
+"$PROJECT_ROOT/maintenance/control.py" validate-policy
 "$SCRIPT_DIR/compare-modules.sh" \
   "$PROJECT_ROOT/tests/fixtures/modules.txt" \
   "$PROJECT_ROOT/tests/fixtures/expected-exact.txt" \
@@ -32,5 +33,10 @@ rm -f \
   "$PROJECT_ROOT/.artifacts/php-8.4.99-cli-macos-aarch64.tar.gz" \
   "$PROJECT_ROOT/.artifacts/SHA256SUMS"
 rmdir "$PROJECT_ROOT/.artifacts" 2>/dev/null || true
+
+(
+  cd "$PROJECT_ROOT"
+  python3 -m unittest discover -s tests -p 'test_*.py'
+)
 
 echo "All script tests passed."

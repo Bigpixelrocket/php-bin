@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""Create the exact event contract and composed prompt for one agent phase."""
+
+import argparse
+import json
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from maintenance.control import ControlError, instruction_digest, write_json  # noqa: E402
+
+
+CRITERIA = {
+    "investigation": [
+        {
+            "id": "phase-goal-correct",
+            "requirement": "The phase goal matches the current trigger and supplied inputs.",
+            "evidenceRequired": "Trigger, action key, and exact input digests.",
+        },
+        {
+            "id": "evidence-classification-complete",
+            "requirement": "Every material classification claim is unambiguous and evidence-bound.",
+            "evidenceRequired": "Captured digest and resolving locator for each material claim.",
+        },
+        {
+            "id": "preconditions-and-authority-explicit",
+            "requirement": "Exact preconditions, allowed paths, checks, risks, and downstream conditions are explicit.",
+            "evidenceRequired": "Plan fields containing exact SHAs, digests, paths, and checks.",
+        },
+        {
+            "id": "no-unresolved-investigation-work",
+            "requirement": "No missing source, contradiction, stop condition, or unresolved in-scope work remains.",
+            "evidenceRequired": "Empty unresolved array and evidence-backed summary.",
+        },
+    ],
+    "implementation": [
+        {
+            "id": "phase-goal-correct",
+            "requirement": "The admitted implementation goal still matches exact inputs.",
+            "evidenceRequired": "Admitted plan digest and exact base SHA.",
+        },
+        {
+            "id": "admitted-diff-complete",
+            "requirement": "The admitted change is complete and confined to admitted paths.",
+            "evidenceRequired": "Final diff and admitted-path comparison.",
+        },
+        {
+            "id": "advisory-checks-recorded",
+            "requirement": "Every required advisory check ran and all results are recorded.",
+            "evidenceRequired": "Commands, exit results, and logs.",
+        },
+        {
+            "id": "no-unresolved-implementation-work",
+            "requirement": "No in-scope work, contradiction, stop condition, or unexplained failure remains.",
+            "evidenceRequired": "Empty unresolved array and evidence-backed summary.",
+        },
+    ],
+    "repair": [
+        {
+            "id": "phase-goal-correct",
+            "requirement": "The repair goal still matches the admitted failure fingerprint.",
+            "evidenceRequired": "Failure fingerprint and exact base SHA.",
+        },
+        {
+            "id": "failure-cause-removed",
+            "requirement": "The named cause is removed without weakening or deleting a gate.",
+            "evidenceRequired": "Minimal diff and passing reproduction evidence.",
+        },
+        {
+            "id": "advisory-checks-recorded",
+            "requirement": "Every required advisory check ran and all results are recorded.",
+            "evidenceRequired": "Commands, exit results, and logs.",
+        },
+        {
+            "id": "no-unresolved-repair-work",
+            "requirement": "No repeated, unrelated, exhausted, or unresolved failure remains.",
+            "evidenceRequired": "Empty unresolved array and evidence-backed summary.",
+        },
+    ],
+}
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--phase", choices=sorted(CRITERIA), required=True)
+parser.add_argument("--action-key", required=True)
+parser.add_argument("--goal", required=True)
+parser.add_argument("--preconditions", type=pathlib.Path, required=True)
+parser.add_argument("--allowed-authority", action="append", default=[])
+parser.add_argument("--non-goal", action="append", default=[])
+parser.add_argument("--stop-condition", action="append", default=[])
+parser.add_argument("--shared", type=pathlib.Path, required=True)
+parser.add_argument("--phase-template", type=pathlib.Path, required=True)
+parser.add_argument("--contract-output", type=pathlib.Path, required=True)
+parser.add_argument("--prompt-output", type=pathlib.Path, required=True)
+args = parser.parse_args()
+
+try:
+    contract = {
+        "contractVersion": 1,
+        "phase": args.phase,
+        "goal": args.goal,
+        "actionKey": args.action_key,
+        "preconditions": json.loads(args.preconditions.read_text()),
+        "allowedAuthority": args.allowed_authority,
+        "nonGoals": args.non_goal,
+        "completionCriteria": CRITERIA[args.phase],
+        "stopConditions": args.stop_condition,
+    }
+    write_json(args.contract_output, contract)
+    digests = {
+        "shared": instruction_digest(args.shared),
+        "phaseTemplate": instruction_digest(args.phase_template),
+        "eventContract": instruction_digest(args.contract_output),
+    }
+    prompt = "\n\n".join(
+        [
+            args.shared.read_text().rstrip(),
+            args.phase_template.read_text().rstrip(),
+            "# Event-specific contract\n\n```json\n"
+            + json.dumps(contract, indent=2, sort_keys=True)
+            + "\n```",
+            "# Required instruction digests\n\n```json\n"
+            + json.dumps(digests, indent=2, sort_keys=True)
+            + "\n```",
+        ]
+    ) + "\n"
+    args.prompt_output.parent.mkdir(parents=True, exist_ok=True)
+    args.prompt_output.write_text(prompt)
+    print(
+        json.dumps(
+            {
+                "contract": str(args.contract_output),
+                "prompt": str(args.prompt_output),
+                "instructionDigests": digests,
+            }
+        )
+    )
+except (ControlError, OSError, json.JSONDecodeError) as error:
+    print(f"agent task preparation rejected: {error}", file=sys.stderr)
+    raise SystemExit(1)

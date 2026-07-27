@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""Capture a redacted, reproducible GitHub administrator-state snapshot."""
+
+import argparse
+import datetime as dt
+import hashlib
+import json
+import pathlib
+import subprocess
+import sys
+from typing import Any
+
+
+def gh_api(endpoint: str, allow_missing: bool = False) -> list[Any]:
+    result = subprocess.run(
+        ["gh", "api", endpoint, "--paginate", "--slurp"],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        if allow_missing and any(
+            marker in result.stderr for marker in ("404", "Not Found", "409", "Conflict")
+        ):
+            return []
+        raise RuntimeError(f"GitHub API failed for {endpoint}: {result.stderr.strip()}")
+    pages = json.loads(result.stdout)
+    if not isinstance(pages, list):
+        raise RuntimeError(f"GitHub API returned a non-page response for {endpoint}")
+    return pages
+
+
+def single_document(pages: list[Any], label: str, allow_missing: bool = False) -> Any:
+    if allow_missing and not pages:
+        return None
+    if len(pages) != 1 or not isinstance(pages[0], dict):
+        raise RuntimeError(f"GitHub API returned an ambiguous {label} response")
+    return pages[0]
+
+
+def paginated_items(pages: list[Any], key: str | None = None) -> list[Any]:
+    items = []
+    for page in pages:
+        if key is not None:
+            if not isinstance(page, dict) or not isinstance(page.get(key), list):
+                raise RuntimeError(f"GitHub API response is missing list field {key}")
+            items.extend(page[key])
+        elif isinstance(page, list):
+            items.extend(page)
+        else:
+            raise RuntimeError("GitHub API paginated response contains a non-list page")
+    return items
+
+
+def digest(value: dict[str, Any]) -> str:
+    body = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    return "sha256:" + hashlib.sha256(body).hexdigest()
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--repo", required=True)
+parser.add_argument("--output", type=pathlib.Path, required=True)
+args = parser.parse_args()
+
+try:
+    repository = single_document(gh_api(f"repos/{args.repo}"), "repository")
+    default_branch = repository["default_branch"]
+    snapshot = {
+        "schemaVersion": 1,
+        "repository": args.repo,
+        "capturedAt": dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "repositorySettings": {
+            key: repository.get(key)
+            for key in (
+                "visibility",
+                "default_branch",
+                "allow_auto_merge",
+                "delete_branch_on_merge",
+                "allow_squash_merge",
+                "allow_merge_commit",
+                "allow_rebase_merge",
+                "allow_update_branch",
+                "use_squash_pr_title_as_default",
+                "security_and_analysis",
+            )
+        },
+        "actionsPermissions": single_document(
+            gh_api(f"repos/{args.repo}/actions/permissions"), "Actions permissions"
+        ),
+        "selectedActions": single_document(
+            gh_api(
+                f"repos/{args.repo}/actions/permissions/selected-actions",
+                allow_missing=True,
+            ),
+            "selected Actions",
+            allow_missing=True,
+        ),
+        "workflowPermissions": single_document(
+            gh_api(f"repos/{args.repo}/actions/permissions/workflow"), "workflow permissions"
+        ),
+        "immutableReleases": single_document(
+            gh_api(f"repos/{args.repo}/immutable-releases"), "immutable releases"
+        ),
+        "authenticatedUserSubscription": single_document(
+            gh_api(f"repos/{args.repo}/subscription"), "subscription"
+        ),
+        "branchProtection": single_document(
+            gh_api(f"repos/{args.repo}/branches/{default_branch}/protection", allow_missing=True),
+            "branch protection",
+            allow_missing=True,
+        ),
+        "rulesets": paginated_items(gh_api(f"repos/{args.repo}/rulesets")),
+        "environments": single_document(
+            gh_api(f"repos/{args.repo}/environments"), "environments"
+        ),
+        "variables": sorted(
+            item["name"]
+            for item in paginated_items(
+                gh_api(f"repos/{args.repo}/actions/variables"), "variables"
+            )
+        ),
+        "secretNames": sorted(
+            item["name"]
+            for item in paginated_items(
+                gh_api(f"repos/{args.repo}/actions/secrets"), "secrets"
+            )
+        ),
+        "labels": sorted(
+            item["name"] for item in paginated_items(gh_api(f"repos/{args.repo}/labels"))
+        ),
+    }
+    snapshot["snapshotDigest"] = digest(snapshot)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
+    print(json.dumps({"repository": args.repo, "output": str(args.output), "digest": snapshot["snapshotDigest"]}))
+except (RuntimeError, OSError, KeyError, json.JSONDecodeError) as error:
+    print(f"administrator snapshot failed: {error}", file=sys.stderr)
+    raise SystemExit(1)

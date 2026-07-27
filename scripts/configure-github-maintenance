@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""Idempotently install reviewed GitHub repository settings."""
+
+import argparse
+import json
+import pathlib
+import subprocess
+import sys
+import tempfile
+
+
+def gh(*arguments: str, input_value: dict | None = None) -> str:
+    command = ["gh", *arguments]
+    if input_value is None:
+        result = subprocess.run(command, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    else:
+        with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
+            json.dump(input_value, handle)
+            handle.flush()
+            result = subprocess.run(
+                [*command, "--input", handle.name],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+    return result.stdout.strip()
+
+
+def ensure_label(repo: str, name: str, color: str, description: str) -> None:
+    existing = subprocess.run(
+        ["gh", "label", "list", "--repo", repo, "--search", name, "--json", "name"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    names = {item["name"] for item in json.loads(existing.stdout)}
+    if name in names:
+        gh("label", "edit", name, "--repo", repo, "--color", color, "--description", description)
+    else:
+        gh("label", "create", name, "--repo", repo, "--color", color, "--description", description)
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--repo", required=True)
+parser.add_argument("--owner", required=True)
+parser.add_argument("--required-check", required=True)
+args = parser.parse_args()
+
+try:
+    gh(
+        "api",
+        f"repos/{args.repo}",
+        "--method",
+        "PATCH",
+        "-F",
+        "allow_auto_merge=true",
+        "-F",
+        "delete_branch_on_merge=true",
+        "-F",
+        "allow_squash_merge=true",
+        "-F",
+        "allow_merge_commit=false",
+        "-F",
+        "allow_rebase_merge=false",
+        "-F",
+        "allow_update_branch=true",
+        "-F",
+        "use_squash_pr_title_as_default=true",
+    )
+    gh(
+        "api",
+        f"repos/{args.repo}/actions/permissions",
+        "--method",
+        "PUT",
+        input_value={"enabled": True, "allowed_actions": "selected", "sha_pinning_required": True},
+    )
+    gh(
+        "api",
+        f"repos/{args.repo}/actions/permissions/selected-actions",
+        "--method",
+        "PUT",
+        input_value={
+            "github_owned_allowed": True,
+            "verified_allowed": False,
+            "patterns_allowed": ["jdx/mise-action@*", "openai/codex-action@*"],
+        },
+    )
+    gh(
+        "api",
+        f"repos/{args.repo}/actions/permissions/workflow",
+        "--method",
+        "PUT",
+        input_value={
+            "default_workflow_permissions": "read",
+            "can_approve_pull_request_reviews": False,
+        },
+    )
+    gh("api", f"repos/{args.repo}/immutable-releases", "--method", "PUT")
+    gh("variable", "set", "MAINTENANCE_OWNER", "--repo", args.repo, "--body", args.owner)
+    ensure_label(args.repo, "maintenance", "1d76db", "Guarded PHP maintenance event")
+    ensure_label(args.repo, "attention-required", "d73a4a", "Owner action is required")
+    gh(
+        "api",
+        f"repos/{args.repo}/environments/php-maintenance-release",
+        "--method",
+        "PUT",
+        input_value={
+            "wait_timer": 0,
+            "prevent_self_review": False,
+            "reviewers": [],
+            "deployment_branch_policy": {
+                "protected_branches": True,
+                "custom_branch_policies": False,
+            },
+        },
+    )
+    protection = {
+        "required_status_checks": {
+            "strict": True,
+            "checks": [{"context": args.required_check, "app_id": 15368}],
+        },
+        "enforce_admins": True,
+        "required_pull_request_reviews": {
+            "dismiss_stale_reviews": True,
+            "require_code_owner_reviews": True,
+            "required_approving_review_count": 0,
+            "require_last_push_approval": False,
+        },
+        "restrictions": None,
+        "required_linear_history": True,
+        "allow_force_pushes": False,
+        "allow_deletions": False,
+        "block_creations": False,
+        "required_conversation_resolution": True,
+        "lock_branch": False,
+        "allow_fork_syncing": True,
+    }
+    gh(
+        "api",
+        f"repos/{args.repo}/branches/main/protection",
+        "--method",
+        "PUT",
+        input_value=protection,
+    )
+    print(json.dumps({"configured": True, "repo": args.repo, "owner": args.owner, "requiredCheck": args.required_check}))
+except (subprocess.CalledProcessError, OSError, json.JSONDecodeError) as error:
+    detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) and error.stderr else str(error)
+    print(f"GitHub maintenance configuration failed: {detail}", file=sys.stderr)
+    raise SystemExit(1)

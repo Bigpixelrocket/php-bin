@@ -1,2 +1,21 @@
-* @loadinglucian
-
+/.github/codex/ @loadinglucian
+/.github/workflows/ @loadinglucian
+/.github/CODEOWNERS @loadinglucian
+/.github/maintenance-operator.json @loadinglucian
+/.github/maintenance-pins.json @loadinglucian
+/.codex/ @loadinglucian
+/maintenance/ @loadinglucian
+/schemas/ @loadinglucian
+/scripts/admit-maintenance-plan @loadinglucian
+/scripts/capture-maintenance-evidence @loadinglucian
+/scripts/configure-github-maintenance @loadinglucian
+/scripts/maintenance-event @loadinglucian
+/scripts/notify-maintenance @loadinglucian
+/scripts/prepare-agent-task @loadinglucian
+/scripts/seal-maintenance-patch @loadinglucian
+/scripts/snapshot-github-admin-state @loadinglucian
+/scripts/validate-maintenance-archive @loadinglucian
+/scripts/verify-merge-admission @loadinglucian
+/scripts/release-maintenance @loadinglucian
+/scripts/watch-maintenance-evidence @loadinglucian
+/maintenance/policy-invariants.json @loadinglucian

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "patterns": [
+    ".github/codex/maintenance/**",
+    ".github/maintenance-operator.json",
+    ".github/maintenance-pins.json",
+    ".github/workflows/**",
+    ".codex/**",
+    "schemas/**",
+    "maintenance/**",
+    "scripts/admit-maintenance-plan",
+    "scripts/capture-maintenance-evidence",
+    "scripts/configure-github-maintenance",
+    "scripts/maintenance-event",
+    "scripts/notify-maintenance",
+    "scripts/prepare-agent-task",
+    "scripts/seal-maintenance-patch",
+    "scripts/snapshot-github-admin-state",
+    "scripts/validate-maintenance-archive",
+    "scripts/verify-merge-admission",
+    "scripts/release-maintenance",
+    "scripts/watch-maintenance-evidence",
+    "maintenance-events/**",
+    "maintenance-state/**",
+    ".github/CODEOWNERS"
+  ]
+}

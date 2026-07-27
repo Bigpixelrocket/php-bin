@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+"""Advance one legal immutable release transition."""
+
+import argparse
+import json
+import pathlib
+import subprocess
+import sys
+import tempfile
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from maintenance.control import (  # noqa: E402
+    ControlError,
+    LEGAL_RELEASE_TRANSITIONS,
+    load_json,
+    release_transition,
+    sha256_file,
+    validate_archive,
+    write_json,
+)
+
+
+def gh(*arguments: str, capture: bool = True) -> str:
+    result = subprocess.run(
+        ["gh", *arguments],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE,
+    )
+    return result.stdout.strip() if capture else ""
+
+
+def expected_assets(directory: pathlib.Path, version: str) -> dict[str, str]:
+    archive = directory / f"php-{version}-cli-macos-aarch64.tar.gz"
+    checksums = directory / "SHA256SUMS"
+    validate_archive(archive, version)
+    if not checksums.is_file():
+        raise ControlError("SHA256SUMS is missing")
+    expected_line = f"{sha256_file(archive).removeprefix('sha256:')}  {archive.name}"
+    if expected_line not in checksums.read_text().splitlines():
+        raise ControlError("SHA256SUMS does not bind the staged archive")
+    return {archive.name: sha256_file(archive), "SHA256SUMS": sha256_file(checksums)}
+
+
+def github_effect(
+    target: str,
+    repo: str,
+    version: str,
+    commit: str,
+    assets_dir: pathlib.Path,
+    digests: dict[str, str],
+) -> None:
+    if target == "built":
+        return
+    if target == "draft_created":
+        ref_query = subprocess.run(
+            ["gh", "api", f"repos/{repo}/git/ref/tags/{version}"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if ref_query.returncode != 0:
+            message = json.dumps(
+                {
+                    "tag": version,
+                    "message": (
+                        f"PHP {version} for macOS arm64\n\n"
+                        + "\n".join(f"{name}: {digest}" for name, digest in sorted(digests.items()))
+                    ),
+                    "object": commit,
+                    "type": "commit",
+                }
+            )
+            # gh cannot combine --input - with an in-memory string without a shell.
+            with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
+                handle.write(message)
+                handle.flush()
+                tag_sha = json.loads(
+                    gh("api", f"repos/{repo}/git/tags", "--method", "POST", "--input", handle.name)
+                )["sha"]
+            gh(
+                "api",
+                f"repos/{repo}/git/refs",
+                "--method",
+                "POST",
+                "-f",
+                f"ref=refs/tags/{version}",
+                "-f",
+                f"sha={tag_sha}",
+            )
+        else:
+            ref = json.loads(ref_query.stdout)
+            object_sha = ref["object"]["sha"]
+            if ref["object"]["type"] == "tag":
+                tag = json.loads(gh("api", f"repos/{repo}/git/tags/{object_sha}"))
+                object_sha = tag["object"]["sha"]
+            if object_sha != commit:
+                raise ControlError("existing tag does not point to the admitted commit")
+        existing = subprocess.run(
+            ["gh", "release", "view", version, "--repo", repo, "--json", "isDraft,tagName"],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if existing.returncode == 0:
+            # A matching published release is a recoverable partial transaction.
+            # Later verification downloads it and proves every byte before the
+            # idempotent publish transition is accepted.
+            json.loads(existing.stdout)
+        else:
+            gh(
+                "release",
+                "create",
+                version,
+                *(str(assets_dir / name) for name in sorted(digests)),
+                "--repo",
+                repo,
+                "--title",
+                f"PHP {version} for macOS arm64",
+                "--notes",
+                "Guarded maintenance release. Asset digests are recorded in SHA256SUMS.",
+                "--draft",
+                "--verify-tag",
+                capture=False,
+            )
+    elif target in {"draft_verified", "public_verified"}:
+        with tempfile.TemporaryDirectory(prefix="maintenance-download-") as temporary:
+            gh(
+                "release",
+                "download",
+                version,
+                "--repo",
+                repo,
+                "--dir",
+                temporary,
+                "--clobber",
+                capture=False,
+            )
+            for name, digest in digests.items():
+                if sha256_file(pathlib.Path(temporary) / name) != digest:
+                    raise ControlError(f"downloaded release asset differs: {name}")
+    elif target == "published":
+        release = json.loads(gh("release", "view", version, "--repo", repo, "--json", "isDraft"))
+        if release["isDraft"]:
+            gh("release", "edit", version, "--repo", repo, "--draft=false", capture=False)
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--transaction", type=pathlib.Path, required=True)
+parser.add_argument("--target", required=True)
+parser.add_argument("--assets", type=pathlib.Path, required=True)
+parser.add_argument("--version", required=True)
+parser.add_argument("--commit", required=True)
+parser.add_argument("--backend", choices=["filesystem", "github"], default="filesystem")
+parser.add_argument("--repo", default="bigpixelrocket/php-bin")
+parser.add_argument("--output", type=pathlib.Path, required=True)
+args = parser.parse_args()
+
+try:
+    transaction = load_json(args.transaction)
+    if LEGAL_RELEASE_TRANSITIONS.get(transaction.get("state", "requested")) != args.target:
+        raise ControlError("target is not the single legal next transition")
+    digests = expected_assets(args.assets, args.version)
+    if args.backend == "github":
+        github_effect(args.target, args.repo, args.version, args.commit, args.assets, digests)
+    updated = release_transition(transaction, args.target, args.assets, digests)
+    updated["version"] = args.version
+    updated["commit"] = args.commit
+    write_json(args.output, updated)
+    print(json.dumps(updated))
+except (ControlError, OSError, subprocess.CalledProcessError) as error:
+    detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) and error.stderr else str(error)
+    print(f"release transition rejected: {detail}", file=sys.stderr)
+    raise SystemExit(1)

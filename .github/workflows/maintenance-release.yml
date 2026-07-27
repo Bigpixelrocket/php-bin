@@ -1,0 +1,354 @@
+name: Guarded PHP release transaction
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Admitted stable PHP patch or rebuild tag
+        required: true
+        type: string
+      exact_commit:
+        description: Exact admitted merged php-bin commit
+        required: true
+        type: string
+      action_key:
+        description: Exact admitted maintenance action key
+        required: true
+        type: string
+      investigation_run_id:
+        description: Run containing retained admitted evidence and plan
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  issues: write
+  actions: read
+  pull-requests: write
+
+concurrency:
+  group: guarded-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 150
+    environment: php-maintenance-release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.exact_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: bigpixelrocket/mise-php
+          path: mise-php
+          persist-credentials: false
+      - uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4
+      - name: Download admitted plan and retained evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "${{ inputs.investigation_run_id }}" \
+            --name "maintenance-investigation-${{ inputs.investigation_run_id }}" \
+            --dir admitted-run
+      - name: Verify stable version and exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          EXACT_COMMIT: ${{ inputs.exact_commit }}
+          ACTION_KEY: ${{ inputs.action_key }}
+        run: |
+          ./maintenance/control.py validate-policy
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]
+          [[ "$EXACT_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$ACTION_KEY" =~ ^[A-Za-z0-9._:-]+$ ]]
+          test "$(git rev-parse HEAD)" = "$EXACT_COMMIT"
+          test "$(jq -r .actionKey admitted-run/maintenance-plan.json)" = "$ACTION_KEY"
+          test "$(jq -r .releaseIntent.version admitted-run/maintenance-plan.json)" = "$VERSION"
+          test "$(jq -r .preconditions.phpBinHead admitted-run/maintenance-plan.json)" = "$EXACT_COMMIT"
+          test "$(jq -r .preconditions.supportPolicyDigest admitted-run/maintenance-plan.json)" = "$(./maintenance/control.py digest support-policy.json)"
+          test "$(jq -r .unattendedMutation .github/maintenance-operator.json)" = "enabled"
+          mkdir -p release-run
+          gh api "repos/${{ github.repository }}/contents/.github/maintenance-operator.json?ref=main" \
+            --jq .content | base64 --decode > release-run/current-operator.json
+          test "$(jq -r .unattendedMutation release-run/current-operator.json)" = "enabled"
+          mise_commit="$(jq -r .sha admitted-run/evidence/raw/mise_php_state.body)"
+          [[ "$mise_commit" =~ ^[0-9a-f]{40}$ ]]
+          git -C mise-php fetch origin "$mise_commit"
+          git -C mise-php checkout --detach "$mise_commit"
+          test "$(git -C mise-php rev-parse HEAD)" = "$mise_commit"
+      - name: Re-capture authoritative evidence
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/capture-maintenance-evidence --output release-run/evidence
+          while IFS= read -r encoded; do
+            capture_id="$(printf '%s' "$encoded" | base64 --decode | jq -r .captureId)"
+            admitted_digest="$(printf '%s' "$encoded" | base64 --decode | jq -r .digest)"
+            current_digest="$(jq -r --arg id "$capture_id" '.captures[] | select(.captureId==$id) | .digest' release-run/evidence/evidence-manifest.json)"
+            test "$current_digest" = "$admitted_digest"
+          done < <(jq -r '.evidence[] | @base64' admitted-run/maintenance-plan.json)
+      - name: Verify cross-repository readiness when required
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          action="$(jq -r .action admitted-run/maintenance-plan.json)"
+          if [[ "$action" == "new_branch" ]]; then
+            filename="$(printf '%s' "${{ inputs.action_key }}" | tr ':/' '--').json"
+            event="maintenance-events/$filename"
+            test -f "$event"
+            test "$(jq -r .state "$event")" = "php_bin_ready"
+            gh api "repos/bigpixelrocket/mise-php/contents/readiness/$filename?ref=main" \
+              --jq .content | base64 --decode > release-run/mise-readiness.json
+            test "$(jq -r .actionKey release-run/mise-readiness.json)" = "${{ inputs.action_key }}"
+            test "$(jq -r .ready release-run/mise-readiness.json)" = "true"
+            test "$(jq -r .policyDigest release-run/mise-readiness.json)" = "$(jq -r .supportPolicyDigest "$event")"
+            test "$(jq -r .policyInvariantsDigest release-run/mise-readiness.json)" = "$(jq -r .policyInvariantsDigest "$event")"
+            policy_commit="$(jq -r .phpBinPolicyCommit release-run/mise-readiness.json)"
+            test "$(jq -r .misePhpCommit release-run/mise-readiness.json)" = "$(git -C mise-php rev-parse HEAD)"
+            gh api "repos/${{ github.repository }}/contents/support-policy.json?ref=$policy_commit" \
+              --jq .content | base64 --decode > release-run/readiness-policy.json
+            test "sha256:$(shasum -a 256 release-run/readiness-policy.json | awk '{print $1}')" = "$(jq -r .policyDigest release-run/mise-readiness.json)"
+          fi
+      - name: Reconcile existing immutable release assets
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p .artifacts
+          if gh release view "${{ inputs.version }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release download "${{ inputs.version }}" --repo "${{ github.repository }}" --dir .artifacts
+            ./scripts/validate-maintenance-archive \
+              --archive ".artifacts/php-${{ inputs.version }}-cli-macos-aarch64.tar.gz" \
+              --version "${{ inputs.version }}"
+            archive_digest="$(shasum -a 256 ".artifacts/php-${{ inputs.version }}-cli-macos-aarch64.tar.gz" | awk '{print $1}')"
+            grep -Fx "$archive_digest  php-${{ inputs.version }}-cli-macos-aarch64.tar.gz" .artifacts/SHA256SUMS
+            echo "reuse=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "reuse=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install build dependencies
+        if: steps.existing.outputs.reuse != 'true'
+        run: ./scripts/install-build-deps.sh
+      - name: Install pinned StaticPHP
+        if: steps.existing.outputs.reuse != 'true'
+        run: ./scripts/install-spc.sh
+      - name: Build exact patch
+        if: steps.existing.outputs.reuse != 'true'
+        run: ./scripts/build.sh "${{ inputs.version }}" s4
+      - name: Package and validate staged bytes
+        if: steps.existing.outputs.reuse != 'true'
+        run: |
+          ./scripts/package.sh ".build/${{ inputs.version }}/s4/buildroot/bin/php" "${{ inputs.version }}"
+          ./scripts/validate-maintenance-archive \
+            --archive ".artifacts/php-${{ inputs.version }}-cli-macos-aarch64.tar.gz" \
+            --version "${{ inputs.version }}"
+      - name: Initialize release transaction and event
+        run: |
+          mkdir -p release-run
+          printf '{"schemaVersion":1,"state":"requested","history":[]}\n' > release-run/transaction.json
+          filename="$(printf '%s' "${{ inputs.action_key }}" | tr ':/' '--').json"
+          if [[ -f "maintenance-events/$filename" ]]; then
+            cp "maintenance-events/$filename" release-run/event.json
+            if [[ "$(jq -r .state release-run/event.json)" == "php_bin_ready" \
+              && "$(jq -r .action admitted-run/maintenance-plan.json)" == "new_branch" ]]; then
+              jq -n --slurpfile ready release-run/mise-readiness.json \
+                '[{kind:"mise_readiness",record:$ready[0]}]' > release-run/evidence.json
+              ./scripts/maintenance-event --event release-run/event.json --target mise_ready \
+                --evidence release-run/evidence.json --output release-run/next-event.json
+              mv release-run/next-event.json release-run/event.json
+            fi
+            jq -n --arg planDigest "$(jq -r .planDigest admitted-run/admission.json)" \
+              '[{kind:"admitted_release_intent",planDigest:$planDigest}]' > release-run/evidence.json
+            ./scripts/maintenance-event --event release-run/event.json --target release_requested \
+              --evidence release-run/evidence.json --output release-run/next-event.json
+            mv release-run/next-event.json release-run/event.json
+          else
+            jq -n \
+              --arg actionKey "${{ inputs.action_key }}" \
+              --arg classification "$(jq -r .action admitted-run/maintenance-plan.json)" \
+              --arg commit "${{ inputs.exact_commit }}" \
+              --arg planDigest "$(jq -r .planDigest admitted-run/admission.json)" \
+              --arg evidenceManifestDigest "$(jq -r .manifestDigest admitted-run/evidence/evidence-manifest.json)" \
+              --argjson evidenceDigests "$(jq '[.evidence[].digest]' admitted-run/maintenance-plan.json)" \
+              '{schemaVersion:1,actionKey:$actionKey,classification:$classification,state:"release_requested",history:[],phpBinCommit:$commit,planDigest:$planDigest,evidenceManifestDigest:$evidenceManifestDigest,evidenceDigests:$evidenceDigests}' \
+              > release-run/event.json
+          fi
+      - name: Advance through build and draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/contents/.github/maintenance-operator.json?ref=main" \
+            --jq .content | base64 --decode > release-run/current-operator.json
+          test "$(jq -r .unattendedMutation release-run/current-operator.json)" = "enabled"
+          for target in built draft_created draft_verified; do
+            ./scripts/release-maintenance \
+              --transaction release-run/transaction.json \
+              --target "$target" \
+              --assets .artifacts \
+              --version "${{ inputs.version }}" \
+              --commit "${{ inputs.exact_commit }}" \
+              --backend github \
+              --repo "${{ github.repository }}" \
+              --output release-run/next.json
+            mv release-run/next.json release-run/transaction.json
+          done
+      - name: Verify draft installation through temporary artifact path
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          temporary="$(mktemp -d)"
+          gh release download "${{ inputs.version }}" --repo "${{ github.repository }}" --dir "$temporary"
+          port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+          ./scripts/serve-maintenance-artifact --port "$port" --assets "$temporary" --version "${{ inputs.version }}" &
+          server_pid="$!"
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          ready=false
+          for _ in {1..50}; do
+            if curl --silent --fail "http://127.0.0.1:$port/health"; then
+              ready=true
+              break
+            fi
+            sleep 0.1
+          done
+          "$ready" || { echo "staged artifact server did not become healthy" >&2; exit 1; }
+          export MISE_PHP_API_BASE_URL="http://127.0.0.1:$port"
+          export MISE_DATA_DIR="$temporary/mise/data"
+          export MISE_CACHE_DIR="$temporary/mise/cache"
+          export MISE_CONFIG_DIR="$temporary/mise/config"
+          export MISE_STATE_DIR="$temporary/mise/state"
+          mise plugin link php "$GITHUB_WORKSPACE/mise-php"
+          mise install "php@${{ inputs.version }}"
+          mise exec "php@${{ inputs.version }}" -- php -v
+          mise exec "php@${{ inputs.version }}" -- php -m | grep -Fx Core
+          kill "$server_pid"
+          wait "$server_pid" || true
+          trap - EXIT
+      - name: Publish unchanged draft and verify public bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/contents/.github/maintenance-operator.json?ref=main" \
+            --jq .content | base64 --decode > release-run/current-operator.json
+          test "$(jq -r .unattendedMutation release-run/current-operator.json)" = "enabled"
+          for target in published public_verified complete; do
+            ./scripts/release-maintenance \
+              --transaction release-run/transaction.json \
+              --target "$target" \
+              --assets .artifacts \
+              --version "${{ inputs.version }}" \
+              --commit "${{ inputs.exact_commit }}" \
+              --backend github \
+              --repo "${{ github.repository }}" \
+              --output release-run/next.json
+            mv release-run/next.json release-run/transaction.json
+          done
+          test "$(gh release view "${{ inputs.version }}" --repo "${{ github.repository }}" --json isImmutable --jq .isImmutable)" = "true"
+          verified=false
+          for _ in {1..12}; do
+            if gh release verify "${{ inputs.version }}" --repo "${{ github.repository }}" --format json \
+              > release-run/release-attestation.json; then
+              verified=true
+              break
+            fi
+            sleep 5
+          done
+          test "$verified" = "true"
+      - name: Verify fresh public exact-version and branch-shorthand installs
+        run: |
+          unset MISE_PHP_API_BASE_URL
+          temporary="$(mktemp -d)"
+          export MISE_DATA_DIR="$temporary/data"
+          export MISE_CACHE_DIR="$temporary/cache"
+          export MISE_CONFIG_DIR="$temporary/config"
+          export MISE_STATE_DIR="$temporary/state"
+          branch="${{ inputs.version }}"
+          branch="${branch%%-*}"
+          branch="${branch%.*}"
+          mise plugin link php "$GITHUB_WORKSPACE/mise-php"
+          mise install "php@${{ inputs.version }}"
+          mise install "php@$branch"
+          mise exec "php@${{ inputs.version }}" -- php -v
+          mise exec "php@$branch" -- php -v
+      - name: Complete durable event and notify owner
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          jq -n --arg version "${{ inputs.version }}" --argjson assets "$(jq .assetDigests release-run/transaction.json)" \
+            '[{kind:"published_release",version:$version,assetDigests:$assets}]' > release-run/evidence.json
+          ./scripts/maintenance-event --event release-run/event.json --target released \
+            --evidence release-run/evidence.json --output release-run/next-event.json
+          mv release-run/next-event.json release-run/event.json
+          jq -n --arg version "${{ inputs.version }}" \
+            '[{kind:"fresh_public_mise_installs",version:$version,modes:["exact","branch_shorthand"]}]' > release-run/evidence.json
+          ./scripts/maintenance-event --event release-run/event.json --target public_install_verified \
+            --evidence release-run/evidence.json --output release-run/next-event.json
+          mv release-run/next-event.json release-run/event.json
+          jq -n '[{kind:"transaction_complete"}]' > release-run/evidence.json
+          ./scripts/maintenance-event --event release-run/event.json --target complete \
+            --evidence release-run/evidence.json --output release-run/next-event.json
+          mv release-run/next-event.json release-run/event.json
+          jq '.severity="info" | .summary="PHP ${{ inputs.version }} was published and verified through fresh exact and branch-shorthand mise installs." | .finalResult="passed"' \
+            release-run/event.json > release-run/notification-event.json
+          ./scripts/notify-maintenance \
+            --event release-run/notification-event.json \
+            --state release-run/notification-state.json \
+            --output release-run/notification-next.json \
+            --backend github \
+            --repo "${{ github.repository }}" \
+            --owner "${{ vars.MAINTENANCE_OWNER }}"
+      - name: Commit final event record through a checked PR
+        id: event_pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch origin main
+          git checkout -B "maintenance/event-${{ github.run_id }}" origin/main
+          base="$(git rev-parse HEAD)"
+          filename="$(printf '%s' "${{ inputs.action_key }}" | tr ':/' '--').json"
+          cp release-run/event.json "maintenance-events/$filename"
+          git add "maintenance-events/$filename"
+          git -c user.name=maintenance-release -c user.email=maintenance@invalid \
+            commit -m "chore: complete ${{ inputs.action_key }}"
+          head="$(git rev-parse HEAD)"
+          record="maintenance-events/$filename"
+          digest="sha256:$(shasum -a 256 "$record" | awk '{print $1}')"
+          gh auth setup-git
+          git push origin HEAD
+          url="$(gh pr create --base main --head "maintenance/event-${{ github.run_id }}" \
+            --title "chore: complete ${{ inputs.action_key }}" \
+            --body "Durable event record for the immutable verified release transaction.")"
+          echo "number=${url##*/}" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head" >> "$GITHUB_OUTPUT"
+          echo "record=$record" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Validate and merge final event record
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr checks "${{ steps.event_pr.outputs.number }}" --watch --fail-fast --interval 10
+          gh pr checks "${{ steps.event_pr.outputs.number }}" --json name,bucket,link > release-run/event-checks.json
+          jq -e '[.[] | select(.name=="Script checks") | .bucket] == ["pass"]' release-run/event-checks.json
+          actual="$(gh pr view "${{ steps.event_pr.outputs.number }}" --json headRefOid --jq .headRefOid)"
+          test "$actual" = "${{ steps.event_pr.outputs.head_sha }}"
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "${{ steps.event_pr.outputs.base_sha }}"
+          test "$(git rev-list --parents -n 1 "$actual")" = "$actual ${{ steps.event_pr.outputs.base_sha }}"
+          test "$(git diff --name-only "${{ steps.event_pr.outputs.base_sha }}" "$actual")" = "${{ steps.event_pr.outputs.record }}"
+          test "sha256:$(git show "$actual:${{ steps.event_pr.outputs.record }}" | shasum -a 256 | awk '{print $1}')" = "${{ steps.event_pr.outputs.digest }}"
+          gh pr merge "${{ steps.event_pr.outputs.number }}" --squash --delete-branch
+      - name: Retain transaction and exact staging bytes
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-transaction-${{ inputs.version }}-${{ github.run_id }}
+          path: |
+            .artifacts/
+            release-run/
+          if-no-files-found: error
+          retention-days: 90
+          include-hidden-files: true

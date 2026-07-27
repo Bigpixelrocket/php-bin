@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "actions": {
+    "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+    "actions/cache": "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+    "actions/download-artifact": "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+    "actions/upload-artifact": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    "jdx/mise-action": "9e7f7633ff6f6d6048a9418a68d48f288f50eb14",
+    "openai/codex-action": "52fe01ec70a42f454c9d2ebd47598f9fd6893d56"
+  },
+  "workflows": {
+    ".github/workflows/maintenance-e2e.yml": "sha256:6f605563a1359297180c6d444443098954dc18dbc778b3c4049b28d3e692da3f"
+  }
+}
