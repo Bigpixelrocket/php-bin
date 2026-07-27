@@ -105,7 +105,10 @@ try:
         },
     )
     protection = {
-        "required_status_checks": {"strict": True, "contexts": [args.required_check]},
+        "required_status_checks": {
+            "strict": True,
+            "checks": [{"context": args.required_check, "app_id": 15368}],
+        },
         "enforce_admins": True,
         "required_pull_request_reviews": {
             "dismiss_stale_reviews": True,

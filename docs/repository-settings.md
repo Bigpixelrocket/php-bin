@@ -9,6 +9,8 @@ Required repository state:
 
 - Require a pull request before merging.
 - Require the `Script checks` status check.
+- Bind the required check to the GitHub Actions app, preventing another app
+  from satisfying the same context name.
 - Require conversation resolution.
 - Require linear history; block force pushes and branch deletion.
 - Enforce protection for administrators and require CODEOWNER approval for
