@@ -29,6 +29,8 @@ Required repository state:
   SHA.
 - Create the protected `php-maintenance-release` environment, limited to
   protected branches, and disable administrator bypass.
+- Create the protected `php-maintenance-agent-canary` environment with the
+  same protected-branch-only policy and disabled administrator bypass.
 - Enable Dependabot security updates, provider-pattern secret scanning, and
   secret-scanning push protection. Request validity checks and non-provider
   patterns as well; GitHub may retain those two as disabled until the

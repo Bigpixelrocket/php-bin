@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "patterns": [
     ".github/codex/maintenance/**",
+    ".github/codex-action-contract.json",
     ".github/maintenance-operator.json",
     ".github/maintenance-pins.json",
     ".github/workflows/**",
@@ -17,6 +18,7 @@
     "scripts/seal-maintenance-patch",
     "scripts/snapshot-github-admin-state",
     "scripts/validate-maintenance-archive",
+    "scripts/validate-codex-action-inputs",
     "scripts/verify-merge-admission",
     "scripts/release-maintenance",
     "scripts/watch-maintenance-evidence",
