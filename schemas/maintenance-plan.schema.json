@@ -73,7 +73,7 @@
         "mise-php": {"type": "array", "items": {"type": "string"}}
       }
     },
-    "requiredChecks": {"type": "array", "items": {"type": "string"}, "const": ["Script checks"]},
+    "requiredChecks": {"type": "array", "items": {"type": "string", "enum": ["Script checks"]}, "minItems": 1, "maxItems": 1},
     "releaseIntent": {
       "type": ["object", "null"],
       "additionalProperties": false,
