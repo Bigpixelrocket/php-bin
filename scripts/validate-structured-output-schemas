@@ -12,6 +12,7 @@ from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 OUTPUT_SCHEMA_RE = re.compile(r'--output-schema","([^"]+\.json)"')
+UNSUPPORTED_KEYWORDS = {"uniqueItems"}
 
 
 def fail(message: str) -> None:
@@ -44,6 +45,10 @@ def validate_node(node: Any, location: str) -> None:
     if ("const" in node or "enum" in node) and "type" not in node:
         fail(f"{location} uses const or enum without an explicit type")
 
+    unsupported = sorted(UNSUPPORTED_KEYWORDS.intersection(node))
+    if unsupported:
+        fail(f"{location} uses unsupported keywords: {', '.join(unsupported)}")
+
     for key, value in node.items():
         validate_node(value, f"{location}.{key}")
 
@@ -72,4 +77,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

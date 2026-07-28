@@ -49,7 +49,7 @@
       }
     },
     "researchSources": {"type": "array", "items": {"type": "string"}},
-    "repositories": {"type": "array", "items": {"type": "string", "enum": ["php-bin", "mise-php"]}, "uniqueItems": true},
+    "repositories": {"type": "array", "items": {"type": "string", "enum": ["php-bin", "mise-php"]}},
     "preconditions": {
       "type": "object",
       "additionalProperties": false,
@@ -66,11 +66,11 @@
       "additionalProperties": false,
       "required": ["php-bin", "mise-php"],
       "properties": {
-        "php-bin": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
-        "mise-php": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+        "php-bin": {"type": "array", "items": {"type": "string"}},
+        "mise-php": {"type": "array", "items": {"type": "string"}}
       }
     },
-    "requiredChecks": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "requiredChecks": {"type": "array", "items": {"type": "string"}},
     "releaseIntent": {
       "type": ["object", "null"],
       "additionalProperties": false,
@@ -80,7 +80,7 @@
         "sourceIdentifier": {"type": "string", "minLength": 1}
       }
     },
-    "agentOperations": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "agentOperations": {"type": "array", "items": {"type": "string"}},
     "budgets": {
       "type": "object",
       "additionalProperties": false,
