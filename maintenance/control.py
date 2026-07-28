@@ -263,6 +263,24 @@ def resolve_json_pointer(document: Any, pointer: str) -> Any:
     return current
 
 
+def validate_stable_release_evidence(
+    action: str,
+    release_intent: dict[str, Any] | None,
+    resolved_evidence: list[dict[str, Any]],
+) -> None:
+    if action not in {"new_patch", "new_branch"}:
+        return
+    require(isinstance(release_intent, dict), "stable release action has no release intent")
+    version = release_intent.get("version")
+    require(
+        any(
+            item.get("captureId") == "php_release_feed" and item.get("value") == version
+            for item in resolved_evidence
+        ),
+        "stable release version is not exact evidence in the official PHP release feed",
+    )
+
+
 def validate_evidence_state_record(record: dict[str, Any]) -> None:
     require(isinstance(record, dict), "evidence state must be an object")
     require(
@@ -508,6 +526,7 @@ def validate_plan(
             "stale support policy precondition",
         )
     evidence_refs = {}
+    resolved_evidence = []
     for index, evidence in enumerate(plan.get("evidence", [])):
         capture, body = load_capture(manifest_path, evidence.get("captureId", ""))
         require(evidence.get("digest") == capture["digest"], "plan evidence digest mismatch")
@@ -517,13 +536,17 @@ def validate_plan(
                 document = json.loads(body)
             except json.JSONDecodeError as error:
                 raise ControlError("JSON locator targets a non-JSON capture") from error
-            resolve_json_pointer(document, locator.get("value", ""))
+            resolved_value = resolve_json_pointer(document, locator.get("value", ""))
         elif locator.get("kind") == "text_fragment":
             fragment = locator.get("value", "")
             require(bool(fragment) and fragment.encode() in body, "text locator does not resolve")
+            resolved_value = fragment
         else:
             raise ControlError("unsupported evidence locator")
         evidence_refs[f"evidence[{index}]"] = evidence
+        resolved_evidence.append(
+            {"captureId": evidence.get("captureId"), "value": resolved_value}
+        )
     research_sources = plan.get("researchSources", [])
     require(isinstance(research_sources, list), "researchSources must be an array")
     precondition_refs = {f"preconditions.{key}" for key in declared_heads}
@@ -571,6 +594,7 @@ def validate_plan(
             not re.search(r"(?:alpha|beta|rc|dev)", version, re.I),
             "prerelease intent is forbidden",
         )
+    validate_stable_release_evidence(plan.get("action", ""), release_intent, resolved_evidence)
     operations = plan.get("agentOperations")
     require(isinstance(operations, list), "agentOperations must be an array")
     require(all(isinstance(operation, str) for operation in operations), "agentOperations must contain strings")
