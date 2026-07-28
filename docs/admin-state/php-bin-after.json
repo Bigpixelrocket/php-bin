@@ -71,7 +71,7 @@
     },
     "url": "https://api.github.com/repos/Bigpixelrocket/php-bin/branches/main/protection"
   },
-  "capturedAt": "2026-07-28T09:06:41Z",
+  "capturedAt": "2026-07-28T13:05:02Z",
   "environments": {
     "environments": [
       {
@@ -182,12 +182,12 @@
     ],
     "verified_allowed": false
   },
-  "snapshotDigest": "sha256:3919519486d0614af629c4fba227981a104ba2668e974deb7aecc3702b808eba",
+  "snapshotDigest": "sha256:3d0ed7f751c408e71033bdc593f7eeba2161470658277281d1c409a7b0572797",
   "variables": [
     "MAINTENANCE_OWNER"
   ],
   "workflowPermissions": {
-    "can_approve_pull_request_reviews": false,
+    "can_approve_pull_request_reviews": true,
     "default_workflow_permissions": "read"
   }
 }

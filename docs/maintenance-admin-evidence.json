@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "capturedAt": "2026-07-27T10:18:59Z",
+  "capturedAt": "2026-07-28T13:05:56Z",
   "planExecutor": "OpenAI Codex under loadinglucian authorization",
   "repositories": {
     "php-bin": {
@@ -10,7 +10,7 @@
       },
       "afterSnapshot": {
         "path": "docs/admin-state/php-bin-after.json",
-        "digest": "sha256:3919519486d0614af629c4fba227981a104ba2668e974deb7aecc3702b808eba"
+        "digest": "sha256:3d0ed7f751c408e71033bdc593f7eeba2161470658277281d1c409a7b0572797"
       },
       "settingsPullRequests": [
         "https://github.com/Bigpixelrocket/php-bin/pull/8",
@@ -24,7 +24,7 @@
       },
       "afterSnapshot": {
         "path": "../mise-php/docs/admin-state/mise-php-after.json",
-        "digest": "sha256:c403c9c4c6abab5518aed00a89f5d89b3233921e6a49627e12c2b7d953da6086"
+        "digest": "sha256:e50672433148e1054cd0436af11f47cbc7bf643db650eaed166ffcd1633fa632"
       },
       "settingsPullRequests": [
         "https://github.com/Bigpixelrocket/mise-php/pull/9",
@@ -61,6 +61,16 @@
   },
   "protectionRestored": true,
   "immutableReleasesEnabled": true,
+  "organizationWorkflowPermissions": {
+    "defaultWorkflowPermissions": "read",
+    "actionsCanCreateAndApprovePullRequests": true,
+    "runtimeWorkflowsSubmitApprovingReviews": false,
+    "verifiedThroughOrganizationSettingsAt": "2026-07-28T13:05:56Z",
+    "repositoryReadBackVerified": [
+      "Bigpixelrocket/php-bin",
+      "Bigpixelrocket/mise-php"
+    ]
+  },
   "releaseEnvironment": {
     "protectedBranchesOnly": true,
     "administratorBypass": false
