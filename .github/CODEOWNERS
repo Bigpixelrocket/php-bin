@@ -17,6 +17,7 @@
 /scripts/snapshot-github-admin-state @loadinglucian
 /scripts/validate-maintenance-archive @loadinglucian
 /scripts/validate-codex-action-inputs @loadinglucian
+/scripts/validate-structured-output-schemas @loadinglucian
 /scripts/verify-merge-admission @loadinglucian
 /scripts/release-maintenance @loadinglucian
 /scripts/watch-maintenance-evidence @loadinglucian
