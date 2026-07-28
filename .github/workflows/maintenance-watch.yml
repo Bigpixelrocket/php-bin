@@ -244,9 +244,10 @@ jobs:
               --title "chore: record reviewed maintenance evidence" \
               --body "Opaque evidence state for a reviewed no-change result.")"
             number="${url##*/}"
-            gh pr checks "$number" --watch --fail-fast --interval 10
-            gh pr checks "$number" --json name,bucket,link > maintenance-plan-download/no-change-checks.json
+            gh pr checks "$number" --required --watch --fail-fast --interval 10
+            gh pr checks "$number" --required --json name,bucket,link > maintenance-plan-download/no-change-checks.json
             jq -e '[.[] | select(.name=="Script checks") | .bucket] == ["pass"]' maintenance-plan-download/no-change-checks.json
+            jq -e '[.[] | select(.name=="Protected controls") | .bucket] == ["pass"]' maintenance-plan-download/no-change-checks.json
             test "$(gh pr view "$number" --json headRefOid --jq .headRefOid)" = "$head"
             git fetch origin main
             test "$(git rev-parse origin/main)" = "$base"
