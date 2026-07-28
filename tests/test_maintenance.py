@@ -25,6 +25,7 @@ from maintenance.control import (
     validate_completion_assessment,
     validate_evidence_attestation_predicate,
     validate_evidence_state_record,
+    validate_stable_release_evidence,
     verify_merge,
     watch_decision,
     path_is_protected,
@@ -187,6 +188,17 @@ class MaintenanceControlTests(unittest.TestCase):
         predicate["runId"] = "30359936150"
         with self.assertRaisesRegex(ControlError, "run mismatch"):
             validate_evidence_attestation_predicate(predicate, **expected)
+
+    def test_source_tag_alone_cannot_admit_a_stable_release(self):
+        release_intent = {"version": "8.5.9", "sourceIdentifier": "php_source_tags:deadbeef"}
+        tag_only = [{"captureId": "php_source_tags", "value": "php-8.5.9"}]
+        with self.assertRaisesRegex(ControlError, "official PHP release feed"):
+            validate_stable_release_evidence("new_patch", release_intent, tag_only)
+        validate_stable_release_evidence(
+            "new_patch",
+            release_intent,
+            [*tag_only, {"captureId": "php_release_feed", "value": "8.5.9"}],
+        )
 
     def test_illegal_event_transition_fails_closed(self):
         with self.assertRaises(ControlError):

@@ -156,7 +156,9 @@ def fixture_admission_inputs(directory: pathlib.Path, action: str = "new_patch")
     }
     raw = directory / "raw"
     raw.mkdir()
-    body = b'{"release":{"version":"8.5.9","stable":true}}\n'
+    release_versions = {"new_patch": "8.5.9", "new_branch": "8.6.0"}
+    release_version = release_versions.get(action, "8.5.9")
+    body = canonical_json({"release": {"version": release_version, "stable": True}})
     (raw / "release.body").write_bytes(body)
     manifest_path = directory / "evidence-manifest.json"
     manifest = {
@@ -177,8 +179,8 @@ def fixture_admission_inputs(directory: pathlib.Path, action: str = "new_patch")
         "branch_eol": "branch_eol:8.2:2026-12-31",
     }
     release_intent = (
-        {"version": "8.5.9", "sourceIdentifier": "php_release_feed"}
-        if action == "new_patch"
+        {"version": release_version, "sourceIdentifier": "php_release_feed"}
+        if action in {"new_patch", "new_branch"}
         else None
     )
     plan = {

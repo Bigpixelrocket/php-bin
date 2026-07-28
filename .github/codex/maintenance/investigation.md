@@ -35,6 +35,12 @@ If changed evidence has no maintenance consequence, use action `no_change` and
 the key `no_change:<first 16 hexadecimal characters of the evidence manifest
 digest>` so the reviewed snapshot remains uniquely auditable.
 
+A php-src tag can appear before an official stable release is published. A tag
+alone is never sufficient evidence for `new_patch` or `new_branch`. For either
+action, include a `php_release_feed` JSON-pointer evidence item whose resolved
+value is the exact `releaseIntent.version`; otherwise classify the tag-only
+change as `no_change` until the official feed publishes that version.
+
 The plan `actionKey` identifies the classified maintenance action, not the
 phase-scoped action key in the event contract. It must use one of the reviewed
 forms enforced by the output schema: `no_change`, `new_patch`, `new_branch`,
