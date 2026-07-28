@@ -19,6 +19,7 @@
     "scripts/snapshot-github-admin-state",
     "scripts/validate-maintenance-archive",
     "scripts/validate-codex-action-inputs",
+    "scripts/validate-structured-output-schemas",
     "scripts/verify-merge-admission",
     "scripts/release-maintenance",
     "scripts/watch-maintenance-evidence",

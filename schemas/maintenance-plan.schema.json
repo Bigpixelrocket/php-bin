@@ -2,30 +2,88 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://bigpixelrocket.dev/schemas/maintenance-plan.schema.json",
   "type": "object",
-  "required": ["schemaVersion", "actionKey", "action", "agentContract", "evidence", "repositories", "preconditions", "editsRequired", "allowedPaths", "requiredChecks", "agentOperations", "budgets", "notification", "risk", "completionAssessment", "summary"],
+  "additionalProperties": false,
+  "required": ["schemaVersion", "actionKey", "action", "agentContract", "evidence", "researchSources", "repositories", "preconditions", "editsRequired", "allowedPaths", "requiredChecks", "releaseIntent", "agentOperations", "budgets", "notification", "risk", "completionAssessment", "summary"],
   "properties": {
-    "schemaVersion": {"const": 1},
+    "schemaVersion": {"type": "integer", "const": 1},
     "actionKey": {"type": "string"},
-    "action": {"enum": ["no_change", "new_patch", "new_branch", "branch_eol", "repair", "reconcile_partial", "blocked", "needs_human"]},
-    "agentContract": {"type": "object"},
-    "evidence": {"type": "array"},
-    "researchSources": {"type": "array"},
-    "repositories": {"type": "array", "items": {"enum": ["php-bin", "mise-php"]}},
-    "preconditions": {"type": "object"},
+    "action": {"type": "string", "enum": ["no_change", "new_patch", "new_branch", "branch_eol", "repair", "reconcile_partial", "blocked", "needs_human"]},
+    "agentContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contractVersion", "instructionDigests"],
+      "properties": {
+        "contractVersion": {"type": "integer", "const": 1},
+        "instructionDigests": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["shared", "phaseTemplate", "eventContract"],
+          "properties": {
+            "shared": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "phaseTemplate": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "eventContract": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["captureId", "digest", "claim", "locator"],
+        "properties": {
+          "captureId": {"type": "string"},
+          "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "claim": {"type": "string"},
+          "locator": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "value"],
+            "properties": {
+              "kind": {"type": "string", "enum": ["json_pointer", "text_fragment"]},
+              "value": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "researchSources": {"type": "array", "items": {"type": "string"}},
+    "repositories": {"type": "array", "items": {"type": "string", "enum": ["php-bin", "mise-php"]}, "uniqueItems": true},
+    "preconditions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phpBinHead", "misePhpHead", "supportPolicyDigest"],
+      "properties": {
+        "phpBinHead": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "misePhpHead": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "supportPolicyDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+      }
+    },
     "editsRequired": {"type": "boolean"},
-    "allowedPaths": {"type": "object"},
-    "requiredChecks": {"type": "array", "items": {"type": "string"}},
+    "allowedPaths": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["php-bin", "mise-php"],
+      "properties": {
+        "php-bin": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "mise-php": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+      }
+    },
+    "requiredChecks": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
     "releaseIntent": {
       "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["version", "sourceIdentifier"],
       "properties": {
         "version": {"type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[1-9]\\d*)?$"},
         "sourceIdentifier": {"type": "string", "minLength": 1}
-      },
-      "required": ["version"]
+      }
     },
     "agentOperations": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
     "budgets": {
       "type": "object",
+      "additionalProperties": false,
       "required": ["maxModelCalls", "maxRetries", "timeoutMinutes"],
       "properties": {
         "maxModelCalls": {"type": "integer", "minimum": 1, "maximum": 5},
@@ -33,9 +91,52 @@
         "timeoutMinutes": {"type": "integer", "minimum": 1, "maximum": 60}
       }
     },
-    "notification": {"type": "object"},
-    "risk": {"enum": ["routine", "compatibility", "lifecycle", "recovery", "policy-sensitive"]},
-    "completionAssessment": {"type": "object"},
+    "notification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["suggestedSeverity", "summary", "humanActionRequired"],
+      "properties": {
+        "suggestedSeverity": {"type": "string", "enum": ["info", "warning", "critical"]},
+        "summary": {"type": "string"},
+        "humanActionRequired": {"type": "boolean"}
+      }
+    },
+    "risk": {"type": "string", "enum": ["routine", "compatibility", "lifecycle", "recovery", "policy-sensitive"]},
+    "completionAssessment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contractVersion", "instructionDigests", "phaseStatus", "criteria", "goNoGo", "unresolved", "summary"],
+      "properties": {
+        "contractVersion": {"type": "integer", "const": 1},
+        "instructionDigests": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["shared", "phaseTemplate", "eventContract"],
+          "properties": {
+            "shared": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "phaseTemplate": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "eventContract": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+          }
+        },
+        "phaseStatus": {"type": "string", "enum": ["complete", "blocked", "needs_human"]},
+        "criteria": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "status", "evidence"],
+            "properties": {
+              "id": {"type": "string"},
+              "status": {"type": "string", "enum": ["passed", "failed", "unresolved"]},
+              "evidence": {"type": "array", "items": {"type": "string"}}
+            }
+          }
+        },
+        "goNoGo": {"type": "string", "enum": ["go", "no_go"]},
+        "unresolved": {"type": "array", "items": {"type": "string"}},
+        "summary": {"type": "string"}
+      }
+    },
     "summary": {"type": "string"}
   }
 }
