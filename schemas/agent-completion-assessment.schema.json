@@ -5,7 +5,7 @@
   "additionalProperties": false,
   "required": ["contractVersion", "instructionDigests", "phaseStatus", "criteria", "goNoGo", "unresolved", "summary"],
   "properties": {
-    "contractVersion": {"const": 1},
+    "contractVersion": {"type": "integer", "const": 1},
     "instructionDigests": {
       "type": "object",
       "additionalProperties": false,
@@ -16,7 +16,7 @@
         "eventContract": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
       }
     },
-    "phaseStatus": {"enum": ["complete", "blocked", "needs_human"]},
+    "phaseStatus": {"type": "string", "enum": ["complete", "blocked", "needs_human"]},
     "criteria": {
       "type": "array",
       "items": {
@@ -25,12 +25,12 @@
         "required": ["id", "status", "evidence"],
         "properties": {
           "id": {"type": "string"},
-          "status": {"enum": ["passed", "failed", "unresolved"]},
+          "status": {"type": "string", "enum": ["passed", "failed", "unresolved"]},
           "evidence": {"type": "array", "items": {"type": "string"}}
         }
       }
     },
-    "goNoGo": {"enum": ["go", "no_go"]},
+    "goNoGo": {"type": "string", "enum": ["go", "no_go"]},
     "unresolved": {"type": "array", "items": {"type": "string"}},
     "summary": {"type": "string"}
   }
