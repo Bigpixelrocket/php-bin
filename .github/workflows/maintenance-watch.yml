@@ -348,9 +348,10 @@ jobs:
             url="$(gh pr create --base main --head "$branch" --title "chore: complete $action_key" \
               --body "Deterministic EOL completion bound to exact cross-repository readiness.")"
             number="${url##*/}"
-            gh pr checks "$number" --watch --fail-fast --interval 10
-            gh pr checks "$number" --json name,bucket,link > maintenance-plan-download/eol-checks.json
+            gh pr checks "$number" --required --watch --fail-fast --interval 10
+            gh pr checks "$number" --required --json name,bucket,link > maintenance-plan-download/eol-checks.json
             jq -e '[.[] | select(.name=="Script checks") | .bucket] == ["pass"]' maintenance-plan-download/eol-checks.json
+            jq -e '[.[] | select(.name=="Protected controls") | .bucket] == ["pass"]' maintenance-plan-download/eol-checks.json
             test "$(gh pr view "$number" --json headRefOid --jq .headRefOid)" = "$head"
             git fetch origin main
             test "$(git rev-parse origin/main)" = "$base"
@@ -371,8 +372,8 @@ jobs:
 
   notify-failure:
     name: Notify actionable watcher failure
-    needs: investigate
-    if: always() && needs.investigate.result == 'failure'
+    needs: [investigate, coordinate]
+    if: always() && (needs.investigate.result == 'failure' || needs.coordinate.result == 'failure')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

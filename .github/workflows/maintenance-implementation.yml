@@ -303,7 +303,7 @@ jobs:
     needs: [validate, validate-repair]
     if: always() && (needs.validate.outputs.passed == 'true' || needs['validate-repair'].result == 'success')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 130
     permissions:
       contents: write
       pull-requests: write
