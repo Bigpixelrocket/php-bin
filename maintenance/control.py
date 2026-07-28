@@ -53,6 +53,7 @@ EVIDENCE_CAPTURE_IDS = {
     "mise_php_releases",
     "mise_php_state",
 }
+RUNTIME_PLAN_EVIDENCE_IDS = {"evidence_manifest", "watch_decision"}
 STABLE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[1-9]\d*)?$")
 PROTECTED_PATHS = pathlib.Path(__file__).with_name("protected-paths.json")
 try:
@@ -345,6 +346,19 @@ def load_capture(manifest_path: pathlib.Path, capture_id: str) -> tuple[dict[str
     return capture, body
 
 
+def load_plan_evidence(manifest_path: pathlib.Path, capture_id: str) -> tuple[dict[str, Any], bytes]:
+    if capture_id not in RUNTIME_PLAN_EVIDENCE_IDS:
+        return load_capture(manifest_path, capture_id)
+    runtime_root = manifest_path.parent.parent
+    path = {
+        "evidence_manifest": manifest_path,
+        "watch_decision": runtime_root / "watch-decision.json",
+    }[capture_id]
+    require(path.is_file(), f"runtime plan evidence is unavailable: {capture_id}")
+    body = path.read_bytes()
+    return {"captureId": capture_id, "digest": sha256_bytes(body)}, body
+
+
 def path_is_protected(path: str) -> bool:
     normalized = pathlib.PurePosixPath(path).as_posix()
     return any(fnmatch.fnmatch(normalized, pattern) for pattern in PROTECTED_PATTERNS)
@@ -528,7 +542,7 @@ def validate_plan(
     evidence_refs = {}
     resolved_evidence = []
     for index, evidence in enumerate(plan.get("evidence", [])):
-        capture, body = load_capture(manifest_path, evidence.get("captureId", ""))
+        capture, body = load_plan_evidence(manifest_path, evidence.get("captureId", ""))
         require(evidence.get("digest") == capture["digest"], "plan evidence digest mismatch")
         locator = evidence.get("locator", {})
         if locator.get("kind") == "json_pointer":
