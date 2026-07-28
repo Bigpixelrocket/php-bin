@@ -66,6 +66,41 @@ class MaintenanceControlTests(unittest.TestCase):
         self.assertEqual("quiet", decision["trigger"])
         self.assertFalse(decision["modelCall"])
 
+    def test_evidence_recording_commit_does_not_wake_itself(self):
+        previous = {
+            "manifestDigest": "sha256:" + "a" * 64,
+            "captures": [
+                {"captureId": "php_bin_state", "status": 200, "digest": "sha256:" + "b" * 64},
+                {"captureId": "php_release_feed", "status": 200, "digest": "sha256:" + "c" * 64},
+            ],
+        }
+        current = {
+            "manifestDigest": "sha256:" + "d" * 64,
+            "captures": [
+                {"captureId": "php_bin_state", "status": 200, "digest": "sha256:" + "e" * 64},
+                {"captureId": "php_release_feed", "status": 200, "digest": "sha256:" + "c" * 64},
+            ],
+        }
+        ordinary = watch_decision(current, previous, [], {"healthy": True})
+        self_update = watch_decision(
+            current,
+            previous,
+            [],
+            {"healthy": True},
+            self_evidence_update=True,
+        )
+        self.assertEqual("evidence_changed", ordinary["trigger"])
+        self.assertEqual("quiet", self_update["trigger"])
+        current["captures"][1]["digest"] = "sha256:" + "f" * 64
+        external_change = watch_decision(
+            current,
+            previous,
+            [],
+            {"healthy": True},
+            self_evidence_update=True,
+        )
+        self.assertEqual("evidence_changed", external_change["trigger"])
+
     def test_completion_go_is_mechanical(self):
         contract = {
             "contractVersion": 1,

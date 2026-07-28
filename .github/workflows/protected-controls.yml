@@ -40,6 +40,7 @@ jobs:
           import subprocess
           import sys
           import tempfile
+          import time
 
           from maintenance.control import (
               ControlError,
@@ -121,39 +122,54 @@ jobs:
                       with tempfile.NamedTemporaryFile() as evidence_file:
                           evidence_file.write(decoded)
                           evidence_file.flush()
-                          verification = subprocess.run(
-                              [
-                                  "gh",
-                                  "attestation",
-                                  "verify",
-                                  evidence_file.name,
-                                  "--repo",
-                                  repo,
-                                  "--signer-workflow",
-                                  f"{repo}/.github/workflows/maintenance-watch.yml",
-                                  "--source-ref",
-                                  "refs/heads/main",
-                                  "--source-digest",
-                                  base,
-                                  "--predicate-type",
-                                  "https://bigpixelrocket.dev/maintenance/evidence-state/v1",
-                                  "--format",
-                                  "json",
-                              ],
-                              check=True,
-                              text=True,
-                              stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE,
-                          )
+                          command = [
+                              "gh",
+                              "attestation",
+                              "verify",
+                              evidence_file.name,
+                              "--repo",
+                              repo,
+                              "--signer-workflow",
+                              f"{repo}/.github/workflows/maintenance-watch.yml",
+                              "--source-ref",
+                              "refs/heads/main",
+                              "--source-digest",
+                              base,
+                              "--predicate-type",
+                              "https://bigpixelrocket.dev/maintenance/evidence-state/v1",
+                              "--deny-self-hosted-runners",
+                              "--format",
+                              "json",
+                          ]
+                          verification = None
+                          for attempt in range(3):
+                              candidate = subprocess.run(
+                                  command,
+                                  check=False,
+                                  text=True,
+                                  stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE,
+                              )
+                              if candidate.returncode == 0:
+                                  verification = candidate
+                                  break
+                              time.sleep(2**attempt)
+                          if verification is None:
+                              raise RuntimeError(
+                                  f"attestation was unavailable after bounded retries: {candidate.stderr}"
+                              )
                       attestations = json.loads(verification.stdout)
+                      if not isinstance(attestations, list):
+                          raise TypeError("attestation verifier returned a non-array result")
                       predicates = [
                           item["verificationResult"]["statement"]["predicate"]
                           for item in attestations
                       ]
                   except (
                       KeyError,
+                      RuntimeError,
+                      TypeError,
                       json.JSONDecodeError,
-                      subprocess.CalledProcessError,
                   ) as error:
                       print(f"Evidence attestation verification failed: {error}", file=sys.stderr)
                       raise SystemExit(1) from error

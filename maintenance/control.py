@@ -842,6 +842,8 @@ def watch_decision(
     previous: dict[str, Any],
     events: Iterable[dict[str, Any]],
     health: dict[str, Any],
+    *,
+    self_evidence_update: bool = False,
 ) -> dict[str, Any]:
     incomplete = sorted(
         event.get("actionKey")
@@ -855,7 +857,26 @@ def watch_decision(
     elif incomplete:
         trigger = "event_incomplete"
     elif previous.get("manifestDigest") != manifest.get("manifestDigest"):
-        trigger = "evidence_changed"
+        current_captures = {
+            item.get("captureId"): (item.get("status"), item.get("digest"))
+            for item in manifest.get("captures", [])
+            if isinstance(item, dict)
+        }
+        previous_captures = {
+            item.get("captureId"): (item.get("status"), item.get("digest"))
+            for item in previous.get("captures", [])
+            if isinstance(item, dict)
+        }
+        changed_captures = {
+            capture_id
+            for capture_id in set(current_captures) | set(previous_captures)
+            if current_captures.get(capture_id) != previous_captures.get(capture_id)
+        }
+        trigger = (
+            "quiet"
+            if self_evidence_update and changed_captures == {"php_bin_state"}
+            else "evidence_changed"
+        )
     else:
         trigger = "quiet"
     return {
