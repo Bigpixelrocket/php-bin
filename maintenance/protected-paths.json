@@ -12,6 +12,7 @@
     "scripts/admit-maintenance-plan",
     "scripts/capture-maintenance-evidence",
     "scripts/configure-github-maintenance",
+    "scripts/dispatch-pr-checks",
     "scripts/maintenance-event",
     "scripts/notify-maintenance",
     "scripts/prepare-agent-task",

@@ -34,6 +34,10 @@ Required repository state:
 - Enable the organization setting that permits Actions to create pull requests;
   runtime workflows do not submit approving reviews. Protected-control approval
   remains owner-only except for the deterministic evidence-state proof above.
+- Because GitHub suppresses ordinary PR events created by `GITHUB_TOKEN`, each
+  deterministic PR coordinator explicitly dispatches `ci.yml` and
+  `protected-controls.yml` at the exact PR branch, then accepts only newly
+  created successful check runs for that head SHA.
 - Allow GitHub-owned Actions plus only `openai/codex-action` and
   `jdx/mise-action`, and require every Action reference to use a full commit
   SHA.

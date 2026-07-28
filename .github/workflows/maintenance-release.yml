@@ -23,7 +23,8 @@ on:
 permissions:
   contents: write
   issues: write
-  actions: read
+  actions: write
+  checks: read
   pull-requests: write
 
 concurrency:
@@ -330,8 +331,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh pr checks "${{ steps.event_pr.outputs.number }}" --watch --fail-fast --interval 10
-          gh pr checks "${{ steps.event_pr.outputs.number }}" --json name,bucket,link > release-run/event-checks.json
+          ./scripts/dispatch-pr-checks \
+            --pr "${{ steps.event_pr.outputs.number }}" \
+            --check "Script checks" \
+            --output release-run/event-checks.json
           jq -e '[.[] | select(.name=="Script checks") | .bucket] == ["pass"]' release-run/event-checks.json
           actual="$(gh pr view "${{ steps.event_pr.outputs.number }}" --json headRefOid --jq .headRefOid)"
           test "$actual" = "${{ steps.event_pr.outputs.head_sha }}"

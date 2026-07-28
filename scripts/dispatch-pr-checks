@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+usage() {
+  echo "Usage: $0 --pr <number> --check <required-check> --output <path>" >&2
+  exit 2
+}
+
+pr_number=""
+primary_check=""
+output=""
+
+while (($#)); do
+  case "$1" in
+    --pr)
+      pr_number="${2:-}"
+      shift 2
+      ;;
+    --check)
+      primary_check="${2:-}"
+      shift 2
+      ;;
+    --output)
+      output="${2:-}"
+      shift 2
+      ;;
+    *)
+      usage
+      ;;
+  esac
+done
+
+[[ "$pr_number" =~ ^[1-9][0-9]*$ ]] || usage
+[[ -n "$primary_check" && -n "$output" ]] || usage
+repository="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
+
+pr="$(gh api "repos/$repository/pulls/$pr_number")"
+state="$(jq -r .state <<<"$pr")"
+base_ref="$(jq -r .base.ref <<<"$pr")"
+head_ref="$(jq -r .head.ref <<<"$pr")"
+head_sha="$(jq -r .head.sha <<<"$pr")"
+head_repository="$(jq -r .head.repo.full_name <<<"$pr")"
+
+[[ "$state" == "open" ]]
+[[ "$base_ref" == "main" ]]
+[[ "$head_repository" == "$repository" ]]
+[[ "$head_ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]
+[[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
+
+checks_url="repos/$repository/commits/$head_sha/check-runs?per_page=100&filter=latest"
+before="$(gh api -H "Accept: application/vnd.github+json" "$checks_url")"
+primary_before="$(jq --arg name "$primary_check" '[.check_runs[] | select(.name==$name) | .id] | max // 0' <<<"$before")"
+protected_before="$(jq '[.check_runs[] | select(.name=="Protected controls") | .id] | max // 0' <<<"$before")"
+
+# Events created with GITHUB_TOKEN do not recursively start pull_request
+# workflows. workflow_dispatch is the supported exception, so run the two
+# base-reviewed validators explicitly at the exact PR branch.
+gh workflow run ci.yml --repo "$repository" --ref "$head_ref"
+gh workflow run protected-controls.yml --repo "$repository" --ref "$head_ref" \
+  -f "pr_number=$pr_number"
+
+deadline=$((SECONDS + 900))
+latest=""
+while ((SECONDS < deadline)); do
+  latest="$(gh api -H "Accept: application/vnd.github+json" "$checks_url")"
+  primary="$(jq -c --arg name "$primary_check" --argjson floor "$primary_before" \
+    '[.check_runs[] | select(.name==$name and .id>$floor)] | max_by(.id) // empty' <<<"$latest")"
+  protected="$(jq -c --argjson floor "$protected_before" \
+    '[.check_runs[] | select(.name=="Protected controls" and .id>$floor)] | max_by(.id) // empty' <<<"$latest")"
+
+  if [[ -n "$primary" && -n "$protected" ]]; then
+    failed="$(jq -r -s '[.[] | select(.status=="completed" and .conclusion!="success") | .details_url] | join("\n")' \
+      <<<"$primary"$'\n'"$protected")"
+    if [[ -n "$failed" ]]; then
+      echo "A dispatched required check failed:" >&2
+      echo "$failed" >&2
+      exit 1
+    fi
+    if jq -e -s 'all(.[]; .status=="completed" and .conclusion=="success")' \
+      <<<"$primary"$'\n'"$protected" >/dev/null; then
+      mkdir -p "$(dirname "$output")"
+      jq -s --arg head "$head_sha" \
+        'map({name, bucket:"pass", link:.details_url, headSha:$head, checkRunId:.id})' \
+        <<<"$primary"$'\n'"$protected" > "$output"
+      exit 0
+    fi
+  fi
+  sleep 5
+done
+
+echo "Timed out waiting for newly dispatched required checks at $head_sha." >&2
+exit 1
