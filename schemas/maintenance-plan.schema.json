@@ -52,7 +52,7 @@
       }
     },
     "researchSources": {"type": "array", "items": {"type": "string"}},
-    "repositories": {"type": "array", "items": {"type": "string", "enum": ["php-bin", "mise-php"]}},
+    "repositories": {"type": "array", "minItems": 1, "maxItems": 2, "items": {"type": "string", "enum": ["php-bin", "mise-php"]}},
     "preconditions": {
       "type": "object",
       "additionalProperties": false,
@@ -73,7 +73,7 @@
         "mise-php": {"type": "array", "items": {"type": "string"}}
       }
     },
-    "requiredChecks": {"type": "array", "items": {"type": "string"}},
+    "requiredChecks": {"type": "array", "items": {"type": "string"}, "const": ["Script checks"]},
     "releaseIntent": {
       "type": ["object", "null"],
       "additionalProperties": false,
@@ -124,14 +124,22 @@
         "phaseStatus": {"type": "string", "enum": ["complete", "blocked", "needs_human"]},
         "criteria": {
           "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
           "items": {
             "type": "object",
             "additionalProperties": false,
             "required": ["id", "status", "evidence"],
             "properties": {
-              "id": {"type": "string"},
+              "id": {"type": "string", "enum": ["phase-goal-correct", "evidence-classification-complete", "preconditions-and-authority-explicit", "no-unresolved-investigation-work"]},
               "status": {"type": "string", "enum": ["passed", "failed", "unresolved"]},
-              "evidence": {"type": "array", "items": {"type": "string"}}
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^(evidence\\[\\d+\\]|preconditions\\.(?:phpBinHead|misePhpHead|supportPolicyDigest)|researchSources\\[\\d+\\])$"
+                }
+              }
             }
           }
         },

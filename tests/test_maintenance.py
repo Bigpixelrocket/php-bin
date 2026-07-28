@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 from maintenance.control import (
+    COMPLETION_EVIDENCE_REF_RE,
     ControlError,
     canonical_json,
     mutation_allowed,
@@ -95,6 +96,17 @@ class MaintenanceControlTests(unittest.TestCase):
         assessment["unresolved"] = ["contradiction"]
         with self.assertRaises(ControlError):
             validate_completion_assessment(assessment, contract, digests)
+
+    def test_investigation_evidence_references_are_machine_resolvable(self):
+        for reference in (
+            "evidence[0]",
+            "preconditions.phpBinHead",
+            "preconditions.misePhpHead",
+            "preconditions.supportPolicyDigest",
+            "researchSources[2]",
+        ):
+            self.assertIsNotNone(COMPLETION_EVIDENCE_REF_RE.fullmatch(reference))
+        self.assertIsNone(COMPLETION_EVIDENCE_REF_RE.fullmatch("watch-decision.json reports success"))
 
     def test_illegal_event_transition_fails_closed(self):
         with self.assertRaises(ControlError):

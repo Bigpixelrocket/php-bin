@@ -38,6 +38,11 @@ ACTION_KEY_RE = re.compile(
     r"repair:\d+\.\d+\.\d+:[0-9a-f]{8,64}|"
     r"(?:source_unhealthy|health_failed|policy_failure|auth_failure):[0-9a-f]{8,64})$"
 )
+COMPLETION_EVIDENCE_REF_RE = re.compile(
+    r"^(evidence\[\d+\]|preconditions\.(?:phpBinHead|misePhpHead|supportPolicyDigest)|"
+    r"researchSources\[\d+\])$"
+)
+REQUIRED_PLAN_CHECKS = ["Script checks"]
 STABLE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[1-9]\d*)?$")
 PROTECTED_PATHS = pathlib.Path(__file__).with_name("protected-paths.json")
 try:
@@ -467,6 +472,10 @@ def validate_plan(
     for result in plan["completionAssessment"]["criteria"]:
         for reference in result["evidence"]:
             require(
+                bool(COMPLETION_EVIDENCE_REF_RE.fullmatch(reference)),
+                f"invalid criterion evidence reference: {reference}",
+            )
+            require(
                 reference in evidence_refs
                 or reference in precondition_refs
                 or reference in source_refs,
@@ -493,7 +502,7 @@ def validate_plan(
         and all(value in {"php-bin", "mise-php"} for value in repositories),
         "plan repository authority is invalid",
     )
-    require(plan.get("requiredChecks") == ["Script checks"], "required deterministic checks changed")
+    require(plan.get("requiredChecks") == REQUIRED_PLAN_CHECKS, "required deterministic checks changed")
     release_intent = plan.get("releaseIntent")
     if release_intent is not None:
         require(isinstance(release_intent, dict), "releaseIntent must be an object or null")
