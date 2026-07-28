@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "manifestDigest": "sha256:6d2cd038820d4d7257bbf78412bcb556219672758d74a335329e1477d3b47cfa",
+  "planDigest": "sha256:265bcca0b7af10a9bd3993a8aa78bb063bc44f8f68a8899099211f30ce358424",
+  "captures": [
+    {
+      "captureId": "php_supported_versions",
+      "digest": "sha256:4e683640aa9b1c3fe7e259fdb1a08d28d93c40823dd86343429876224f8d3c5e",
+      "status": 200
+    },
+    {
+      "captureId": "php_release_feed",
+      "digest": "sha256:db0398f5a3fd76439139fdc7300d3e91b4e195130adb3758c49ec5ddde1e5d5e",
+      "status": 200
+    },
+    {
+      "captureId": "php_source_tags",
+      "digest": "sha256:ce3bb69a65ddec690d6e6c9f301cac64a03e3d9e6e02b1caa68aa984b7757dd2",
+      "status": 200
+    },
+    {
+      "captureId": "php_bin_releases",
+      "digest": "sha256:3cee0545c6daa5473e486d0685504f0f6475a5ca9a799ff8fa724ed387f7e2a5",
+      "status": 200
+    },
+    {
+      "captureId": "php_bin_state",
+      "digest": "sha256:c76e01bd487211b2a8406ce4f26c9e2c688d5ce0d4507f7e516f62a90c982669",
+      "status": 200
+    },
+    {
+      "captureId": "mise_php_releases",
+      "digest": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "status": 200
+    },
+    {
+      "captureId": "mise_php_state",
+      "digest": "sha256:30af64803e686fe3a151f8f7f05ad99d867fea663fa74050cbebce085f737e6f",
+      "status": 200
+    }
+  ]
+}
