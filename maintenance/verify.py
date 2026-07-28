@@ -535,6 +535,12 @@ class Verifier:
             "Codex Action pin is not bound to the reviewed input contract",
         )
         e2e = PHP_ROOT / ".github/workflows/maintenance-e2e.yml"
+        e2e_text = e2e.read_text()
+        assert_true(
+            'status:{type:"string",const:"passed"}' in e2e_text
+            and 'nonce:{type:"string",const:$nonce}' in e2e_text,
+            "credentialed agent canary schema does not declare string types",
+        )
         assert_true(
             pins["workflows"][".github/workflows/maintenance-e2e.yml"] == sha256_file(e2e),
             "reviewed production-parity workflow digest changed",
