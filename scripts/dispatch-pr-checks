@@ -102,6 +102,16 @@ while ((SECONDS < deadline)); do
       # after both new validator runs pass, retaining their URLs as evidence.
       primary_gate="$(publish_gate "$primary")"
       protected_gate="$(publish_gate "$protected")"
+      for validator in "$primary" "$protected"; do
+        name="$(jq -r .name <<<"$validator")"
+        details="$(jq -r .details_url <<<"$validator")"
+        gh api --method POST -H "Accept: application/vnd.github+json" \
+          "repos/$repository/statuses/$head_sha" \
+          -f state=success \
+          -f "context=$name" \
+          -f "target_url=$details" \
+          -f description="Exact-head dispatched validator passed" >/dev/null
+      done
       for _ in {1..24}; do
         rollup="$(gh pr checks "$pr_number" --repo "$repository" --required \
           --json name,bucket,link 2>/dev/null || true)"
