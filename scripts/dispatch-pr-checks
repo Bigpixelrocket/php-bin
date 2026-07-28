@@ -79,10 +79,46 @@ while ((SECONDS < deadline)); do
     fi
     if jq -e -s 'all(.[]; .status=="completed" and .conclusion=="success")' \
       <<<"$primary"$'\n'"$protected" >/dev/null; then
+      publish_gate() {
+        local validator="$1"
+        local name details request
+        name="$(jq -r .name <<<"$validator")"
+        details="$(jq -r .details_url <<<"$validator")"
+        request="$(mktemp)"
+        jq -n \
+          --arg name "$name" \
+          --arg head "$head_sha" \
+          --arg details "$details" \
+          --arg summary "Exact-head validator passed: $details" \
+          '{name:$name,head_sha:$head,status:"completed",conclusion:"success",details_url:$details,output:{title:"Dispatched validator passed",summary:$summary}}' \
+          > "$request"
+        gh api --method POST -H "Accept: application/vnd.github+json" \
+          "repos/$repository/check-runs" --input "$request"
+        rm -f "$request"
+      }
+
+      # workflow_dispatch runs validate the exact commit but GitHub does not
+      # attach them to a PR rollup. Publish Actions-owned gate check runs only
+      # after both new validator runs pass, retaining their URLs as evidence.
+      primary_gate="$(publish_gate "$primary")"
+      protected_gate="$(publish_gate "$protected")"
+      for _ in {1..24}; do
+        rollup="$(gh pr checks "$pr_number" --repo "$repository" --required \
+          --json name,bucket,link 2>/dev/null || true)"
+        if jq -e --arg primary "$primary_check" \
+          '([.[] | select(.name==$primary) | .bucket] | last) == "pass" and ([.[] | select(.name=="Protected controls") | .bucket] | last) == "pass"' \
+          <<<"$rollup" >/dev/null 2>&1; then
+          break
+        fi
+        sleep 5
+      done
+      jq -e --arg primary "$primary_check" \
+        '([.[] | select(.name==$primary) | .bucket] | last) == "pass" and ([.[] | select(.name=="Protected controls") | .bucket] | last) == "pass"' \
+        <<<"${rollup:-[]}" >/dev/null
       mkdir -p "$(dirname "$output")"
       jq -s --arg head "$head_sha" \
         'map({name, bucket:"pass", link:.details_url, headSha:$head, checkRunId:.id})' \
-        <<<"$primary"$'\n'"$protected" > "$output"
+        <<<"$primary_gate"$'\n'"$protected_gate" > "$output"
       exit 0
     fi
   fi
