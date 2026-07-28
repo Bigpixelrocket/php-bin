@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 from maintenance.control import (
+    COMPLETION_EVIDENCE_REF_RE,
     ControlError,
     canonical_json,
     mutation_allowed,
@@ -22,6 +23,8 @@ from maintenance.control import (
     transition_event,
     validate_archive,
     validate_completion_assessment,
+    validate_evidence_attestation_predicate,
+    validate_evidence_state_record,
     verify_merge,
     watch_decision,
     path_is_protected,
@@ -63,6 +66,41 @@ class MaintenanceControlTests(unittest.TestCase):
         self.assertEqual("quiet", decision["trigger"])
         self.assertFalse(decision["modelCall"])
 
+    def test_evidence_recording_commit_does_not_wake_itself(self):
+        previous = {
+            "manifestDigest": "sha256:" + "a" * 64,
+            "captures": [
+                {"captureId": "php_bin_state", "status": 200, "digest": "sha256:" + "b" * 64},
+                {"captureId": "php_release_feed", "status": 200, "digest": "sha256:" + "c" * 64},
+            ],
+        }
+        current = {
+            "manifestDigest": "sha256:" + "d" * 64,
+            "captures": [
+                {"captureId": "php_bin_state", "status": 200, "digest": "sha256:" + "e" * 64},
+                {"captureId": "php_release_feed", "status": 200, "digest": "sha256:" + "c" * 64},
+            ],
+        }
+        ordinary = watch_decision(current, previous, [], {"healthy": True})
+        self_update = watch_decision(
+            current,
+            previous,
+            [],
+            {"healthy": True},
+            self_evidence_update=True,
+        )
+        self.assertEqual("evidence_changed", ordinary["trigger"])
+        self.assertEqual("quiet", self_update["trigger"])
+        current["captures"][1]["digest"] = "sha256:" + "f" * 64
+        external_change = watch_decision(
+            current,
+            previous,
+            [],
+            {"healthy": True},
+            self_evidence_update=True,
+        )
+        self.assertEqual("evidence_changed", external_change["trigger"])
+
     def test_completion_go_is_mechanical(self):
         contract = {
             "contractVersion": 1,
@@ -95,6 +133,60 @@ class MaintenanceControlTests(unittest.TestCase):
         assessment["unresolved"] = ["contradiction"]
         with self.assertRaises(ControlError):
             validate_completion_assessment(assessment, contract, digests)
+
+    def test_investigation_evidence_references_are_machine_resolvable(self):
+        for reference in (
+            "evidence[0]",
+            "preconditions.phpBinHead",
+            "preconditions.misePhpHead",
+            "preconditions.supportPolicyDigest",
+            "researchSources[2]",
+        ):
+            self.assertIsNotNone(COMPLETION_EVIDENCE_REF_RE.fullmatch(reference))
+        self.assertIsNone(COMPLETION_EVIDENCE_REF_RE.fullmatch("watch-decision.json reports success"))
+
+    def test_deterministic_evidence_state_shape_is_fail_closed(self):
+        capture_ids = (
+            "php_supported_versions",
+            "php_release_feed",
+            "php_source_tags",
+            "php_bin_releases",
+            "php_bin_state",
+            "mise_php_releases",
+            "mise_php_state",
+        )
+        record = {
+            "schemaVersion": 1,
+            "manifestDigest": "sha256:" + "a" * 64,
+            "planDigest": "sha256:" + "b" * 64,
+            "captures": [
+                {"captureId": capture_id, "digest": "sha256:" + "c" * 64, "status": 200}
+                for capture_id in capture_ids
+            ],
+        }
+        validate_evidence_state_record(record)
+        record["captures"][0]["status"] = 500
+        with self.assertRaisesRegex(ControlError, "not healthy"):
+            validate_evidence_state_record(record)
+
+    def test_evidence_attestation_is_bound_to_the_exact_watcher_run(self):
+        predicate = {
+            "schemaVersion": 1,
+            "runId": "30359936149",
+            "sourceSha": "a" * 40,
+            "actionKey": "no_change:" + "c" * 16,
+            "manifestDigest": "sha256:" + "c" * 64,
+        }
+        expected = {
+            "run_id": predicate["runId"],
+            "source_sha": predicate["sourceSha"],
+            "action_key": predicate["actionKey"],
+            "manifest_digest": predicate["manifestDigest"],
+        }
+        validate_evidence_attestation_predicate(predicate, **expected)
+        predicate["runId"] = "30359936150"
+        with self.assertRaisesRegex(ControlError, "run mismatch"):
+            validate_evidence_attestation_predicate(predicate, **expected)
 
     def test_illegal_event_transition_fails_closed(self):
         with self.assertRaises(ControlError):

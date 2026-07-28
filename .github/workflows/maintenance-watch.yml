@@ -37,10 +37,15 @@ jobs:
       - name: Decide whether an agent call is required
         id: decision
         run: |
+          self_update=()
+          if [[ "$(git diff-tree --no-commit-id --name-only -r HEAD)" == "maintenance-state/last-evidence.json" ]]; then
+            self_update=(--self-evidence-update)
+          fi
           ./scripts/watch-maintenance-evidence \
             --manifest maintenance-run/evidence/evidence-manifest.json \
             --previous maintenance-state/last-evidence.json \
             --events maintenance-events \
+            "${self_update[@]}" \
             --output maintenance-run/watch-decision.json
           echo "trigger=$(jq -r .trigger maintenance-run/watch-decision.json)" >> "$GITHUB_OUTPUT"
       - name: Record exact preconditions
@@ -139,7 +144,10 @@ jobs:
     timeout-minutes: 5
     permissions:
       actions: write
+      artifact-metadata: write
+      attestations: write
       contents: write
+      id-token: write
       pull-requests: write
       issues: write
     steps:
@@ -156,8 +164,46 @@ jobs:
             --repo "${{ github.repository }}" \
             --name "maintenance-investigation-${{ github.run_id }}" \
             --dir maintenance-plan-download
+      - name: Read unattended mutation state
+        id: operator
+        run: |
+          test "$(jq -r .unattendedMutation .github/maintenance-operator.json)" = "enabled" \
+            && echo "enabled=true" >> "$GITHUB_OUTPUT" \
+            || echo "enabled=false" >> "$GITHUB_OUTPUT"
+      - name: Prepare deterministic no-change evidence
+        id: evidence
+        if: needs.investigate.outputs.action == 'no_change' && steps.operator.outputs.enabled == 'true'
+        run: |
+          git checkout -B "maintenance/evidence-${{ github.run_id }}" origin/main
+          mkdir -p maintenance-state
+          jq -n \
+            --arg manifestDigest "$(jq -r .manifestDigest maintenance-plan-download/evidence/evidence-manifest.json)" \
+            --arg planDigest "$(jq -r .planDigest maintenance-plan-download/admission.json)" \
+            --argjson captureDigests "$(jq '[.captures[] | {captureId,digest,status}]' maintenance-plan-download/evidence/evidence-manifest.json)" \
+            '{schemaVersion:1,manifestDigest:$manifestDigest,planDigest:$planDigest,captures:$captureDigests}' \
+            > maintenance-state/last-evidence.json
+          if [[ -z "$(git status --porcelain -- maintenance-state/last-evidence.json)" ]]; then
+            echo "already_recorded=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "already_recorded=false" >> "$GITHUB_OUTPUT"
+          jq -n \
+            --arg runId "${{ github.run_id }}" \
+            --arg sourceSha "${{ needs.investigate.outputs.base_sha }}" \
+            --arg actionKey "${{ needs.investigate.outputs.action_key }}" \
+            --arg manifestDigest "$(jq -r .manifestDigest maintenance-plan-download/evidence/evidence-manifest.json)" \
+            '{schemaVersion:1,runId:$runId,sourceSha:$sourceSha,actionKey:$actionKey,manifestDigest:$manifestDigest}' \
+            > maintenance-plan-download/evidence-attestation-predicate.json
+      - name: Attest deterministic no-change evidence
+        if: needs.investigate.outputs.action == 'no_change' && steps.operator.outputs.enabled == 'true' && steps.evidence.outputs.already_recorded == 'false'
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
+        with:
+          subject-path: maintenance-state/last-evidence.json
+          predicate-type: https://bigpixelrocket.dev/maintenance/evidence-state/v1
+          predicate-path: maintenance-plan-download/evidence-attestation-predicate.json
       - name: Dispatch implementation or no-edit release
         env:
+          EVIDENCE_ALREADY_RECORDED: ${{ steps.evidence.outputs.already_recorded }}
           GH_TOKEN: ${{ github.token }}
         run: |
           if [[ "$(jq -r .unattendedMutation .github/maintenance-operator.json)" != "enabled" ]]; then
@@ -165,6 +211,10 @@ jobs:
             exit 0
           fi
           action="${{ needs.investigate.outputs.action }}"
+          if [[ "$action" == "no_change" && "$EVIDENCE_ALREADY_RECORDED" == "true" ]]; then
+            echo "The exact deterministic evidence state is already recorded."
+            exit 0
+          fi
           if [[ "$action" == "blocked" || "$action" == "needs_human" ]]; then
             jq -n \
               --arg actionKey "${{ needs.investigate.outputs.action_key }}" \
@@ -198,30 +248,29 @@ jobs:
           fi
 
           if [[ "$action" == "no_change" ]]; then
-            :
-            git checkout -B "maintenance/evidence-${{ github.run_id }}" origin/main
+            branch="maintenance/evidence-${{ github.run_id }}"
             base="$(git rev-parse HEAD)"
-            mkdir -p maintenance-state
-            jq -n \
-              --arg manifestDigest "$(jq -r .manifestDigest maintenance-plan-download/evidence/evidence-manifest.json)" \
-              --arg planDigest "$(jq -r .planDigest maintenance-plan-download/admission.json)" \
-              --argjson captureDigests "$(jq '[.captures[] | {captureId,digest,status}]' maintenance-plan-download/evidence/evidence-manifest.json)" \
-              '{schemaVersion:1,manifestDigest:$manifestDigest,planDigest:$planDigest,captures:$captureDigests}' \
-              > maintenance-state/last-evidence.json
             git add maintenance-state/last-evidence.json
             git -c user.name=maintenance-watcher -c user.email=maintenance@invalid \
               commit -m "chore: record reviewed maintenance evidence"
             head="$(git rev-parse HEAD)"
             record_digest="sha256:$(shasum -a 256 maintenance-state/last-evidence.json | awk '{print $1}')"
             gh auth setup-git
-            git push origin HEAD
-            url="$(gh pr create --base main --head "maintenance/evidence-${{ github.run_id }}" \
-              --title "chore: record reviewed maintenance evidence" \
-              --body "Opaque evidence state for a reviewed no-change result.")"
-            number="${url##*/}"
-            gh pr checks "$number" --watch --fail-fast --interval 10
-            gh pr checks "$number" --json name,bucket,link > maintenance-plan-download/no-change-checks.json
+            if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+              git fetch origin "$branch:refs/remotes/origin/$branch"
+            fi
+            git push --force-with-lease origin "HEAD:refs/heads/$branch"
+            number="$(gh pr list --state open --head "$branch" --json number --jq '.[0].number // empty')"
+            if [[ -z "$number" ]]; then
+              url="$(gh pr create --base main --head "$branch" \
+                --title "chore: record reviewed maintenance evidence" \
+                --body "Opaque evidence state for a reviewed no-change result.")"
+              number="${url##*/}"
+            fi
+            gh pr checks "$number" --required --watch --fail-fast --interval 10
+            gh pr checks "$number" --required --json name,bucket,link > maintenance-plan-download/no-change-checks.json
             jq -e '[.[] | select(.name=="Script checks") | .bucket] == ["pass"]' maintenance-plan-download/no-change-checks.json
+            jq -e '[.[] | select(.name=="Protected controls") | .bucket] == ["pass"]' maintenance-plan-download/no-change-checks.json
             test "$(gh pr view "$number" --json headRefOid --jq .headRefOid)" = "$head"
             git fetch origin main
             test "$(git rev-parse origin/main)" = "$base"
@@ -299,9 +348,10 @@ jobs:
             url="$(gh pr create --base main --head "$branch" --title "chore: complete $action_key" \
               --body "Deterministic EOL completion bound to exact cross-repository readiness.")"
             number="${url##*/}"
-            gh pr checks "$number" --watch --fail-fast --interval 10
-            gh pr checks "$number" --json name,bucket,link > maintenance-plan-download/eol-checks.json
+            gh pr checks "$number" --required --watch --fail-fast --interval 10
+            gh pr checks "$number" --required --json name,bucket,link > maintenance-plan-download/eol-checks.json
             jq -e '[.[] | select(.name=="Script checks") | .bucket] == ["pass"]' maintenance-plan-download/eol-checks.json
+            jq -e '[.[] | select(.name=="Protected controls") | .bucket] == ["pass"]' maintenance-plan-download/eol-checks.json
             test "$(gh pr view "$number" --json headRefOid --jq .headRefOid)" = "$head"
             git fetch origin main
             test "$(git rev-parse origin/main)" = "$base"
@@ -322,8 +372,8 @@ jobs:
 
   notify-failure:
     name: Notify actionable watcher failure
-    needs: investigate
-    if: always() && needs.investigate.result == 'failure'
+    needs: [investigate, coordinate]
+    if: always() && (needs.investigate.result == 'failure' || needs.coordinate.result == 'failure')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

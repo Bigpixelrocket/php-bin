@@ -41,3 +41,10 @@ forms enforced by the output schema: `no_change`, `new_patch`, `new_branch`,
 `branch_eol`, `recipe_rebuild`, `repair`, `source_unhealthy`, `health_failed`,
 `policy_failure`, or `auth_failure` with the required version, date, attempt,
 or lowercase hexadecimal evidence suffix.
+
+Every `completionAssessment.criteria[].evidence` entry is a machine-resolved
+reference, never explanatory prose. Use only `evidence[N]` for an item in the
+plan evidence array, `preconditions.phpBinHead`, `preconditions.misePhpHead`,
+`preconditions.supportPolicyDigest`, or `researchSources[N]` for an item in the
+research source array. Put explanations in the criterion status or plan summary,
+not in an evidence-reference array.

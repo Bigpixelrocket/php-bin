@@ -7,7 +7,13 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from maintenance.control import ControlError, load_json, watch_decision, write_json  # noqa: E402
+from maintenance.control import (  # noqa: E402
+    ControlError,
+    load_json,
+    validate_evidence_state_record,
+    watch_decision,
+    write_json,
+)
 
 
 parser = argparse.ArgumentParser()
@@ -15,12 +21,15 @@ parser.add_argument("--manifest", type=pathlib.Path, required=True)
 parser.add_argument("--previous", type=pathlib.Path, required=True)
 parser.add_argument("--events", type=pathlib.Path, required=True)
 parser.add_argument("--health", type=pathlib.Path)
+parser.add_argument("--self-evidence-update", action="store_true")
 parser.add_argument("--output", type=pathlib.Path, required=True)
 args = parser.parse_args()
 
 try:
     manifest = load_json(args.manifest)
     previous = load_json(args.previous) if args.previous.exists() else {}
+    if previous:
+        validate_evidence_state_record(previous)
     if args.health:
         if not args.health.is_file():
             raise ControlError(f"supplied health input is missing: {args.health}")
@@ -42,7 +51,13 @@ try:
             raise ControlError("previous evidence state is missing and event reconstruction is ambiguous")
         if matching:
             previous["manifestDigest"] = matching[0]
-    decision = watch_decision(manifest, previous, events, health)
+    decision = watch_decision(
+        manifest,
+        previous,
+        events,
+        health,
+        self_evidence_update=args.self_evidence_update,
+    )
     write_json(args.output, decision)
     print(json.dumps(decision))
 except (ControlError, OSError) as error:

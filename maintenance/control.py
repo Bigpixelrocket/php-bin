@@ -31,6 +31,7 @@ from typing import Any, Iterable
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 ACTION_KEY_RE = re.compile(
     r"^(no_change:[0-9a-f]{16}|new_patch:\d+\.\d+\.\d+|new_branch:\d+\.\d+|"
     r"branch_eol:\d+\.\d+:\d{4}-\d{2}-\d{2}|"
@@ -38,6 +39,20 @@ ACTION_KEY_RE = re.compile(
     r"repair:\d+\.\d+\.\d+:[0-9a-f]{8,64}|"
     r"(?:source_unhealthy|health_failed|policy_failure|auth_failure):[0-9a-f]{8,64})$"
 )
+COMPLETION_EVIDENCE_REF_RE = re.compile(
+    r"^(evidence\[\d+\]|preconditions\.(?:phpBinHead|misePhpHead|supportPolicyDigest)|"
+    r"researchSources\[\d+\])$"
+)
+REQUIRED_PLAN_CHECKS = ["Script checks"]
+EVIDENCE_CAPTURE_IDS = {
+    "php_supported_versions",
+    "php_release_feed",
+    "php_source_tags",
+    "php_bin_releases",
+    "php_bin_state",
+    "mise_php_releases",
+    "mise_php_state",
+}
 STABLE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[1-9]\d*)?$")
 PROTECTED_PATHS = pathlib.Path(__file__).with_name("protected-paths.json")
 try:
@@ -246,6 +261,55 @@ def resolve_json_pointer(document: Any, pointer: str) -> Any:
             require(isinstance(current, dict) and key in current, f"pointer does not resolve: {pointer}")
             current = current[key]
     return current
+
+
+def validate_evidence_state_record(record: dict[str, Any]) -> None:
+    require(isinstance(record, dict), "evidence state must be an object")
+    require(
+        set(record) == {"schemaVersion", "manifestDigest", "planDigest", "captures"},
+        "evidence state fields changed",
+    )
+    require(record.get("schemaVersion") == 1, "invalid evidence state version")
+    require(bool(SHA256_RE.fullmatch(record.get("manifestDigest", ""))), "invalid evidence manifest digest")
+    require(bool(SHA256_RE.fullmatch(record.get("planDigest", ""))), "invalid evidence plan digest")
+    captures = record.get("captures")
+    require(isinstance(captures, list), "evidence captures must be an array")
+    capture_ids = []
+    for capture in captures:
+        require(isinstance(capture, dict), "evidence capture must be an object")
+        require(set(capture) == {"captureId", "digest", "status"}, "evidence capture fields changed")
+        capture_ids.append(capture.get("captureId"))
+        require(bool(SHA256_RE.fullmatch(capture.get("digest", ""))), "invalid evidence capture digest")
+        require(capture.get("status") == 200, "evidence capture status is not healthy")
+    require(len(capture_ids) == len(set(capture_ids)), "duplicate evidence capture")
+    require(set(capture_ids) == EVIDENCE_CAPTURE_IDS, "evidence capture set changed")
+
+
+def validate_evidence_attestation_predicate(
+    predicate: dict[str, Any],
+    *,
+    run_id: str,
+    source_sha: str,
+    action_key: str,
+    manifest_digest: str,
+) -> None:
+    require(isinstance(predicate, dict), "evidence attestation predicate must be an object")
+    require(
+        set(predicate) == {"schemaVersion", "runId", "sourceSha", "actionKey", "manifestDigest"},
+        "evidence attestation predicate fields changed",
+    )
+    require(predicate.get("schemaVersion") == 1, "invalid evidence attestation predicate version")
+    require(bool(re.fullmatch(r"[1-9][0-9]*", run_id)), "invalid expected watcher run")
+    require(bool(COMMIT_SHA_RE.fullmatch(source_sha)), "invalid expected watcher source")
+    require(bool(ACTION_KEY_RE.fullmatch(action_key)), "invalid expected watcher action")
+    require(bool(SHA256_RE.fullmatch(manifest_digest)), "invalid expected evidence manifest")
+    require(predicate.get("runId") == run_id, "evidence attestation run mismatch")
+    require(predicate.get("sourceSha") == source_sha, "evidence attestation source mismatch")
+    require(predicate.get("actionKey") == action_key, "evidence attestation action mismatch")
+    require(
+        predicate.get("manifestDigest") == manifest_digest,
+        "evidence attestation manifest mismatch",
+    )
 
 
 def load_capture(manifest_path: pathlib.Path, capture_id: str) -> tuple[dict[str, Any], bytes]:
@@ -467,6 +531,10 @@ def validate_plan(
     for result in plan["completionAssessment"]["criteria"]:
         for reference in result["evidence"]:
             require(
+                bool(COMPLETION_EVIDENCE_REF_RE.fullmatch(reference)),
+                f"invalid criterion evidence reference: {reference}",
+            )
+            require(
                 reference in evidence_refs
                 or reference in precondition_refs
                 or reference in source_refs,
@@ -493,7 +561,7 @@ def validate_plan(
         and all(value in {"php-bin", "mise-php"} for value in repositories),
         "plan repository authority is invalid",
     )
-    require(plan.get("requiredChecks") == ["Script checks"], "required deterministic checks changed")
+    require(plan.get("requiredChecks") == REQUIRED_PLAN_CHECKS, "required deterministic checks changed")
     release_intent = plan.get("releaseIntent")
     if release_intent is not None:
         require(isinstance(release_intent, dict), "releaseIntent must be an object or null")
@@ -774,6 +842,8 @@ def watch_decision(
     previous: dict[str, Any],
     events: Iterable[dict[str, Any]],
     health: dict[str, Any],
+    *,
+    self_evidence_update: bool = False,
 ) -> dict[str, Any]:
     incomplete = sorted(
         event.get("actionKey")
@@ -787,7 +857,26 @@ def watch_decision(
     elif incomplete:
         trigger = "event_incomplete"
     elif previous.get("manifestDigest") != manifest.get("manifestDigest"):
-        trigger = "evidence_changed"
+        current_captures = {
+            item.get("captureId"): (item.get("status"), item.get("digest"))
+            for item in manifest.get("captures", [])
+            if isinstance(item, dict)
+        }
+        previous_captures = {
+            item.get("captureId"): (item.get("status"), item.get("digest"))
+            for item in previous.get("captures", [])
+            if isinstance(item, dict)
+        }
+        changed_captures = {
+            capture_id
+            for capture_id in set(current_captures) | set(previous_captures)
+            if current_captures.get(capture_id) != previous_captures.get(capture_id)
+        }
+        trigger = (
+            "quiet"
+            if self_evidence_update and changed_captures == {"php_bin_state"}
+            else "evidence_changed"
+        )
     else:
         trigger = "quiet"
     return {

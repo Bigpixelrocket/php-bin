@@ -15,7 +15,11 @@ OUTPUT_SCHEMA_RE = re.compile(r'--output-schema","([^"]+\.json)"')
 UNSUPPORTED_KEYWORDS = {"uniqueItems"}
 
 sys.path.insert(0, str(ROOT))
-from maintenance.control import ACTION_KEY_RE  # noqa: E402
+from maintenance.control import (  # noqa: E402
+    ACTION_KEY_RE,
+    COMPLETION_EVIDENCE_REF_RE,
+    REQUIRED_PLAN_CHECKS,
+)
 
 
 def fail(message: str) -> None:
@@ -77,6 +81,21 @@ def main() -> int:
             schema_pattern = document.get("properties", {}).get("actionKey", {}).get("pattern")
             if schema_pattern != ACTION_KEY_RE.pattern:
                 fail("maintenance plan actionKey pattern must match deterministic admission")
+            properties = document.get("properties", {})
+            if properties.get("requiredChecks", {}).get("const") != REQUIRED_PLAN_CHECKS:
+                fail("maintenance plan requiredChecks must match deterministic admission")
+            evidence_pattern = (
+                properties.get("completionAssessment", {})
+                .get("properties", {})
+                .get("criteria", {})
+                .get("items", {})
+                .get("properties", {})
+                .get("evidence", {})
+                .get("items", {})
+                .get("pattern")
+            )
+            if evidence_pattern != COMPLETION_EVIDENCE_REF_RE.pattern:
+                fail("criterion evidence reference pattern must match deterministic admission")
 
     print(f"Validated {len(schema_paths)} Codex Structured Outputs schemas.")
     return 0
