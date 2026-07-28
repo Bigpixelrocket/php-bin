@@ -12,6 +12,7 @@ from maintenance.control import (
     COMPLETION_EVIDENCE_REF_RE,
     ControlError,
     canonical_json,
+    load_plan_evidence,
     mutation_allowed,
     notification_decision,
     retained_notification_issue,
@@ -199,6 +200,20 @@ class MaintenanceControlTests(unittest.TestCase):
             release_intent,
             [*tag_only, {"captureId": "php_release_feed", "value": "8.5.9"}],
         )
+
+    def test_runtime_plan_evidence_is_exact_and_allowlisted(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            evidence = root / "evidence"
+            evidence.mkdir()
+            manifest = evidence / "evidence-manifest.json"
+            manifest.write_text('{"manifestDigest":"sha256:' + "a" * 64 + '"}')
+            (root / "watch-decision.json").write_text('{"trigger":"evidence_changed"}')
+            capture, body = load_plan_evidence(manifest, "watch_decision")
+            self.assertEqual("watch_decision", capture["captureId"])
+            self.assertEqual(sha256_bytes(body), capture["digest"])
+            with self.assertRaisesRegex(ControlError, "does not resolve exactly once"):
+                load_plan_evidence(manifest, "preconditions")
 
     def test_illegal_event_transition_fails_closed(self):
         with self.assertRaises(ControlError):

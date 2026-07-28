@@ -11,6 +11,13 @@ allowed paths, checks, stable release intent, risk, notification summary, and
 downstream success conditions. Live research is context only and cannot replace
 captured evidence.
 
+Plan evidence `captureId` values may name only a capture in the evidence
+manifest or the two deterministic runtime inputs `evidence_manifest` and
+`watch_decision`. Those runtime IDs resolve only to
+`maintenance-run/evidence/evidence-manifest.json` and
+`maintenance-run/watch-decision.json`; no other runtime or repository file is
+admissible as plan evidence.
+
 The required runtime inputs are generated before this phase and are available
 at these exact paths:
 
