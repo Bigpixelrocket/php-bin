@@ -32,7 +32,7 @@ from typing import Any, Iterable
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 ACTION_KEY_RE = re.compile(
-    r"^(no_change:[0-9a-f]{8,64}|new_patch:\d+\.\d+\.\d+|new_branch:\d+\.\d+|"
+    r"^(no_change:[0-9a-f]{16}|new_patch:\d+\.\d+\.\d+|new_branch:\d+\.\d+|"
     r"branch_eol:\d+\.\d+:\d{4}-\d{2}-\d{2}|"
     r"recipe_rebuild:\d+\.\d+\.\d+:[1-9]\d*|"
     r"repair:\d+\.\d+\.\d+:[0-9a-f]{8,64}|"
