@@ -14,6 +14,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 OUTPUT_SCHEMA_RE = re.compile(r'--output-schema","([^"]+\.json)"')
 UNSUPPORTED_KEYWORDS = {"uniqueItems"}
 
+sys.path.insert(0, str(ROOT))
+from maintenance.control import ACTION_KEY_RE  # noqa: E402
+
 
 def fail(message: str) -> None:
     print(f"Structured output schema error: {message}", file=sys.stderr)
@@ -70,6 +73,10 @@ def main() -> int:
         except json.JSONDecodeError as error:
             fail(f"{path.relative_to(ROOT)} is invalid JSON: {error}")
         validate_node(document, str(path.relative_to(ROOT)))
+        if path == ROOT / "schemas/maintenance-plan.schema.json":
+            schema_pattern = document.get("properties", {}).get("actionKey", {}).get("pattern")
+            if schema_pattern != ACTION_KEY_RE.pattern:
+                fail("maintenance plan actionKey pattern must match deterministic admission")
 
     print(f"Validated {len(schema_paths)} Codex Structured Outputs schemas.")
     return 0

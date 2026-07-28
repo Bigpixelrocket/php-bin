@@ -6,7 +6,10 @@
   "required": ["schemaVersion", "actionKey", "action", "agentContract", "evidence", "researchSources", "repositories", "preconditions", "editsRequired", "allowedPaths", "requiredChecks", "releaseIntent", "agentOperations", "budgets", "notification", "risk", "completionAssessment", "summary"],
   "properties": {
     "schemaVersion": {"type": "integer", "const": 1},
-    "actionKey": {"type": "string"},
+    "actionKey": {
+      "type": "string",
+      "pattern": "^(no_change:[0-9a-f]{8,64}|new_patch:\\d+\\.\\d+\\.\\d+|new_branch:\\d+\\.\\d+|branch_eol:\\d+\\.\\d+:\\d{4}-\\d{2}-\\d{2}|recipe_rebuild:\\d+\\.\\d+\\.\\d+:[1-9]\\d*|repair:\\d+\\.\\d+\\.\\d+:[0-9a-f]{8,64}|(?:source_unhealthy|health_failed|policy_failure|auth_failure):[0-9a-f]{8,64})$"
+    },
     "action": {"type": "string", "enum": ["no_change", "new_patch", "new_branch", "branch_eol", "repair", "reconcile_partial", "blocked", "needs_human"]},
     "agentContract": {
       "type": "object",
