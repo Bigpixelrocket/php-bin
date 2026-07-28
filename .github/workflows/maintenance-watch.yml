@@ -139,7 +139,10 @@ jobs:
     timeout-minutes: 5
     permissions:
       actions: write
+      artifact-metadata: write
+      attestations: write
       contents: write
+      id-token: write
       pull-requests: write
       issues: write
     steps:
@@ -156,6 +159,37 @@ jobs:
             --repo "${{ github.repository }}" \
             --name "maintenance-investigation-${{ github.run_id }}" \
             --dir maintenance-plan-download
+      - name: Read unattended mutation state
+        id: operator
+        run: |
+          test "$(jq -r .unattendedMutation .github/maintenance-operator.json)" = "enabled" \
+            && echo "enabled=true" >> "$GITHUB_OUTPUT" \
+            || echo "enabled=false" >> "$GITHUB_OUTPUT"
+      - name: Prepare deterministic no-change evidence
+        if: needs.investigate.outputs.action == 'no_change' && steps.operator.outputs.enabled == 'true'
+        run: |
+          git checkout -B "maintenance/evidence-${{ github.run_id }}" origin/main
+          mkdir -p maintenance-state
+          jq -n \
+            --arg manifestDigest "$(jq -r .manifestDigest maintenance-plan-download/evidence/evidence-manifest.json)" \
+            --arg planDigest "$(jq -r .planDigest maintenance-plan-download/admission.json)" \
+            --argjson captureDigests "$(jq '[.captures[] | {captureId,digest,status}]' maintenance-plan-download/evidence/evidence-manifest.json)" \
+            '{schemaVersion:1,manifestDigest:$manifestDigest,planDigest:$planDigest,captures:$captureDigests}' \
+            > maintenance-state/last-evidence.json
+          jq -n \
+            --arg runId "${{ github.run_id }}" \
+            --arg sourceSha "${{ needs.investigate.outputs.base_sha }}" \
+            --arg actionKey "${{ needs.investigate.outputs.action_key }}" \
+            --arg manifestDigest "$(jq -r .manifestDigest maintenance-plan-download/evidence/evidence-manifest.json)" \
+            '{schemaVersion:1,runId:$runId,sourceSha:$sourceSha,actionKey:$actionKey,manifestDigest:$manifestDigest}' \
+            > maintenance-plan-download/evidence-attestation-predicate.json
+      - name: Attest deterministic no-change evidence
+        if: needs.investigate.outputs.action == 'no_change' && steps.operator.outputs.enabled == 'true'
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
+        with:
+          subject-path: maintenance-state/last-evidence.json
+          predicate-type: https://bigpixelrocket.dev/maintenance/evidence-state/v1
+          predicate-path: maintenance-plan-download/evidence-attestation-predicate.json
       - name: Dispatch implementation or no-edit release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -198,16 +232,7 @@ jobs:
           fi
 
           if [[ "$action" == "no_change" ]]; then
-            :
-            git checkout -B "maintenance/evidence-${{ github.run_id }}" origin/main
             base="$(git rev-parse HEAD)"
-            mkdir -p maintenance-state
-            jq -n \
-              --arg manifestDigest "$(jq -r .manifestDigest maintenance-plan-download/evidence/evidence-manifest.json)" \
-              --arg planDigest "$(jq -r .planDigest maintenance-plan-download/admission.json)" \
-              --argjson captureDigests "$(jq '[.captures[] | {captureId,digest,status}]' maintenance-plan-download/evidence/evidence-manifest.json)" \
-              '{schemaVersion:1,manifestDigest:$manifestDigest,planDigest:$planDigest,captures:$captureDigests}' \
-              > maintenance-state/last-evidence.json
             git add maintenance-state/last-evidence.json
             git -c user.name=maintenance-watcher -c user.email=maintenance@invalid \
               commit -m "chore: record reviewed maintenance evidence"

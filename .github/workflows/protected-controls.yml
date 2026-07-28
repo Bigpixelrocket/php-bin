@@ -4,6 +4,7 @@ on:
   pull_request_target:
 
 permissions:
+  attestations: read
   contents: read
   pull-requests: read
 
@@ -38,8 +39,13 @@ jobs:
           import re
           import subprocess
           import sys
+          import tempfile
 
-          from maintenance.control import ControlError, validate_evidence_state_record
+          from maintenance.control import (
+              ControlError,
+              validate_evidence_attestation_predicate,
+              validate_evidence_state_record,
+          )
 
           def api(path):
               result = subprocess.run(
@@ -96,7 +102,8 @@ jobs:
               )
               try:
                   encoded = content["content"].replace("\n", "")
-                  record = json.loads(base64.b64decode(encoded, validate=True))
+                  decoded = base64.b64decode(encoded, validate=True)
+                  record = json.loads(decoded)
                   validate_evidence_state_record(record)
               except (KeyError, ValueError, json.JSONDecodeError, ControlError) as error:
                   print(f"Invalid deterministic evidence state: {error}", file=sys.stderr)
@@ -110,8 +117,61 @@ jobs:
                   and run.get("status") == "in_progress"
               )
               if direct_parent and trusted_run:
-                  print(f"Protected deterministic evidence state approved from watcher run {run['id']}.")
-                  raise SystemExit(0)
+                  try:
+                      with tempfile.NamedTemporaryFile() as evidence_file:
+                          evidence_file.write(decoded)
+                          evidence_file.flush()
+                          verification = subprocess.run(
+                              [
+                                  "gh",
+                                  "attestation",
+                                  "verify",
+                                  evidence_file.name,
+                                  "--repo",
+                                  repo,
+                                  "--signer-workflow",
+                                  f"{repo}/.github/workflows/maintenance-watch.yml",
+                                  "--source-ref",
+                                  "refs/heads/main",
+                                  "--source-digest",
+                                  base,
+                                  "--predicate-type",
+                                  "https://bigpixelrocket.dev/maintenance/evidence-state/v1",
+                                  "--format",
+                                  "json",
+                              ],
+                              check=True,
+                              text=True,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE,
+                          )
+                      attestations = json.loads(verification.stdout)
+                      predicates = [
+                          item["verificationResult"]["statement"]["predicate"]
+                          for item in attestations
+                      ]
+                  except (
+                      KeyError,
+                      json.JSONDecodeError,
+                      subprocess.CalledProcessError,
+                  ) as error:
+                      print(f"Evidence attestation verification failed: {error}", file=sys.stderr)
+                      raise SystemExit(1) from error
+                  for predicate in predicates:
+                      try:
+                          validate_evidence_attestation_predicate(
+                              predicate,
+                              run_id=evidence_run.group(1),
+                              source_sha=base,
+                              action_key=f"no_change:{record['manifestDigest'].removeprefix('sha256:')[:16]}",
+                              manifest_digest=record["manifestDigest"],
+                          )
+                      except ControlError:
+                          continue
+                      print(f"Protected deterministic evidence state approved from attested watcher run {run['id']}.")
+                      raise SystemExit(0)
+                  print("No attestation matched the exact watcher run and evidence state.", file=sys.stderr)
+                  raise SystemExit(1)
 
           reviews = api(f"repos/{repo}/pulls/{number}/reviews")
           approved = any(

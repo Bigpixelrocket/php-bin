@@ -31,6 +31,7 @@ from typing import Any, Iterable
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 ACTION_KEY_RE = re.compile(
     r"^(no_change:[0-9a-f]{16}|new_patch:\d+\.\d+\.\d+|new_branch:\d+\.\d+|"
     r"branch_eol:\d+\.\d+:\d{4}-\d{2}-\d{2}|"
@@ -282,6 +283,33 @@ def validate_evidence_state_record(record: dict[str, Any]) -> None:
         require(capture.get("status") == 200, "evidence capture status is not healthy")
     require(len(capture_ids) == len(set(capture_ids)), "duplicate evidence capture")
     require(set(capture_ids) == EVIDENCE_CAPTURE_IDS, "evidence capture set changed")
+
+
+def validate_evidence_attestation_predicate(
+    predicate: dict[str, Any],
+    *,
+    run_id: str,
+    source_sha: str,
+    action_key: str,
+    manifest_digest: str,
+) -> None:
+    require(isinstance(predicate, dict), "evidence attestation predicate must be an object")
+    require(
+        set(predicate) == {"schemaVersion", "runId", "sourceSha", "actionKey", "manifestDigest"},
+        "evidence attestation predicate fields changed",
+    )
+    require(predicate.get("schemaVersion") == 1, "invalid evidence attestation predicate version")
+    require(bool(re.fullmatch(r"[1-9][0-9]*", run_id)), "invalid expected watcher run")
+    require(bool(COMMIT_SHA_RE.fullmatch(source_sha)), "invalid expected watcher source")
+    require(bool(ACTION_KEY_RE.fullmatch(action_key)), "invalid expected watcher action")
+    require(bool(SHA256_RE.fullmatch(manifest_digest)), "invalid expected evidence manifest")
+    require(predicate.get("runId") == run_id, "evidence attestation run mismatch")
+    require(predicate.get("sourceSha") == source_sha, "evidence attestation source mismatch")
+    require(predicate.get("actionKey") == action_key, "evidence attestation action mismatch")
+    require(
+        predicate.get("manifestDigest") == manifest_digest,
+        "evidence attestation manifest mismatch",
+    )
 
 
 def load_capture(manifest_path: pathlib.Path, capture_id: str) -> tuple[dict[str, Any], bytes]:

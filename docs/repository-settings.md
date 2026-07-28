@@ -16,7 +16,10 @@ Required repository state:
   a same-repository `github-actions[bot]` PR may pass only when it is a direct
   child of the current base, is tied to the still-running protected watcher,
   changes exactly that file, and the record has the reviewed healthy-capture
-  shape. Runtime Codex cannot invoke this exception or edit that state.
+  shape. The exact file must also have a GitHub OIDC/Sigstore attestation from
+  the protected watcher workflow, bound to its source commit and run-specific
+  predicate. Runtime Codex cannot mint that identity, invoke this exception,
+  or edit that state.
 - Bind the required check to the GitHub Actions app, preventing another app
   from satisfying the same context name.
 - Require conversation resolution.

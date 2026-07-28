@@ -23,6 +23,7 @@ from maintenance.control import (
     transition_event,
     validate_archive,
     validate_completion_assessment,
+    validate_evidence_attestation_predicate,
     validate_evidence_state_record,
     verify_merge,
     watch_decision,
@@ -132,6 +133,25 @@ class MaintenanceControlTests(unittest.TestCase):
         record["captures"][0]["status"] = 500
         with self.assertRaisesRegex(ControlError, "not healthy"):
             validate_evidence_state_record(record)
+
+    def test_evidence_attestation_is_bound_to_the_exact_watcher_run(self):
+        predicate = {
+            "schemaVersion": 1,
+            "runId": "30359936149",
+            "sourceSha": "a" * 40,
+            "actionKey": "no_change:" + "c" * 16,
+            "manifestDigest": "sha256:" + "c" * 64,
+        }
+        expected = {
+            "run_id": predicate["runId"],
+            "source_sha": predicate["sourceSha"],
+            "action_key": predicate["actionKey"],
+            "manifest_digest": predicate["manifestDigest"],
+        }
+        validate_evidence_attestation_predicate(predicate, **expected)
+        predicate["runId"] = "30359936150"
+        with self.assertRaisesRegex(ControlError, "run mismatch"):
+            validate_evidence_attestation_predicate(predicate, **expected)
 
     def test_illegal_event_transition_fails_closed(self):
         with self.assertRaises(ControlError):
