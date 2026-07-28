@@ -18,6 +18,7 @@ BOT_USER_RE = re.compile(r"^[A-Za-z0-9-]+(?:\[bot\])?$")
 
 
 def load_workflow(path: pathlib.Path) -> dict[str, Any]:
+    """Load one GitHub Actions workflow through Ruby's YAML parser."""
     script = (
         "document = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true); "
         "STDOUT.write(JSON.generate(document))"
@@ -37,6 +38,7 @@ def load_workflow(path: pathlib.Path) -> dict[str, Any]:
 
 
 def validate() -> dict[str, Any]:
+    """Validate every repository Codex Action call and return audit evidence."""
     contract = json.loads(CONTRACT_PATH.read_text())
     action = contract["action"]
     commit = contract["commit"]
@@ -91,7 +93,7 @@ def validate() -> dict[str, Any]:
                     raise ValueError(f"{location} codex-args must contain only strings")
                 if "--strict-config" not in parsed_args or "--ephemeral" not in parsed_args:
                     raise ValueError(f"{location} omits required strict or ephemeral execution")
-                if "--profile" in parsed_args:
+                if any(item == "--profile" or item.startswith("--profile=") for item in parsed_args):
                     raise ValueError(f"{location} selects an undefined named profile")
                 allow_bots = inputs.get("allow-bots")
                 if type(allow_bots) is not bool or allow_bots is not False:
@@ -122,6 +124,7 @@ def validate() -> dict[str, Any]:
 
 
 def main() -> int:
+    """Run validation and emit human-readable or machine-readable output."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
