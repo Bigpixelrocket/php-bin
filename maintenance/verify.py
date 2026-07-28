@@ -386,11 +386,18 @@ class Verifier:
     def a07(self, directory: pathlib.Path) -> list[str]:
         watch = (PHP_ROOT / ".github/workflows/maintenance-watch.yml").read_text()
         implementation = (PHP_ROOT / ".github/workflows/maintenance-implementation.yml").read_text()
-        assert_true("sandbox: read-only" in watch and "--profile\",\"investigation" in watch, "investigation sandbox/profile missing")
+        assert_true(
+            "sandbox: read-only" in watch
+            and 'cp .codex/investigation.config.toml "$RUNNER_TEMP/codex-home/config.toml"' in watch
+            and '"--profile"' not in watch,
+            "investigation sandbox or canonical config loading is missing",
+        )
         assert_true(
             "sandbox: workspace-write" in implementation
-            and '--profile\",\"${{ inputs.phase }}' in implementation,
-            "phase-bound implementation/repair sandbox profile missing",
+            and 'cp ".codex/$phase.config.toml" "$RUNNER_TEMP/codex-home/config.toml"' in implementation
+            and 'cp .codex/repair.config.toml "$RUNNER_TEMP/codex-home/config.toml"' in implementation
+            and '"--profile"' not in implementation,
+            "phase-bound implementation/repair canonical config loading is missing",
         )
         assert_true('network_access = false' in (PHP_ROOT / ".codex/implementation.config.toml").read_text(), "implementation network is not disabled")
         assert_true('allowed_domains = ["php.net", "github.com", "docs.github.com"]' in (PHP_ROOT / ".codex/investigation.config.toml").read_text(), "investigation allowlist changed")
@@ -508,7 +515,25 @@ class Verifier:
         for path in workflows:
             body = path.read_text()
             assert_true(not UNPINNED_RE.search(body), f"workflow has unpinned Action: {path}")
+        codex_contracts = {}
+        for name, root in {"php-bin": PHP_ROOT, "mise-php": self.mise_root}.items():
+            result = run("./scripts/validate-codex-action-inputs", "--json", cwd=root)
+            codex_contracts[name] = json.loads(result.stdout)
+        assert_true(
+            codex_contracts["php-bin"]["commit"] == codex_contracts["mise-php"]["commit"]
+            and codex_contracts["php-bin"]["metadataDigest"] == codex_contracts["mise-php"]["metadataDigest"],
+            "repositories do not share the same reviewed Codex Action contract",
+        )
+        assert_true(
+            codex_contracts["php-bin"]["codexVersion"] == codex_contracts["mise-php"]["codexVersion"],
+            "repositories do not pin the same reviewed Codex CLI version",
+        )
+        (directory / "codex-action-inputs.json").write_bytes(canonical_json(codex_contracts))
         pins = json.loads((PHP_ROOT / ".github/maintenance-pins.json").read_text())
+        assert_true(
+            pins["actions"]["openai/codex-action"] == codex_contracts["php-bin"]["commit"],
+            "Codex Action pin is not bound to the reviewed input contract",
+        )
         e2e = PHP_ROOT / ".github/workflows/maintenance-e2e.yml"
         assert_true(
             pins["workflows"][".github/workflows/maintenance-e2e.yml"] == sha256_file(e2e),
@@ -533,8 +558,15 @@ class Verifier:
         assert_true(evidence.get("canary", {}).get("removed") is True, "admin canary was not removed")
         assert_true(evidence.get("protectionRestored") is True, "fixture bypass protection was not restored")
         assert_true(evidence.get("immutableReleasesEnabled") is True, "immutable releases were not enabled")
+        agent_canary_environment = evidence.get("agentCanaryEnvironment", {})
+        assert_true(
+            agent_canary_environment.get("name") == "php-maintenance-agent-canary"
+            and agent_canary_environment.get("protectedBranchesOnly") is True
+            and agent_canary_environment.get("administratorBypass") is False,
+            "credentialed agent canary environment is not protected",
+        )
         shutil.copy(admin, directory / admin.name)
-        return [admin.name]
+        return [admin.name, "codex-action-inputs.json"]
 
     def a14(self, directory: pathlib.Path) -> list[str]:
         assets = directory / "assets"

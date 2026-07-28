@@ -101,7 +101,22 @@ gh workflow run maintenance-e2e.yml \
   -f php_bin_sha=<exact-php-bin-sha> \
   -f mise_php_sha=<exact-mise-php-sha> \
   -f suite=production-parity
+
+# After the reviewed php-bin commit is merged to main, exercise the actual
+# pinned Codex Action and repository API key inside the protected canary environment.
+gh workflow run maintenance-e2e.yml \
+  --repo bigpixelrocket/php-bin \
+  --ref main \
+  -f php_bin_sha=<exact-main-php-bin-sha> \
+  -f mise_php_sha=<exact-mise-php-sha> \
+  -f suite=agent-canary
 ```
+
+`scripts/test.sh` validates every Codex Action invocation, exact CLI version,
+and canonical `config.toml` loading against the reviewed offline contract in
+`.github/codex-action-contract.json`. The live agent canary must run from
+protected `main`; feature-branch runs cannot enter its credentialed
+environment.
 
 Inspect `maintenance-events/`, generated `support-policy.json`, the reviewed
 `maintenance/policy-invariants.json`, retained workflow

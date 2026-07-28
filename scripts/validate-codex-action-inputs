@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""Validate every Codex Action invocation against the reviewed offline contract."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import pathlib
+import re
+import subprocess
+import sys
+from typing import Any
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+CONTRACT_PATH = ROOT / ".github/codex-action-contract.json"
+BOT_USER_RE = re.compile(r"^[A-Za-z0-9-]+(?:\[bot\])?$")
+
+
+def load_workflow(path: pathlib.Path) -> dict[str, Any]:
+    """Load one GitHub Actions workflow through Ruby's YAML parser."""
+    script = (
+        "document = YAML.safe_load(File.read(ARGV.fetch(0)), aliases: true); "
+        "STDOUT.write(JSON.generate(document))"
+    )
+    result = subprocess.run(
+        ["ruby", "-ryaml", "-rjson", "-e", script, str(path)],
+        cwd=ROOT,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    document = json.loads(result.stdout)
+    if not isinstance(document, dict):
+        raise ValueError(f"workflow is not an object: {path}")
+    return document
+
+
+def validate() -> dict[str, Any]:
+    """Validate every repository Codex Action call and return audit evidence."""
+    contract = json.loads(CONTRACT_PATH.read_text())
+    action = contract["action"]
+    commit = contract["commit"]
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError("Codex Action contract commit is not an exact SHA")
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", contract["metadataDigest"]):
+        raise ValueError("Codex Action metadata digest is invalid")
+
+    allowed_inputs = set(contract["allowedInputs"])
+    required_codex_version = contract["requiredCodexVersion"]
+    if not re.fullmatch(r"\d+\.\d+\.\d+", required_codex_version):
+        raise ValueError("required Codex CLI version is not exact")
+    required_bot_users = set(contract["securityInputs"]["allow-bot-users"]["requiredValues"])
+    expected_ref = f"{action}@{commit}"
+    invocations = []
+    canonical_config_copies = 0
+    for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        workflow_body = path.read_text()
+        canonical_config_copies += workflow_body.count('"$RUNNER_TEMP/codex-home/config.toml"')
+        if re.search(r'cp\s+\.codex/\S+\.config\.toml\s+"\$RUNNER_TEMP/codex-home/"', workflow_body):
+            raise ValueError(f"{path.relative_to(ROOT)} copies a phase config under an unloaded filename")
+        document = load_workflow(path)
+        jobs = document.get("jobs", {})
+        if not isinstance(jobs, dict):
+            raise ValueError(f"workflow jobs are not an object: {path}")
+        for job_name, job in jobs.items():
+            if not isinstance(job, dict):
+                continue
+            for index, step in enumerate(job.get("steps", [])):
+                if not isinstance(step, dict):
+                    continue
+                uses = step.get("uses")
+                if not isinstance(uses, str) or not uses.startswith(f"{action}@"):
+                    continue
+                location = f"{path.relative_to(ROOT)}:{job_name}:step-{index + 1}"
+                if uses != expected_ref:
+                    raise ValueError(f"{location} does not use reviewed Codex Action SHA")
+                inputs = step.get("with", {})
+                if not isinstance(inputs, dict):
+                    raise ValueError(f"{location} inputs are not an object")
+                unknown = sorted(set(inputs) - allowed_inputs)
+                if unknown:
+                    raise ValueError(f"{location} has unknown Codex Action inputs: {unknown}")
+                if inputs.get("codex-version") != required_codex_version:
+                    raise ValueError(f"{location} does not pin the reviewed Codex CLI version")
+                codex_args = inputs.get("codex-args")
+                try:
+                    parsed_args = json.loads(codex_args)
+                except (TypeError, json.JSONDecodeError) as error:
+                    raise ValueError(f"{location} codex-args must be a JSON array") from error
+                if not isinstance(parsed_args, list) or not all(isinstance(item, str) for item in parsed_args):
+                    raise ValueError(f"{location} codex-args must contain only strings")
+                if "--strict-config" not in parsed_args or "--ephemeral" not in parsed_args:
+                    raise ValueError(f"{location} omits required strict or ephemeral execution")
+                if any(item == "--profile" or item.startswith("--profile=") for item in parsed_args):
+                    raise ValueError(f"{location} selects an undefined named profile")
+                allow_bots = inputs.get("allow-bots")
+                if type(allow_bots) is not bool or allow_bots is not False:
+                    raise ValueError(f"{location} allow-bots must be the boolean false")
+                allow_bot_users = inputs.get("allow-bot-users")
+                if not isinstance(allow_bot_users, str):
+                    raise ValueError(f"{location} allow-bot-users must be a bot username list")
+                bot_users = {item.strip() for item in allow_bot_users.split(",") if item.strip()}
+                if bot_users != required_bot_users or not all(BOT_USER_RE.fullmatch(item) for item in bot_users):
+                    raise ValueError(f"{location} allow-bot-users does not match the reviewed bot allowlist")
+                invocations.append({"workflow": str(path.relative_to(ROOT)), "job": job_name, "step": index + 1})
+
+    expected_count = contract["expectedInvocations"]
+    if len(invocations) != expected_count:
+        raise ValueError(f"expected {expected_count} Codex Action invocations, found {len(invocations)}")
+    if canonical_config_copies != expected_count:
+        raise ValueError(
+            f"expected {expected_count} canonical Codex config copies, found {canonical_config_copies}"
+        )
+    return {
+        "action": action,
+        "commit": commit,
+        "codexVersion": required_codex_version,
+        "metadataDigest": contract["metadataDigest"],
+        "invocations": invocations,
+        "result": "passed",
+    }
+
+
+def main() -> int:
+    """Run validation and emit human-readable or machine-readable output."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+    try:
+        result = validate()
+        if args.json:
+            print(json.dumps(result, sort_keys=True))
+        else:
+            print(f"Validated {len(result['invocations'])} pinned Codex Action invocations.")
+        return 0
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError, subprocess.CalledProcessError) as error:
+        print(f"Codex Action input validation failed: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

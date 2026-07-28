@@ -149,7 +149,9 @@ class MaintenanceControlTests(unittest.TestCase):
         self.assertTrue(mutation_allowed({"unattendedMutation": "enabled"}))
 
     def test_invariants_and_durable_state_are_protected(self):
+        self.assertTrue(path_is_protected(".github/codex-action-contract.json"))
         self.assertTrue(path_is_protected("maintenance/policy-invariants.json"))
+        self.assertTrue(path_is_protected("scripts/validate-codex-action-inputs"))
         self.assertTrue(path_is_protected("maintenance-events/new-branch.json"))
         self.assertTrue(path_is_protected("maintenance-state/last-evidence.json"))
         self.assertFalse(path_is_protected("support-policy.json"))

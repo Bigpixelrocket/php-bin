@@ -69,19 +69,21 @@ jobs:
             '.agentContract.instructionDigests={shared:$shared,phaseTemplate:$phaseTemplate,eventContract:$eventContract}' \
             maintenance-run/maintenance-plan.json > maintenance-run/implementation-plan.json
           mkdir -p "$RUNNER_TEMP/codex-home"
-          cp ".codex/$phase.config.toml" "$RUNNER_TEMP/codex-home/"
+          cp ".codex/$phase.config.toml" "$RUNNER_TEMP/codex-home/config.toml"
       - name: Run offline Codex implementation
         uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          codex-version: 0.145.0
           prompt-file: maintenance-run/implementation-prompt.md
           output-file: maintenance-run/implementation-result.json
           codex-home: ${{ runner.temp }}/codex-home
           sandbox: workspace-write
           safety-strategy: drop-sudo
           allow-users: loadinglucian
-          allow-bots: github-actions[bot]
-          codex-args: '["--strict-config","--ephemeral","--profile","${{ inputs.phase }}","--output-schema","schemas/agent-completion-assessment.schema.json"]'
+          allow-bots: false
+          allow-bot-users: github-actions[bot]
+          codex-args: '["--strict-config","--ephemeral","--output-schema","schemas/agent-completion-assessment.schema.json"]'
       - name: Seal exact agent diff
         run: |
           ./scripts/seal-maintenance-patch \
@@ -219,19 +221,21 @@ jobs:
             printf '\n```\n'
           } > maintenance-run/repair-prompt.md
           mkdir -p "$RUNNER_TEMP/codex-home"
-          cp .codex/repair.config.toml "$RUNNER_TEMP/codex-home/"
+          cp .codex/repair.config.toml "$RUNNER_TEMP/codex-home/config.toml"
       - name: Run one offline Codex repair
         uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          codex-version: 0.145.0
           prompt-file: maintenance-run/repair-prompt.md
           output-file: maintenance-run/repair-result.json
           codex-home: ${{ runner.temp }}/codex-home
           sandbox: workspace-write
           safety-strategy: drop-sudo
           allow-users: loadinglucian
-          allow-bots: github-actions[bot]
-          codex-args: '["--strict-config","--ephemeral","--profile","repair","--output-schema","schemas/agent-completion-assessment.schema.json"]'
+          allow-bots: false
+          allow-bot-users: github-actions[bot]
+          codex-args: '["--strict-config","--ephemeral","--output-schema","schemas/agent-completion-assessment.schema.json"]'
       - name: Seal the combined repaired diff
         run: |
           mv maintenance-run/repair-plan.json maintenance-run/implementation-plan.json

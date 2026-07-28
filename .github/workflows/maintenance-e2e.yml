@@ -16,7 +16,7 @@ on:
         required: true
         default: production-parity
         type: choice
-        options: [production-parity, notification-canary, live-canary]
+        options: [production-parity, agent-canary, notification-canary, live-canary]
       live_version:
         description: Exact stable PHP version for live-canary
         required: false
@@ -90,6 +90,69 @@ jobs:
           if-no-files-found: error
           retention-days: 90
           include-hidden-files: true
+
+  agent-canary:
+    if: inputs.suite == 'agent-canary'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: php-maintenance-agent-canary
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.php_bin_sha }}
+          persist-credentials: false
+      - name: Bind the credentialed canary to reviewed main
+        env:
+          EXPECTED_SHA: ${{ inputs.php_bin_sha }}
+        run: |
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_SHA" = "$EXPECTED_SHA"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: Prepare deterministic canary contract
+        run: |
+          mkdir -p canary "$RUNNER_TEMP/codex-home"
+          cp .codex/investigation.config.toml "$RUNNER_TEMP/codex-home/config.toml"
+          jq -nr --arg nonce "$GITHUB_RUN_ID" \
+            '"Return only this JSON object with both values as strings: {\"status\":\"passed\",\"nonce\":\"" + $nonce + "\"}. Do not use tools and do not modify files."' \
+            > canary/prompt.md
+          jq -n --arg nonce "$GITHUB_RUN_ID" \
+            '{
+              "$schema":"https://json-schema.org/draft/2020-12/schema",
+              type:"object",
+              additionalProperties:false,
+              required:["status","nonce"],
+              properties:{status:{const:"passed"},nonce:{const:$nonce}}
+            }' > canary/schema.json
+      - name: Run read-only Codex action canary
+        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          codex-version: 0.145.0
+          prompt-file: canary/prompt.md
+          output-file: canary/result.json
+          output-schema-file: canary/schema.json
+          codex-home: ${{ runner.temp }}/codex-home
+          sandbox: read-only
+          safety-strategy: drop-sudo
+          allow-users: loadinglucian
+          allow-bots: false
+          allow-bot-users: github-actions[bot]
+          codex-args: '["--strict-config","--ephemeral"]'
+      - name: Verify exact canary result
+        run: |
+          jq -e --arg nonce "$GITHUB_RUN_ID" \
+            '.status == "passed" and .nonce == $nonce and (keys == ["nonce","status"])' \
+            canary/result.json
+      - name: Retain Codex action canary evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: maintenance-agent-canary-${{ github.run_id }}
+          path: canary/
+          if-no-files-found: error
+          retention-days: 90
 
   notification-canary:
     if: inputs.suite == 'notification-canary'

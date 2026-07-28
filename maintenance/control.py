@@ -39,30 +39,13 @@ ACTION_KEY_RE = re.compile(
     r"(?:source_unhealthy|health_failed|policy_failure|auth_failure):[0-9a-f]{8,64})$"
 )
 STABLE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[1-9]\d*)?$")
-PROTECTED_PATTERNS = (
-    ".github/codex/maintenance/*",
-    ".github/maintenance-operator.json",
-    ".github/maintenance-pins.json",
-    ".github/workflows/*",
-    ".codex/*",
-    "schemas/*",
-    "maintenance/*",
-    "scripts/admit-maintenance-plan",
-    "scripts/capture-maintenance-evidence",
-    "scripts/configure-github-maintenance",
-    "scripts/maintenance-event",
-    "scripts/notify-maintenance",
-    "scripts/prepare-agent-task",
-    "scripts/seal-maintenance-patch",
-    "scripts/snapshot-github-admin-state",
-    "scripts/validate-maintenance-archive",
-    "scripts/verify-merge-admission",
-    "scripts/release-maintenance",
-    "scripts/watch-maintenance-evidence",
-    "maintenance-events/*",
-    "maintenance-state/*",
-    ".github/CODEOWNERS",
-)
+PROTECTED_PATHS = pathlib.Path(__file__).with_name("protected-paths.json")
+try:
+    PROTECTED_PATTERNS = tuple(json.loads(PROTECTED_PATHS.read_text())["patterns"])
+except (OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+    raise RuntimeError(f"cannot load protected paths: {error}") from error
+if not all(isinstance(pattern, str) and pattern for pattern in PROTECTED_PATTERNS):
+    raise RuntimeError("protected paths must be non-empty strings")
 SECRET_PATTERNS = (
     re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
     re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),

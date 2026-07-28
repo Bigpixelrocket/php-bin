@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "action": "openai/codex-action",
+  "commit": "52fe01ec70a42f454c9d2ebd47598f9fd6893d56",
+  "metadataDigest": "sha256:d1f3b1807fd9e1ff5ea1038730ec620dfca85337f2fda5605f777071e07204ae",
+  "allowedInputs": [
+    "prompt",
+    "prompt-file",
+    "output-file",
+    "openai-api-key",
+    "responses-api-endpoint",
+    "working-directory",
+    "sandbox",
+    "permission-profile",
+    "codex-version",
+    "codex-args",
+    "output-schema",
+    "output-schema-file",
+    "model",
+    "effort",
+    "codex-home",
+    "safety-strategy",
+    "codex-user",
+    "allow-users",
+    "allow-bots",
+    "allow-bot-users"
+  ],
+  "securityInputs": {
+    "allow-bots": {
+      "kind": "boolean",
+      "requiredValue": false
+    },
+    "allow-bot-users": {
+      "kind": "bot-user-list",
+      "requiredValues": [
+        "github-actions[bot]"
+      ]
+    }
+  },
+  "requiredCodexVersion": "0.145.0",
+  "expectedInvocations": 4
+}
