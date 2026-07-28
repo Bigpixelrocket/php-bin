@@ -271,9 +271,29 @@ class MaintenanceControlTests(unittest.TestCase):
         self.assertTrue(path_is_protected(".github/codex-action-contract.json"))
         self.assertTrue(path_is_protected("maintenance/policy-invariants.json"))
         self.assertTrue(path_is_protected("scripts/validate-codex-action-inputs"))
+        self.assertTrue(path_is_protected("scripts/dispatch-pr-checks"))
         self.assertTrue(path_is_protected("maintenance-events/new-branch.json"))
         self.assertTrue(path_is_protected("maintenance-state/last-evidence.json"))
         self.assertFalse(path_is_protected("support-policy.json"))
+
+    def test_token_created_prs_explicitly_dispatch_required_checks(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        ci = (root / ".github/workflows/ci.yml").read_text()
+        protected = (root / ".github/workflows/protected-controls.yml").read_text()
+        dispatcher = (root / "scripts/dispatch-pr-checks").read_text()
+        self.assertIn("workflow_dispatch:", ci)
+        self.assertIn("workflow_dispatch:", protected)
+        self.assertIn("pr_number:", protected)
+        self.assertIn("gh workflow run ci.yml", dispatcher)
+        self.assertIn("gh workflow run protected-controls.yml", dispatcher)
+        for workflow in (
+            "maintenance-watch.yml",
+            "maintenance-implementation.yml",
+            "maintenance-release.yml",
+        ):
+            body = (root / ".github/workflows" / workflow).read_text()
+            self.assertIn("./scripts/dispatch-pr-checks", body)
+            self.assertNotIn("gh pr checks", body)
 
     def test_malformed_contract_shapes_fail_closed(self):
         contract = self._contract()

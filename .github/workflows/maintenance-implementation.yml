@@ -308,7 +308,7 @@ jobs:
       contents: write
       pull-requests: write
       checks: read
-      actions: read
+      actions: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -345,8 +345,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh pr checks "${{ steps.pr.outputs.number }}" --watch --fail-fast --interval 10
-          gh pr checks "${{ steps.pr.outputs.number }}" --json name,bucket,link > maintenance-run/pr-checks.json
+          ./scripts/dispatch-pr-checks \
+            --pr "${{ steps.pr.outputs.number }}" \
+            --check "Script checks" \
+            --output maintenance-run/pr-checks.json
           jq -e '[.[] | select(.name=="Script checks") | .bucket] == ["pass"]' maintenance-run/pr-checks.json
       - name: Re-verify exact SHA, sealed tree, and preconditions
         env:
@@ -447,8 +449,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh pr checks "${{ steps.readiness.outputs.number }}" --watch --fail-fast --interval 10
-          gh pr checks "${{ steps.readiness.outputs.number }}" --json name,bucket,link > maintenance-run/readiness-checks.json
+          ./scripts/dispatch-pr-checks \
+            --pr "${{ steps.readiness.outputs.number }}" \
+            --check "Script checks" \
+            --output maintenance-run/readiness-checks.json
           jq -e '[.[] | select(.name=="Script checks") | .bucket] == ["pass"]' maintenance-run/readiness-checks.json
           actual="$(gh pr view "${{ steps.readiness.outputs.number }}" --json headRefOid --jq .headRefOid)"
           test "$actual" = "${{ steps.readiness.outputs.head_sha }}"
