@@ -23,15 +23,23 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           PROTECTED_REVIEWER: ${{ vars.MAINTENANCE_OWNER }}
         run: |
           python3 - <<'PY'
           import fnmatch
+          import base64
           import json
           import os
           import pathlib
+          import re
           import subprocess
           import sys
+
+          from maintenance.control import ControlError, validate_evidence_state_record
 
           def api(path):
               result = subprocess.run(
@@ -45,9 +53,22 @@ jobs:
                   raise RuntimeError("GitHub API returned an invalid paginated response")
               return [item for page in pages for item in page]
 
+          def api_one(path):
+              result = subprocess.run(
+                  ["gh", "api", path],
+                  check=True,
+                  text=True,
+                  stdout=subprocess.PIPE,
+              )
+              return json.loads(result.stdout)
+
           repo = os.environ["REPOSITORY"]
           number = os.environ["PR_NUMBER"]
           head = os.environ["HEAD_SHA"]
+          base = os.environ["BASE_SHA"]
+          head_ref = os.environ["HEAD_REF"]
+          head_repo = os.environ["HEAD_REPOSITORY"]
+          author = os.environ["PR_AUTHOR"]
           reviewer = os.environ["PROTECTED_REVIEWER"].lower()
           manifest = json.loads(pathlib.Path("maintenance/protected-paths.json").read_text())
           patterns = manifest["patterns"]
@@ -60,6 +81,37 @@ jobs:
           if not protected:
               print("No protected control path changed.")
               raise SystemExit(0)
+
+          evidence_run = re.fullmatch(r"maintenance/evidence-(\d+)", head_ref)
+          if (
+              protected == ["maintenance-state/last-evidence.json"]
+              and evidence_run
+              and author == "github-actions[bot]"
+              and head_repo.lower() == repo.lower()
+          ):
+              commit = api_one(f"repos/{repo}/commits/{head}")
+              run = api_one(f"repos/{repo}/actions/runs/{evidence_run.group(1)}")
+              content = api_one(
+                  f"repos/{repo}/contents/maintenance-state/last-evidence.json?ref={head}"
+              )
+              try:
+                  encoded = content["content"].replace("\n", "")
+                  record = json.loads(base64.b64decode(encoded, validate=True))
+                  validate_evidence_state_record(record)
+              except (KeyError, ValueError, json.JSONDecodeError, ControlError) as error:
+                  print(f"Invalid deterministic evidence state: {error}", file=sys.stderr)
+                  raise SystemExit(1) from error
+              direct_parent = [parent.get("sha") for parent in commit.get("parents", [])] == [base]
+              trusted_run = (
+                  run.get("path") == ".github/workflows/maintenance-watch.yml"
+                  and run.get("event") in {"schedule", "workflow_dispatch"}
+                  and run.get("head_branch") == "main"
+                  and run.get("head_sha") == base
+                  and run.get("status") == "in_progress"
+              )
+              if direct_parent and trusted_run:
+                  print(f"Protected deterministic evidence state approved from watcher run {run['id']}.")
+                  raise SystemExit(0)
 
           reviews = api(f"repos/{repo}/pulls/{number}/reviews")
           approved = any(

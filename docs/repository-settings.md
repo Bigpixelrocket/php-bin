@@ -11,7 +11,12 @@ Required repository state:
 - Require the `Script checks` status check.
 - Require the base-controlled `Protected controls` status check. It passes
   automatically for unprotected generated paths and requires an exact-head
-  `loadinglucian` approval for any path in `maintenance/protected-paths.json`.
+  `loadinglucian` approval for paths in `maintenance/protected-paths.json`.
+  The sole deterministic exception is `maintenance-state/last-evidence.json`:
+  a same-repository `github-actions[bot]` PR may pass only when it is a direct
+  child of the current base, is tied to the still-running protected watcher,
+  changes exactly that file, and the record has the reviewed healthy-capture
+  shape. Runtime Codex cannot invoke this exception or edit that state.
 - Bind the required check to the GitHub Actions app, preventing another app
   from satisfying the same context name.
 - Require conversation resolution.
@@ -23,7 +28,9 @@ Required repository state:
 - Keep the default Actions token read-only while enabling automation PR
   creation. Runtime Codex jobs declare read scopes; only deterministic
   downstream jobs explicitly declare the write scopes they require.
-- Do not allow the workflow token to approve pull requests.
+- Enable the organization setting that permits Actions to create pull requests;
+  runtime workflows do not submit approving reviews. Protected-control approval
+  remains owner-only except for the deterministic evidence-state proof above.
 - Allow GitHub-owned Actions plus only `openai/codex-action` and
   `jdx/mise-action`, and require every Action reference to use a full commit
   SHA.

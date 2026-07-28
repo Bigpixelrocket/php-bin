@@ -43,6 +43,15 @@ COMPLETION_EVIDENCE_REF_RE = re.compile(
     r"researchSources\[\d+\])$"
 )
 REQUIRED_PLAN_CHECKS = ["Script checks"]
+EVIDENCE_CAPTURE_IDS = {
+    "php_supported_versions",
+    "php_release_feed",
+    "php_source_tags",
+    "php_bin_releases",
+    "php_bin_state",
+    "mise_php_releases",
+    "mise_php_state",
+}
 STABLE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[1-9]\d*)?$")
 PROTECTED_PATHS = pathlib.Path(__file__).with_name("protected-paths.json")
 try:
@@ -251,6 +260,28 @@ def resolve_json_pointer(document: Any, pointer: str) -> Any:
             require(isinstance(current, dict) and key in current, f"pointer does not resolve: {pointer}")
             current = current[key]
     return current
+
+
+def validate_evidence_state_record(record: dict[str, Any]) -> None:
+    require(isinstance(record, dict), "evidence state must be an object")
+    require(
+        set(record) == {"schemaVersion", "manifestDigest", "planDigest", "captures"},
+        "evidence state fields changed",
+    )
+    require(record.get("schemaVersion") == 1, "invalid evidence state version")
+    require(bool(SHA256_RE.fullmatch(record.get("manifestDigest", ""))), "invalid evidence manifest digest")
+    require(bool(SHA256_RE.fullmatch(record.get("planDigest", ""))), "invalid evidence plan digest")
+    captures = record.get("captures")
+    require(isinstance(captures, list), "evidence captures must be an array")
+    capture_ids = []
+    for capture in captures:
+        require(isinstance(capture, dict), "evidence capture must be an object")
+        require(set(capture) == {"captureId", "digest", "status"}, "evidence capture fields changed")
+        capture_ids.append(capture.get("captureId"))
+        require(bool(SHA256_RE.fullmatch(capture.get("digest", ""))), "invalid evidence capture digest")
+        require(capture.get("status") == 200, "evidence capture status is not healthy")
+    require(len(capture_ids) == len(set(capture_ids)), "duplicate evidence capture")
+    require(set(capture_ids) == EVIDENCE_CAPTURE_IDS, "evidence capture set changed")
 
 
 def load_capture(manifest_path: pathlib.Path, capture_id: str) -> tuple[dict[str, Any], bytes]:

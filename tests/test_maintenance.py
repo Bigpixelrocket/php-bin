@@ -23,6 +23,7 @@ from maintenance.control import (
     transition_event,
     validate_archive,
     validate_completion_assessment,
+    validate_evidence_state_record,
     verify_merge,
     watch_decision,
     path_is_protected,
@@ -107,6 +108,30 @@ class MaintenanceControlTests(unittest.TestCase):
         ):
             self.assertIsNotNone(COMPLETION_EVIDENCE_REF_RE.fullmatch(reference))
         self.assertIsNone(COMPLETION_EVIDENCE_REF_RE.fullmatch("watch-decision.json reports success"))
+
+    def test_deterministic_evidence_state_shape_is_fail_closed(self):
+        capture_ids = (
+            "php_supported_versions",
+            "php_release_feed",
+            "php_source_tags",
+            "php_bin_releases",
+            "php_bin_state",
+            "mise_php_releases",
+            "mise_php_state",
+        )
+        record = {
+            "schemaVersion": 1,
+            "manifestDigest": "sha256:" + "a" * 64,
+            "planDigest": "sha256:" + "b" * 64,
+            "captures": [
+                {"captureId": capture_id, "digest": "sha256:" + "c" * 64, "status": 200}
+                for capture_id in capture_ids
+            ],
+        }
+        validate_evidence_state_record(record)
+        record["captures"][0]["status"] = 500
+        with self.assertRaisesRegex(ControlError, "not healthy"):
+            validate_evidence_state_record(record)
 
     def test_illegal_event_transition_fails_closed(self):
         with self.assertRaises(ControlError):
