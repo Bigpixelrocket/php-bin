@@ -26,6 +26,7 @@ permissions:
   actions: write
   checks: write
   pull-requests: write
+  statuses: write
 
 concurrency:
   group: guarded-release-${{ inputs.version }}

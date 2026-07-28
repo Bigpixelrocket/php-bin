@@ -287,6 +287,7 @@ class MaintenanceControlTests(unittest.TestCase):
         self.assertIn("gh workflow run ci.yml", dispatcher)
         self.assertIn("gh workflow run protected-controls.yml", dispatcher)
         self.assertIn('"repos/$repository/check-runs"', dispatcher)
+        self.assertIn('"repos/$repository/statuses/$head_sha"', dispatcher)
         self.assertIn("Exact-head validator passed", dispatcher)
         for workflow in (
             "maintenance-watch.yml",
@@ -297,6 +298,7 @@ class MaintenanceControlTests(unittest.TestCase):
             self.assertIn("./scripts/dispatch-pr-checks", body)
             self.assertNotIn("gh pr checks", body)
             self.assertIn("checks: write", body)
+            self.assertIn("statuses: write", body)
 
     def test_malformed_contract_shapes_fail_closed(self):
         contract = self._contract()

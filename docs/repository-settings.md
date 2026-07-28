@@ -38,7 +38,8 @@ Required repository state:
   deterministic PR coordinator explicitly dispatches `ci.yml` and
   `protected-controls.yml` at the exact PR branch, accepts only newly created
   successful validator runs for that head SHA, and only then publishes the
-  Actions-owned required checks onto the PR rollup with the validator URLs.
+  Actions-owned check evidence plus PR-visible commit statuses with the exact
+  validator URLs.
 - Allow GitHub-owned Actions plus only `openai/codex-action` and
   `jdx/mise-action`, and require every Action reference to use a full commit
   SHA.
