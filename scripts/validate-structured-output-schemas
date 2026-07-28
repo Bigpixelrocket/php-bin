@@ -51,6 +51,8 @@ def validate_node(node: Any, location: str) -> None:
 
     if ("const" in node or "enum" in node) and "type" not in node:
         fail(f"{location} uses const or enum without an explicit type")
+    if "const" in node and isinstance(node["const"], (dict, list)):
+        fail(f"{location} uses a non-scalar const unsupported by OpenAI Structured Outputs")
 
     unsupported = sorted(UNSUPPORTED_KEYWORDS.intersection(node))
     if unsupported:
@@ -82,7 +84,12 @@ def main() -> int:
             if schema_pattern != ACTION_KEY_RE.pattern:
                 fail("maintenance plan actionKey pattern must match deterministic admission")
             properties = document.get("properties", {})
-            if properties.get("requiredChecks", {}).get("const") != REQUIRED_PLAN_CHECKS:
+            required_checks = properties.get("requiredChecks", {})
+            if (
+                required_checks.get("items", {}).get("enum") != REQUIRED_PLAN_CHECKS
+                or required_checks.get("minItems") != len(REQUIRED_PLAN_CHECKS)
+                or required_checks.get("maxItems") != len(REQUIRED_PLAN_CHECKS)
+            ):
                 fail("maintenance plan requiredChecks must match deterministic admission")
             evidence_pattern = (
                 properties.get("completionAssessment", {})
