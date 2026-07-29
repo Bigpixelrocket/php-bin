@@ -38,6 +38,11 @@ Return GO only when the action is unambiguous, all criteria passed with
 resolving evidence, preconditions remain exact, and unresolved is empty.
 Otherwise return `blocked` or `needs_human` and NO-GO. Make no edit.
 
+Treat `requiredChecks` as downstream exact-head gates, not investigation-phase
+advisory checks. Declare them in the plan, but do not run them in this read-only
+phase or treat their not-yet-run status as unresolved; writable deterministic
+jobs execute them before merge.
+
 If changed evidence has no maintenance consequence, use action `no_change` and
 the key `no_change:<first 16 hexadecimal characters of the evidence manifest
 digest>` so the reviewed snapshot remains uniquely auditable.

@@ -147,6 +147,13 @@ class MaintenanceControlTests(unittest.TestCase):
             self.assertIsNotNone(COMPLETION_EVIDENCE_REF_RE.fullmatch(reference))
         self.assertIsNone(COMPLETION_EVIDENCE_REF_RE.fullmatch("watch-decision.json reports success"))
 
+    def test_investigation_defers_required_checks_to_writable_jobs(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        instructions = (root / ".github/codex/maintenance/investigation.md").read_text()
+        watcher = (root / ".github/workflows/maintenance-watch.yml").read_text()
+        self.assertIn("Treat `requiredChecks` as downstream exact-head gates", instructions)
+        self.assertIn("--non-goal required_check_execution", watcher)
+
     def test_deterministic_evidence_state_shape_is_fail_closed(self):
         capture_ids = (
             "php_supported_versions",
