@@ -78,6 +78,7 @@ jobs:
             --allowed-authority read_captured_evidence \
             --allowed-authority allowlisted_web_search \
             --non-goal repository_mutation \
+            --non-goal required_check_execution \
             --non-goal irreversible_github_effect \
             --stop-condition missing_or_contradictory_required_evidence \
             --stop-condition changed_precondition \
