@@ -152,7 +152,14 @@ class MaintenanceControlTests(unittest.TestCase):
         instructions = (root / ".github/codex/maintenance/investigation.md").read_text()
         watcher = (root / ".github/workflows/maintenance-watch.yml").read_text()
         self.assertIn("Treat `requiredChecks` as downstream exact-head gates", instructions)
-        self.assertIn("--non-goal required_check_execution", watcher)
+        self.assertIn("do not run them in this read-only", instructions)
+        self.assertIn("not-yet-run status as unresolved", instructions)
+        self.assertIn(
+            "--non-goal repository_mutation \\\n"
+            "            --non-goal required_check_execution \\\n"
+            "            --non-goal irreversible_github_effect \\",
+            watcher,
+        )
 
     def test_deterministic_evidence_state_shape_is_fail_closed(self):
         capture_ids = (
