@@ -24,6 +24,7 @@ from maintenance.control import (
     transition_event,
     validate_archive,
     validate_completion_assessment,
+    validate_completed_event_record,
     validate_evidence_attestation_predicate,
     validate_evidence_state_record,
     validate_recaptured_evidence,
@@ -287,6 +288,37 @@ class MaintenanceControlTests(unittest.TestCase):
         with self.assertRaises(ControlError):
             transition_event({"state": "detected"}, "complete", [{"digest": "x"}])
 
+    def test_completed_event_record_requires_contiguous_legal_evidenced_history(self):
+        record = {
+            "schemaVersion": 1,
+            "actionKey": "new_patch:8.5.9",
+            "state": "complete",
+            "history": [
+                {
+                    "from": "release_requested",
+                    "to": "released",
+                    "at": "2026-07-31T10:00:00Z",
+                    "evidence": [{"kind": "published_release"}],
+                },
+                {
+                    "from": "released",
+                    "to": "public_install_verified",
+                    "at": "2026-07-31T10:01:00Z",
+                    "evidence": [{"kind": "fresh_public_install"}],
+                },
+                {
+                    "from": "public_install_verified",
+                    "to": "complete",
+                    "at": "2026-07-31T10:02:00Z",
+                    "evidence": [{"kind": "transaction_complete"}],
+                },
+            ],
+        }
+        validate_completed_event_record(record)
+        record["history"][1]["from"] = "detected"
+        with self.assertRaisesRegex(ControlError, "not contiguous"):
+            validate_completed_event_record(record)
+
     def test_published_asset_mismatch_fails_closed(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
@@ -355,6 +387,8 @@ class MaintenanceControlTests(unittest.TestCase):
         self.assertIn("maintenance-state/**", ci)
         self.assertIn("paths-ignore:", protected)
         self.assertIn("maintenance-events/**", protected)
+        self.assertIn("validate_completed_event_record", protected)
+        self.assertIn('maintenance/(event|eol-complete)-', protected)
         self.assertIn("pr_number:", protected)
         self.assertIn("gh workflow run ci.yml", dispatcher)
         self.assertIn("gh workflow run protected-controls.yml", dispatcher)

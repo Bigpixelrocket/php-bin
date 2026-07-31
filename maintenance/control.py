@@ -333,6 +333,41 @@ def validate_recaptured_evidence(
     return {"valid": True, "verifiedCaptureIds": sorted(verified)}
 
 
+def validate_completed_event_record(record: dict[str, Any]) -> None:
+    """Validate a durable event as a complete, contiguous legal transition history."""
+
+    require(isinstance(record, dict), "maintenance event must be an object")
+    require(record.get("schemaVersion") == 1, "maintenance event version is invalid")
+    require(bool(ACTION_KEY_RE.fullmatch(record.get("actionKey", ""))), "maintenance event action key is invalid")
+    require(record.get("state") == "complete", "maintenance event is not complete")
+    history = record.get("history")
+    require(isinstance(history, list) and bool(history), "maintenance event has no transition history")
+    current = history[0].get("from") if isinstance(history[0], dict) else None
+    for transition in history:
+        require(isinstance(transition, dict), "maintenance event transition must be an object")
+        require(
+            set(transition) == {"from", "to", "at", "evidence"},
+            "maintenance event transition fields changed",
+        )
+        require(transition.get("from") == current, "maintenance event history is not contiguous")
+        target = transition.get("to")
+        require(target in LEGAL_EVENT_TRANSITIONS.get(current, set()), "maintenance event transition is illegal")
+        timestamp = transition.get("at")
+        require(
+            isinstance(timestamp, str) and timestamp.endswith("Z"),
+            "maintenance event transition timestamp is invalid",
+        )
+        evidence = transition.get("evidence")
+        require(
+            isinstance(evidence, list)
+            and bool(evidence)
+            and all(isinstance(item, dict) and bool(item) for item in evidence),
+            "maintenance event transition evidence is invalid",
+        )
+        current = target
+    require(current == record["state"], "maintenance event state does not match its history")
+
+
 def validate_evidence_state_record(record: dict[str, Any]) -> None:
     require(isinstance(record, dict), "evidence state must be an object")
     require(
