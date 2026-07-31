@@ -347,13 +347,22 @@ jobs:
             --owner "${{ vars.MAINTENANCE_OWNER }}"
       - name: Record release failure diagnostic
         if: failure()
+        env:
+          ACTION_KEY: ${{ inputs.action_key }}
+          VERSION: ${{ inputs.version }}
+          EXACT_COMMIT: ${{ inputs.exact_commit }}
+          INVESTIGATION_RUN_ID: ${{ inputs.investigation_run_id }}
         run: |
+          [[ "$ACTION_KEY" =~ ^[A-Za-z0-9._:-]+$ ]]
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]
+          [[ "$EXACT_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$INVESTIGATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           mkdir -p release-run
           jq -n \
-            --arg actionKey "${{ inputs.action_key }}" \
-            --arg version "${{ inputs.version }}" \
-            --arg exactCommit "${{ inputs.exact_commit }}" \
-            --arg investigationRunId "${{ inputs.investigation_run_id }}" \
+            --arg actionKey "$ACTION_KEY" \
+            --arg version "$VERSION" \
+            --arg exactCommit "$EXACT_COMMIT" \
+            --arg investigationRunId "$INVESTIGATION_RUN_ID" \
             --arg releaseRunId "${{ github.run_id }}" \
             --arg runUrl "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             '{schemaVersion:1,actionKey:$actionKey,version:$version,exactCommit:$exactCommit,investigationRunId:$investigationRunId,releaseRunId:$releaseRunId,state:"failed",runUrl:$runUrl}' \
@@ -384,11 +393,21 @@ jobs:
         with:
           persist-credentials: false
       - name: Create structured critical event
+        env:
+          ACTION_KEY: ${{ inputs.action_key }}
+          VERSION: ${{ inputs.version }}
+          EXACT_COMMIT: ${{ inputs.exact_commit }}
+          INVESTIGATION_RUN_ID: ${{ inputs.investigation_run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          [[ "$ACTION_KEY" =~ ^[A-Za-z0-9._:-]+$ ]]
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]
+          [[ "$EXACT_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$INVESTIGATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           jq -n \
-            --arg actionKey "${{ inputs.action_key }}" \
-            --arg summary "Guarded release failed for PHP ${{ inputs.version }}: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            --arg failureFingerprint "release-failure:${{ inputs.action_key }}" \
+            --arg actionKey "$ACTION_KEY" \
+            --arg summary "Guarded release failed for PHP $VERSION: $RUN_URL" \
+            --arg failureFingerprint "release-failure:$ACTION_KEY" \
             '{actionKey:$actionKey,state:"blocked",severity:"critical",humanActionRequired:false,summary:$summary,failureFingerprint:$failureFingerprint}' \
             > event.json
       - name: Notify owner
