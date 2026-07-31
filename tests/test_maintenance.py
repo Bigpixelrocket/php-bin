@@ -26,6 +26,7 @@ from maintenance.control import (
     validate_completion_assessment,
     validate_evidence_attestation_predicate,
     validate_evidence_state_record,
+    validate_recaptured_evidence,
     validate_stable_release_evidence,
     verify_merge,
     watch_decision,
@@ -215,6 +216,59 @@ class MaintenanceControlTests(unittest.TestCase):
             [*tag_only, {"captureId": "php_release_feed", "value": "8.5.9"}],
         )
 
+    def test_release_recapture_ignores_runtime_evidence_and_verifies_sources(self):
+        capture_ids = sorted(
+            {
+                "php_supported_versions",
+                "php_release_feed",
+                "php_source_tags",
+                "php_bin_releases",
+                "php_bin_state",
+                "mise_php_releases",
+                "mise_php_state",
+            }
+        )
+        captures = [
+            {"captureId": capture_id, "status": 200, "digest": "sha256:" + f"{index:064x}"}
+            for index, capture_id in enumerate(capture_ids, start=1)
+        ]
+        manifest = {
+            "schemaVersion": 1,
+            "captures": captures,
+            "manifestDigest": sha256_bytes(
+                canonical_json(
+                    [
+                        {"captureId": item["captureId"], "status": item["status"], "digest": item["digest"]}
+                        for item in captures
+                    ]
+                )
+            ),
+        }
+        plan = {
+            "evidence": [
+                {"captureId": item["captureId"], "digest": item["digest"]} for item in captures
+            ]
+            + [
+                {"captureId": "watch_decision", "digest": "sha256:" + "a" * 64},
+                {"captureId": "evidence_manifest", "digest": "sha256:" + "b" * 64},
+            ]
+        }
+        result = validate_recaptured_evidence(plan, manifest, manifest)
+        self.assertEqual(capture_ids, result["verifiedCaptureIds"])
+
+        changed = json.loads(json.dumps(manifest))
+        changed["captures"][0]["digest"] = "sha256:" + "f" * 64
+        changed["manifestDigest"] = sha256_bytes(
+            canonical_json(
+                [
+                    {"captureId": item["captureId"], "status": item["status"], "digest": item["digest"]}
+                    for item in changed["captures"]
+                ]
+            )
+        )
+        with self.assertRaisesRegex(ControlError, "recaptured evidence changed"):
+            validate_recaptured_evidence(plan, manifest, changed)
+
     def test_runtime_plan_evidence_is_exact_and_allowlisted(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
@@ -297,6 +351,10 @@ class MaintenanceControlTests(unittest.TestCase):
         dispatcher = (root / "scripts/dispatch-pr-checks").read_text()
         self.assertIn("workflow_dispatch:", ci)
         self.assertIn("workflow_dispatch:", protected)
+        self.assertIn("paths-ignore:", ci)
+        self.assertIn("maintenance-state/**", ci)
+        self.assertIn("paths-ignore:", protected)
+        self.assertIn("maintenance-events/**", protected)
         self.assertIn("pr_number:", protected)
         self.assertIn("gh workflow run ci.yml", dispatcher)
         self.assertIn("gh workflow run protected-controls.yml", dispatcher)
@@ -313,6 +371,15 @@ class MaintenanceControlTests(unittest.TestCase):
             self.assertNotIn("gh pr checks", body)
             self.assertIn("checks: write", body)
             self.assertIn("statuses: write", body)
+
+        release = (root / ".github/workflows/maintenance-release.yml").read_text()
+        self.assertIn("validate-recaptured-evidence", release)
+        self.assertIn("Notify actionable release failure", release)
+        self.assertIn("release-run/failure.json", release)
+        self.assertLess(
+            release.index("Validate and merge final event record"),
+            release.index("Notify owner of completed release"),
+        )
 
     def test_malformed_contract_shapes_fail_closed(self):
         contract = self._contract()

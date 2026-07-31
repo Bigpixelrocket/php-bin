@@ -2,6 +2,9 @@ name: Protected controls
 
 on:
   pull_request_target:
+    paths-ignore:
+      - maintenance-state/**
+      - maintenance-events/**
   workflow_dispatch:
     inputs:
       pr_number:
