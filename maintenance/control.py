@@ -282,6 +282,92 @@ def validate_stable_release_evidence(
     )
 
 
+def validate_recaptured_evidence(
+    plan: dict[str, Any],
+    admitted_manifest: dict[str, Any],
+    current_manifest: dict[str, Any],
+) -> dict[str, Any]:
+    """Verify cited authoritative captures while allowing runtime-only evidence."""
+
+    def indexed_captures(manifest: dict[str, Any], label: str) -> dict[str, dict[str, Any]]:
+        require(isinstance(manifest, dict), f"{label} evidence manifest must be an object")
+        require(manifest.get("schemaVersion") == 1, f"{label} evidence manifest version is invalid")
+        captures = manifest.get("captures")
+        require(isinstance(captures, list), f"{label} evidence captures must be an array")
+        indexed: dict[str, dict[str, Any]] = {}
+        comparable = []
+        for capture in captures:
+            require(isinstance(capture, dict), f"{label} evidence capture must be an object")
+            capture_id = capture.get("captureId")
+            digest = capture.get("digest")
+            require(capture_id in EVIDENCE_CAPTURE_IDS, f"{label} evidence capture is unknown")
+            require(capture_id not in indexed, f"{label} evidence capture is duplicated: {capture_id}")
+            require(capture.get("status") == 200, f"{label} evidence capture is not healthy: {capture_id}")
+            require(bool(SHA256_RE.fullmatch(digest or "")), f"{label} evidence digest is invalid: {capture_id}")
+            indexed[capture_id] = capture
+            comparable.append({"captureId": capture_id, "status": capture["status"], "digest": digest})
+        require(set(indexed) == EVIDENCE_CAPTURE_IDS, f"{label} evidence capture set changed")
+        require(
+            manifest.get("manifestDigest") == sha256_bytes(canonical_json(comparable)),
+            f"{label} evidence manifest digest mismatch",
+        )
+        return indexed
+
+    admitted = indexed_captures(admitted_manifest, "admitted")
+    current = indexed_captures(current_manifest, "current")
+    evidence = plan.get("evidence")
+    require(isinstance(evidence, list) and bool(evidence), "maintenance plan has no evidence")
+    verified = []
+    for item in evidence:
+        require(isinstance(item, dict), "plan evidence entry must be an object")
+        capture_id = item.get("captureId")
+        digest = item.get("digest")
+        require(bool(SHA256_RE.fullmatch(digest or "")), f"plan evidence digest is invalid: {capture_id}")
+        if capture_id in RUNTIME_PLAN_EVIDENCE_IDS:
+            continue
+        require(capture_id in admitted, f"plan evidence capture is unknown: {capture_id}")
+        require(admitted[capture_id]["digest"] == digest, f"admitted evidence digest mismatch: {capture_id}")
+        require(current[capture_id]["digest"] == digest, f"recaptured evidence changed: {capture_id}")
+        verified.append(capture_id)
+    require(bool(verified), "maintenance plan cites no authoritative captured evidence")
+    return {"valid": True, "verifiedCaptureIds": sorted(verified)}
+
+
+def validate_completed_event_record(record: dict[str, Any]) -> None:
+    """Validate a durable event as a complete, contiguous legal transition history."""
+
+    require(isinstance(record, dict), "maintenance event must be an object")
+    require(record.get("schemaVersion") == 1, "maintenance event version is invalid")
+    require(bool(ACTION_KEY_RE.fullmatch(record.get("actionKey", ""))), "maintenance event action key is invalid")
+    require(record.get("state") == "complete", "maintenance event is not complete")
+    history = record.get("history")
+    require(isinstance(history, list) and bool(history), "maintenance event has no transition history")
+    current = history[0].get("from") if isinstance(history[0], dict) else None
+    for transition in history:
+        require(isinstance(transition, dict), "maintenance event transition must be an object")
+        require(
+            set(transition) == {"from", "to", "at", "evidence"},
+            "maintenance event transition fields changed",
+        )
+        require(transition.get("from") == current, "maintenance event history is not contiguous")
+        target = transition.get("to")
+        require(target in LEGAL_EVENT_TRANSITIONS.get(current, set()), "maintenance event transition is illegal")
+        timestamp = transition.get("at")
+        require(
+            isinstance(timestamp, str) and timestamp.endswith("Z"),
+            "maintenance event transition timestamp is invalid",
+        )
+        evidence = transition.get("evidence")
+        require(
+            isinstance(evidence, list)
+            and bool(evidence)
+            and all(isinstance(item, dict) and bool(item) for item in evidence),
+            "maintenance event transition evidence is invalid",
+        )
+        current = target
+    require(current == record["state"], "maintenance event state does not match its history")
+
+
 def validate_evidence_state_record(record: dict[str, Any]) -> None:
     require(isinstance(record, dict), "evidence state must be an object")
     require(
@@ -1127,6 +1213,11 @@ def main(argv: list[str] | None = None) -> int:
     capture_parser = subparsers.add_parser("capture-evidence")
     capture_parser.add_argument("--output", required=True, type=pathlib.Path)
 
+    recapture_parser = subparsers.add_parser("validate-recaptured-evidence")
+    recapture_parser.add_argument("--plan", required=True, type=pathlib.Path)
+    recapture_parser.add_argument("--admitted-manifest", required=True, type=pathlib.Path)
+    recapture_parser.add_argument("--current-manifest", required=True, type=pathlib.Path)
+
     event_parser = subparsers.add_parser("transition-event")
     event_parser.add_argument("--event", required=True, type=pathlib.Path)
     event_parser.add_argument("--target", required=True)
@@ -1150,6 +1241,16 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"valid": True}))
         elif args.command == "capture-evidence":
             print(json.dumps(capture_evidence(args.output, token=os.environ.get("GITHUB_TOKEN"))))
+        elif args.command == "validate-recaptured-evidence":
+            print(
+                json.dumps(
+                    validate_recaptured_evidence(
+                        load_json(args.plan),
+                        load_json(args.admitted_manifest),
+                        load_json(args.current_manifest),
+                    )
+                )
+            )
         elif args.command == "transition-event":
             updated = transition_event(load_json(args.event), args.target, load_json(args.evidence))
             write_json(args.output, updated)

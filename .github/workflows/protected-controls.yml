@@ -2,6 +2,9 @@ name: Protected controls
 
 on:
   pull_request_target:
+    paths-ignore:
+      - maintenance-state/**
+      - maintenance-events/**
   workflow_dispatch:
     inputs:
       pr_number:
@@ -73,6 +76,7 @@ jobs:
 
           from maintenance.control import (
               ControlError,
+              validate_completed_event_record,
               validate_evidence_attestation_predicate,
               validate_evidence_state_record,
           )
@@ -217,6 +221,44 @@ jobs:
                       raise SystemExit(0)
                   print("No attestation matched the exact watcher run and evidence state.", file=sys.stderr)
                   raise SystemExit(1)
+
+          event_run = re.fullmatch(r"maintenance/(event|eol-complete)-(\d+)", head_ref)
+          if (
+              len(protected) == 1
+              and re.fullmatch(r"maintenance-events/[A-Za-z0-9._-]+\.json", protected[0])
+              and event_run
+              and author == "github-actions[bot]"
+              and head_repo.lower() == repo.lower()
+          ):
+              commit = api_one(f"repos/{repo}/commits/{head}")
+              run = api_one(f"repos/{repo}/actions/runs/{event_run.group(2)}")
+              content = api_one(f"repos/{repo}/contents/{protected[0]}?ref={head}")
+              try:
+                  decoded = base64.b64decode(content["content"].replace("\n", ""), validate=True)
+                  record = json.loads(decoded)
+                  validate_completed_event_record(record)
+              except (KeyError, ValueError, json.JSONDecodeError, ControlError) as error:
+                  print(f"Invalid completed maintenance event: {error}", file=sys.stderr)
+                  raise SystemExit(1) from error
+              expected_filename = record["actionKey"].translate(str.maketrans({":": "-", "/": "-"})) + ".json"
+              expected_workflow = (
+                  ".github/workflows/maintenance-release.yml"
+                  if event_run.group(1) == "event"
+                  else ".github/workflows/maintenance-watch.yml"
+              )
+              allowed_events = {"workflow_dispatch"} if event_run.group(1) == "event" else {"schedule", "workflow_dispatch"}
+              direct_parent = [parent.get("sha") for parent in commit.get("parents", [])] == [base]
+              trusted_run = (
+                  protected[0] == f"maintenance-events/{expected_filename}"
+                  and run.get("path") == expected_workflow
+                  and run.get("event") in allowed_events
+                  and run.get("head_branch") == "main"
+                  and run.get("head_sha") == base
+                  and run.get("status") == "in_progress"
+              )
+              if direct_parent and trusted_run:
+                  print(f"Protected completed event approved from trusted run {run['id']}.")
+                  raise SystemExit(0)
 
           reviews = api(f"repos/{repo}/pulls/{number}/reviews")
           approved = any(

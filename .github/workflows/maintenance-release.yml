@@ -87,12 +87,10 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           ./scripts/capture-maintenance-evidence --output release-run/evidence
-          while IFS= read -r encoded; do
-            capture_id="$(printf '%s' "$encoded" | base64 --decode | jq -r .captureId)"
-            admitted_digest="$(printf '%s' "$encoded" | base64 --decode | jq -r .digest)"
-            current_digest="$(jq -r --arg id "$capture_id" '.captures[] | select(.captureId==$id) | .digest' release-run/evidence/evidence-manifest.json)"
-            test "$current_digest" = "$admitted_digest"
-          done < <(jq -r '.evidence[] | @base64' admitted-run/maintenance-plan.json)
+          ./maintenance/control.py validate-recaptured-evidence \
+            --plan admitted-run/maintenance-plan.json \
+            --admitted-manifest admitted-run/evidence/evidence-manifest.json \
+            --current-manifest release-run/evidence/evidence-manifest.json
       - name: Verify cross-repository readiness when required
         env:
           GH_TOKEN: ${{ github.token }}
@@ -275,9 +273,7 @@ jobs:
           mise install "php@$branch"
           mise exec "php@${{ inputs.version }}" -- php -v
           mise exec "php@$branch" -- php -v
-      - name: Complete durable event and notify owner
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Complete durable event
         run: |
           jq -n --arg version "${{ inputs.version }}" --argjson assets "$(jq .assetDigests release-run/transaction.json)" \
             '[{kind:"published_release",version:$version,assetDigests:$assets}]' > release-run/evidence.json
@@ -295,13 +291,6 @@ jobs:
           mv release-run/next-event.json release-run/event.json
           jq '.severity="info" | .summary="PHP ${{ inputs.version }} was published and verified through fresh exact and branch-shorthand mise installs." | .finalResult="passed"' \
             release-run/event.json > release-run/notification-event.json
-          ./scripts/notify-maintenance \
-            --event release-run/notification-event.json \
-            --state release-run/notification-state.json \
-            --output release-run/notification-next.json \
-            --backend github \
-            --repo "${{ github.repository }}" \
-            --owner "${{ vars.MAINTENANCE_OWNER }}"
       - name: Commit final event record through a checked PR
         id: event_pr
         env:
@@ -345,6 +334,39 @@ jobs:
           test "$(git diff --name-only "${{ steps.event_pr.outputs.base_sha }}" "$actual")" = "${{ steps.event_pr.outputs.record }}"
           test "sha256:$(git show "$actual:${{ steps.event_pr.outputs.record }}" | shasum -a 256 | awk '{print $1}')" = "${{ steps.event_pr.outputs.digest }}"
           gh pr merge "${{ steps.event_pr.outputs.number }}" --squash --delete-branch
+      - name: Notify owner of completed release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/notify-maintenance \
+            --event release-run/notification-event.json \
+            --state release-run/notification-state.json \
+            --output release-run/notification-next.json \
+            --backend github \
+            --repo "${{ github.repository }}" \
+            --owner "${{ vars.MAINTENANCE_OWNER }}"
+      - name: Record release failure diagnostic
+        if: failure()
+        env:
+          ACTION_KEY: ${{ inputs.action_key }}
+          VERSION: ${{ inputs.version }}
+          EXACT_COMMIT: ${{ inputs.exact_commit }}
+          INVESTIGATION_RUN_ID: ${{ inputs.investigation_run_id }}
+        run: |
+          [[ "$ACTION_KEY" =~ ^[A-Za-z0-9._:-]+$ ]]
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]
+          [[ "$EXACT_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$INVESTIGATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          mkdir -p release-run
+          jq -n \
+            --arg actionKey "$ACTION_KEY" \
+            --arg version "$VERSION" \
+            --arg exactCommit "$EXACT_COMMIT" \
+            --arg investigationRunId "$INVESTIGATION_RUN_ID" \
+            --arg releaseRunId "${{ github.run_id }}" \
+            --arg runUrl "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{schemaVersion:1,actionKey:$actionKey,version:$version,exactCommit:$exactCommit,investigationRunId:$investigationRunId,releaseRunId:$releaseRunId,state:"failed",runUrl:$runUrl}' \
+            > release-run/failure.json
       - name: Retain transaction and exact staging bytes
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -356,3 +378,46 @@ jobs:
           if-no-files-found: error
           retention-days: 90
           include-hidden-files: true
+
+  notify-failure:
+    name: Notify actionable release failure
+    needs: [release]
+    if: always() && needs.release.result == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Create structured critical event
+        env:
+          ACTION_KEY: ${{ inputs.action_key }}
+          VERSION: ${{ inputs.version }}
+          EXACT_COMMIT: ${{ inputs.exact_commit }}
+          INVESTIGATION_RUN_ID: ${{ inputs.investigation_run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [[ "$ACTION_KEY" =~ ^[A-Za-z0-9._:-]+$ ]]
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]
+          [[ "$EXACT_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$INVESTIGATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          jq -n \
+            --arg actionKey "$ACTION_KEY" \
+            --arg summary "Guarded release failed for PHP $VERSION: $RUN_URL" \
+            --arg failureFingerprint "release-failure:$ACTION_KEY" \
+            '{actionKey:$actionKey,state:"blocked",severity:"critical",humanActionRequired:false,summary:$summary,failureFingerprint:$failureFingerprint}' \
+            > event.json
+      - name: Notify owner
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/notify-maintenance \
+            --event event.json \
+            --state notification-state.json \
+            --output notification.json \
+            --backend github \
+            --repo "${{ github.repository }}" \
+            --owner "${{ vars.MAINTENANCE_OWNER }}"
