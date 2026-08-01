@@ -1,16 +1,16 @@
 {
   "schemaVersion": 1,
-  "manifestDigest": "sha256:020bc6df0ec140c3986e20379c6ed4ce8133bc8cef8b8aff02e694005d7e91e4",
-  "planDigest": "sha256:8b89912eac7cfdbb72c92bb46f2825ec2b9c1b4c2a470dfc350e50fcdc99c09c",
+  "manifestDigest": "sha256:a6cadd6a176f907deec04e8c86e2afce516ffb883c4e88a1ffe137c2a6664bd4",
+  "planDigest": "sha256:7f4fb4a564f043662eea4793a7b771474fbea48c34cc8faa16c145a8d81cef0e",
   "captures": [
     {
       "captureId": "php_supported_versions",
-      "digest": "sha256:920da05a2df8c804d1069117d66ba2a711e6e83f5e508bdcbcc44e8b8dd3ee93",
+      "digest": "sha256:b407f542fab0acd148cb3822a0a25ee3a7c90f3f14671011fe5cb9b7df40e1a1",
       "status": 200
     },
     {
       "captureId": "php_release_feed",
-      "digest": "sha256:db0398f5a3fd76439139fdc7300d3e91b4e195130adb3758c49ec5ddde1e5d5e",
+      "digest": "sha256:2b8df3a537c834b3c969bd8ce6fcb8902c40cfc43fbd29ec5ff4b2d4ffd5aa5f",
       "status": 200
     },
     {
@@ -20,12 +20,12 @@
     },
     {
       "captureId": "php_bin_releases",
-      "digest": "sha256:70ffbf6fd5d933813ca0919e395fd1d57dd8b188cc55575bcdb3ad3e1a51c88f",
+      "digest": "sha256:88018d6f0e0faa54099139d609a8a9b04a6c4ddc46520c9ac9007af863cdc276",
       "status": 200
     },
     {
       "captureId": "php_bin_state",
-      "digest": "sha256:ebd37568c22651838cedf7c0a3d0c1ce012f356ac0cfe8ceb284a244825a1f57",
+      "digest": "sha256:a50a64f49d9da12414043f8adc1c7c9d8824f9de0bbb04b776ea85205825ec6d",
       "status": 200
     },
     {
