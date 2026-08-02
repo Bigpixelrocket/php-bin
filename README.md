@@ -13,7 +13,7 @@ Public macOS arm64 releases are available for every maintained PHP branch:
 [8.2.32](https://github.com/bigpixelrocket/php-bin/releases/tag/8.2.32),
 [8.3.32](https://github.com/bigpixelrocket/php-bin/releases/tag/8.3.32),
 [8.4.23](https://github.com/bigpixelrocket/php-bin/releases/tag/8.4.23), and
-[8.5.8](https://github.com/bigpixelrocket/php-bin/releases/tag/8.5.8).
+[8.5.9](https://github.com/bigpixelrocket/php-bin/releases/tag/8.5.9).
 Each release is rebuilt on macOS 26 arm64 and published only after its exact
 module baseline and deployment target checks pass.
 

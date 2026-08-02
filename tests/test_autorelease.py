@@ -334,8 +334,29 @@ class AutoreleaseControlTests(unittest.TestCase):
     def test_notification_replay_is_deduplicated(self):
         event = {"actionKey": "new_patch:8.5.9", "state": "released"}
         first = notification_decision(event, None)
+        self.assertEqual(["autorelease"], first["labels"])
         replay = notification_decision(event, {"fingerprint": first["fingerprint"]})
         self.assertEqual("none", replay["action"])
+
+    def test_notification_search_finds_pre_rename_marker_issues(self):
+        namespace = runpy.run_path(
+            str(pathlib.Path(__file__).resolve().parents[1] / "scripts/notify-autorelease")
+        )
+        find_issue = namespace["find_issue"]
+        legacy = {
+            "number": 46,
+            "url": "https://example.invalid/issues/46",
+            "state": "CLOSED",
+            "body": "<!-- maintenance-action-key:new_patch:8.5.9 -->",
+        }
+        gh = mock.Mock(
+            side_effect=lambda *arguments: json.dumps([legacy])
+            if "maintenance-action-key" in " ".join(arguments)
+            else "[]"
+        )
+        with mock.patch.dict(find_issue.__globals__, {"gh": gh}):
+            found = find_issue("Bigpixelrocket/php-bin", "new_patch:8.5.9")
+        self.assertEqual(legacy, found)
 
     def test_notification_transition_reuses_retained_issue_identity(self):
         issue = {"number": 10, "url": "https://example.invalid/issues/10", "state": "OPEN"}
