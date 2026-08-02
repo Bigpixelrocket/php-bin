@@ -338,25 +338,27 @@ class AutoreleaseControlTests(unittest.TestCase):
         replay = notification_decision(event, {"fingerprint": first["fingerprint"]})
         self.assertEqual("none", replay["action"])
 
-    def test_notification_search_finds_pre_rename_marker_issues(self):
+    def test_notification_search_covers_current_and_pre_rename_markers(self):
         namespace = runpy.run_path(
             str(pathlib.Path(__file__).resolve().parents[1] / "scripts/notify-autorelease")
         )
         find_issue = namespace["find_issue"]
-        legacy = {
-            "number": 46,
-            "url": "https://example.invalid/issues/46",
-            "state": "CLOSED",
-            "body": "<!-- maintenance-action-key:new_patch:8.5.9 -->",
-        }
-        gh = mock.Mock(
-            side_effect=lambda *arguments: json.dumps([legacy])
-            if "maintenance-action-key" in " ".join(arguments)
-            else "[]"
-        )
-        with mock.patch.dict(find_issue.__globals__, {"gh": gh}):
-            found = find_issue("Bigpixelrocket/php-bin", "new_patch:8.5.9")
-        self.assertEqual(legacy, found)
+        for prefix, number in (("autorelease", 47), ("maintenance", 46)):
+            with self.subTest(prefix=prefix):
+                issue = {
+                    "number": number,
+                    "url": f"https://example.invalid/issues/{number}",
+                    "state": "CLOSED",
+                    "body": f"<!-- {prefix}-action-key:new_patch:8.5.9 -->",
+                }
+                gh = mock.Mock(
+                    side_effect=lambda *arguments, issue=issue, prefix=prefix: json.dumps([issue])
+                    if f"{prefix}-action-key" in " ".join(arguments)
+                    else "[]"
+                )
+                with mock.patch.dict(find_issue.__globals__, {"gh": gh}):
+                    found = find_issue("Bigpixelrocket/php-bin", "new_patch:8.5.9")
+                self.assertEqual(issue, found)
 
     def test_notification_transition_reuses_retained_issue_identity(self):
         issue = {"number": 10, "url": "https://example.invalid/issues/10", "state": "OPEN"}
