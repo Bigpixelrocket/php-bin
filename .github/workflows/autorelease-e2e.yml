@@ -30,7 +30,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Dispatch inputs select the refs every suite checks out. They are shaped once
+  # here, ahead of every other job, and republished as outputs so no raw inputs
+  # expression reaches a checkout or a run script.
+  preflight:
+    name: Validate dispatch inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      php_bin_sha: ${{ steps.validated.outputs.php_bin_sha }}
+      mise_php_sha: ${{ steps.validated.outputs.mise_php_sha }}
+    steps:
+      - name: Enforce exact input shapes
+        id: validated
+        env:
+          PHP_BIN_SHA: ${{ inputs.php_bin_sha }}
+          MISE_PHP_SHA: ${{ inputs.mise_php_sha }}
+        run: |
+          [[ "$PHP_BIN_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$MISE_PHP_SHA" =~ ^[0-9a-f]{40}$ ]]
+          {
+            echo "php_bin_sha=$PHP_BIN_SHA"
+            echo "mise_php_sha=$MISE_PHP_SHA"
+          } >> "$GITHUB_OUTPUT"
+
   production-parity:
+    needs: preflight
     if: inputs.suite == 'production-parity'
     runs-on: macos-26
     timeout-minutes: 45
@@ -51,7 +76,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: bigpixelrocket/php-bin
-          ref: ${{ inputs.php_bin_sha }}
+          ref: ${{ needs.preflight.outputs.php_bin_sha }}
           path: php-bin
           fetch-depth: 0
           persist-credentials: false
@@ -59,7 +84,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: bigpixelrocket/mise-php
-          ref: ${{ inputs.mise_php_sha }}
+          ref: ${{ needs.preflight.outputs.mise_php_sha }}
           path: mise-php
           fetch-depth: 0
           persist-credentials: false
@@ -76,11 +101,9 @@ jobs:
           test -z "${GITHUB_TOKEN:-}"
       - name: Run stable cross-repository verifier
         env:
-          PHP_BIN_SHA: ${{ inputs.php_bin_sha }}
-          MISE_PHP_SHA: ${{ inputs.mise_php_sha }}
+          PHP_BIN_SHA: ${{ needs.preflight.outputs.php_bin_sha }}
+          MISE_PHP_SHA: ${{ needs.preflight.outputs.mise_php_sha }}
         run: |
-          [[ "$PHP_BIN_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$MISE_PHP_SHA" =~ ^[0-9a-f]{40}$ ]]
           ./php-bin/scripts/verify-autorelease-system \
             --mise-repo ./mise-php \
             --php-bin-sha "$PHP_BIN_SHA" \
@@ -97,6 +120,7 @@ jobs:
           include-hidden-files: true
 
   agent-canary:
+    needs: preflight
     if: inputs.suite == 'agent-canary'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -106,11 +130,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ inputs.php_bin_sha }}
+          ref: ${{ needs.preflight.outputs.php_bin_sha }}
           persist-credentials: false
       - name: Bind the credentialed canary to reviewed main
         env:
-          EXPECTED_SHA: ${{ inputs.php_bin_sha }}
+          EXPECTED_SHA: ${{ needs.preflight.outputs.php_bin_sha }}
         run: |
           test "$GITHUB_REF" = "refs/heads/main"
           test "$GITHUB_SHA" = "$EXPECTED_SHA"
@@ -163,6 +187,7 @@ jobs:
           retention-days: 90
 
   notification-canary:
+    needs: preflight
     if: inputs.suite == 'notification-canary'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -172,7 +197,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ inputs.php_bin_sha }}
+          ref: ${{ needs.preflight.outputs.php_bin_sha }}
           persist-credentials: false
       - name: Create, replay, transition, and close one namespaced issue
         env:
@@ -205,6 +230,7 @@ jobs:
           retention-days: 90
 
   live-canary:
+    needs: preflight
     if: inputs.suite == 'live-canary'
     runs-on: macos-26
     timeout-minutes: 20
@@ -213,7 +239,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: bigpixelrocket/mise-php
-          ref: ${{ inputs.mise_php_sha }}
+          ref: ${{ needs.preflight.outputs.mise_php_sha }}
           persist-credentials: false
       - uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4
       - name: Verify exact and branch-shorthand public installs

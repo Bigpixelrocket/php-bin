@@ -321,7 +321,8 @@ jobs:
           ./scripts/autorelease-event --event release-run/event.json --target complete \
             --evidence release-run/evidence.json --output release-run/next-event.json
           mv release-run/next-event.json release-run/event.json
-          jq '.severity="info" | .summary="PHP $VERSION was published and verified through fresh exact and branch-shorthand mise installs." | .finalResult="passed"' \
+          jq --arg version "$VERSION" \
+            '.severity="info" | .summary="PHP \($version) was published and verified through fresh exact and branch-shorthand mise installs." | .finalResult="passed"' \
             release-run/event.json > release-run/notification-event.json
       - name: Commit final event record through a checked PR
         id: event_pr
@@ -405,7 +406,10 @@ jobs:
   notify-failure:
     name: Notify actionable release failure
     needs: [preflight, release]
-    if: always() && needs.release.result == 'failure'
+    # A skipped release already keeps this job quiet when preflight rejects the
+    # dispatch, but the preflight result is asserted anyway so the gate survives
+    # a later change to the release job's own condition.
+    if: always() && needs.preflight.result == 'success' && needs.release.result == 'failure'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
