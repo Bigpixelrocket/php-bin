@@ -3,8 +3,8 @@ name: Protected controls
 on:
   pull_request_target:
     paths-ignore:
-      - maintenance-state/**
-      - maintenance-events/**
+      - autorelease-state/**
+      - autorelease-events/**
   workflow_dispatch:
     inputs:
       pr_number:
@@ -60,7 +60,7 @@ jobs:
           HEAD_REF: ${{ steps.pr.outputs.head_ref }}
           HEAD_REPOSITORY: ${{ steps.pr.outputs.head_repository }}
           PR_AUTHOR: ${{ steps.pr.outputs.author }}
-          PROTECTED_REVIEWER: ${{ vars.MAINTENANCE_OWNER }}
+          PROTECTED_REVIEWER: ${{ vars.AUTORELEASE_OWNER }}
         run: |
           python3 - <<'PY'
           import fnmatch
@@ -74,7 +74,7 @@ jobs:
           import tempfile
           import time
 
-          from maintenance.control import (
+          from autorelease.control import (
               ControlError,
               validate_completed_event_record,
               validate_evidence_attestation_predicate,
@@ -110,7 +110,7 @@ jobs:
           head_repo = os.environ["HEAD_REPOSITORY"]
           author = os.environ["PR_AUTHOR"]
           reviewer = os.environ["PROTECTED_REVIEWER"].lower()
-          manifest = json.loads(pathlib.Path("maintenance/protected-paths.json").read_text())
+          manifest = json.loads(pathlib.Path("autorelease/protected-paths.json").read_text())
           patterns = manifest["patterns"]
           files = api(f"repos/{repo}/pulls/{number}/files")
           protected = sorted(
@@ -122,9 +122,9 @@ jobs:
               print("No protected control path changed.")
               raise SystemExit(0)
 
-          evidence_run = re.fullmatch(r"maintenance/evidence-(\d+)", head_ref)
+          evidence_run = re.fullmatch(r"autorelease/evidence-(\d+)", head_ref)
           if (
-              protected == ["maintenance-state/last-evidence.json"]
+              protected == ["autorelease-state/last-evidence.json"]
               and evidence_run
               and author == "github-actions[bot]"
               and head_repo.lower() == repo.lower()
@@ -132,7 +132,7 @@ jobs:
               commit = api_one(f"repos/{repo}/commits/{head}")
               run = api_one(f"repos/{repo}/actions/runs/{evidence_run.group(1)}")
               content = api_one(
-                  f"repos/{repo}/contents/maintenance-state/last-evidence.json?ref={head}"
+                  f"repos/{repo}/contents/autorelease-state/last-evidence.json?ref={head}"
               )
               try:
                   encoded = content["content"].replace("\n", "")
@@ -144,7 +144,7 @@ jobs:
                   raise SystemExit(1) from error
               direct_parent = [parent.get("sha") for parent in commit.get("parents", [])] == [base]
               trusted_run = (
-                  run.get("path") == ".github/workflows/maintenance-watch.yml"
+                  run.get("path") == ".github/workflows/autorelease-watch.yml"
                   and run.get("event") in {"schedule", "workflow_dispatch"}
                   and run.get("head_branch") == "main"
                   and run.get("head_sha") == base
@@ -163,13 +163,13 @@ jobs:
                               "--repo",
                               repo,
                               "--signer-workflow",
-                              f"{repo}/.github/workflows/maintenance-watch.yml",
+                              f"{repo}/.github/workflows/autorelease-watch.yml",
                               "--source-ref",
                               "refs/heads/main",
                               "--source-digest",
                               base,
                               "--predicate-type",
-                              "https://bigpixelrocket.dev/maintenance/evidence-state/v1",
+                              "https://bigpixelrocket.dev/autorelease/evidence-state/v1",
                               "--deny-self-hosted-runners",
                               "--format",
                               "json",
@@ -222,10 +222,10 @@ jobs:
                   print("No attestation matched the exact watcher run and evidence state.", file=sys.stderr)
                   raise SystemExit(1)
 
-          event_run = re.fullmatch(r"maintenance/(event|eol-complete)-(\d+)", head_ref)
+          event_run = re.fullmatch(r"autorelease/(event|eol-complete)-(\d+)", head_ref)
           if (
               len(protected) == 1
-              and re.fullmatch(r"maintenance-events/[A-Za-z0-9._-]+\.json", protected[0])
+              and re.fullmatch(r"autorelease-events/[A-Za-z0-9._-]+\.json", protected[0])
               and event_run
               and author == "github-actions[bot]"
               and head_repo.lower() == repo.lower()
@@ -238,18 +238,18 @@ jobs:
                   record = json.loads(decoded)
                   validate_completed_event_record(record)
               except (KeyError, ValueError, json.JSONDecodeError, ControlError) as error:
-                  print(f"Invalid completed maintenance event: {error}", file=sys.stderr)
+                  print(f"Invalid completed autorelease event: {error}", file=sys.stderr)
                   raise SystemExit(1) from error
               expected_filename = record["actionKey"].translate(str.maketrans({":": "-", "/": "-"})) + ".json"
               expected_workflow = (
-                  ".github/workflows/maintenance-release.yml"
+                  ".github/workflows/autorelease-publish.yml"
                   if event_run.group(1) == "event"
-                  else ".github/workflows/maintenance-watch.yml"
+                  else ".github/workflows/autorelease-watch.yml"
               )
               allowed_events = {"workflow_dispatch"} if event_run.group(1) == "event" else {"schedule", "workflow_dispatch"}
               direct_parent = [parent.get("sha") for parent in commit.get("parents", [])] == [base]
               trusted_run = (
-                  protected[0] == f"maintenance-events/{expected_filename}"
+                  protected[0] == f"autorelease-events/{expected_filename}"
                   and run.get("path") == expected_workflow
                   and run.get("event") in allowed_events
                   and run.get("head_branch") == "main"

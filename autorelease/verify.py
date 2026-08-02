@@ -18,7 +18,7 @@ import tempfile
 import traceback
 from typing import Any, Callable
 
-from maintenance.control import (
+from autorelease.control import (
     ControlError,
     audit_reconstruction,
     canonical_json,
@@ -144,8 +144,8 @@ def assessment(contract: dict[str, Any], digests: dict[str, str], status: str = 
 
 
 def fixture_admission_inputs(directory: pathlib.Path, action: str = "new_patch") -> dict[str, Any]:
-    shared = PHP_ROOT / ".github/codex/maintenance/shared.md"
-    phase = PHP_ROOT / ".github/codex/maintenance/investigation.md"
+    shared = PHP_ROOT / ".github/codex/autorelease/shared.md"
+    phase = PHP_ROOT / ".github/codex/autorelease/investigation.md"
     event_path = directory / "event-contract.json"
     contract = fixture_contract()
     event_path.write_bytes(canonical_json(contract))
@@ -336,7 +336,7 @@ class Verifier:
             inputs = fixture_admission_inputs(target, action)
             admit_fixture(inputs)
             actions[action] = inputs["plan"]["actionKey"]
-        source = (PHP_ROOT / "maintenance/control.py").read_text()
+        source = (PHP_ROOT / "autorelease/control.py").read_text()
         forbidden_classifier_markers = ("BeautifulSoup", "support_table_to_events", "classify_php_release")
         assert_true(not any(item in source for item in forbidden_classifier_markers), "deterministic control contains lifecycle classifier")
         (directory / "classifications.json").write_bytes(canonical_json(actions))
@@ -364,8 +364,8 @@ class Verifier:
         repeated = retry_decision({**event, "lastRejectionRepeated": True}, "fp", 2)
         assert_true(first["recallAgent"], "bounded repair was not allowed")
         assert_true(not exhausted["recallAgent"] and not repeated["recallAgent"], "exhausted identical failure recalled agent")
-        php_workflow = (PHP_ROOT / ".github/workflows/maintenance-implementation.yml").read_text()
-        mise_workflow = (self.mise_root / ".github/workflows/maintenance-consumer.yml").read_text()
+        php_workflow = (PHP_ROOT / ".github/workflows/autorelease-implement.yml").read_text()
+        mise_workflow = (self.mise_root / ".github/workflows/autorelease-consumer.yml").read_text()
         for name, workflow in {"php-bin": php_workflow, "mise-php": mise_workflow}.items():
             assert_true("authoritative-checks.log" in workflow, f"{name} does not retain deterministic failure logs")
             assert_true("Run one offline Codex repair" in workflow, f"{name} has no bounded repair invocation")
@@ -379,15 +379,15 @@ class Verifier:
             "first": first,
             "exhausted": exhausted,
             "repeated": repeated,
-            "phpWorkflowDigest": sha256_file(PHP_ROOT / ".github/workflows/maintenance-implementation.yml"),
-            "miseWorkflowDigest": sha256_file(self.mise_root / ".github/workflows/maintenance-consumer.yml"),
+            "phpWorkflowDigest": sha256_file(PHP_ROOT / ".github/workflows/autorelease-implement.yml"),
+            "miseWorkflowDigest": sha256_file(self.mise_root / ".github/workflows/autorelease-consumer.yml"),
         }
         (directory / "retry.json").write_bytes(canonical_json(evidence))
         return ["retry.json"]
 
     def a07(self, directory: pathlib.Path) -> list[str]:
-        watch = (PHP_ROOT / ".github/workflows/maintenance-watch.yml").read_text()
-        implementation = (PHP_ROOT / ".github/workflows/maintenance-implementation.yml").read_text()
+        watch = (PHP_ROOT / ".github/workflows/autorelease-watch.yml").read_text()
+        implementation = (PHP_ROOT / ".github/workflows/autorelease-implement.yml").read_text()
         assert_true(
             "sandbox: read-only" in watch
             and 'cp .codex/investigation.config.toml "$RUNNER_TEMP/codex-home/config.toml"' in watch
@@ -409,10 +409,10 @@ class Verifier:
     def a08(self, directory: pathlib.Path) -> list[str]:
         protected_classes = [
             ".github/workflows/evil.yml",
-            ".github/codex/maintenance/shared.md",
+            ".github/codex/autorelease/shared.md",
             "schemas/agent-task-contract.schema.json",
-            "maintenance/control.py",
-            "maintenance/policy-invariants.json",
+            "autorelease/control.py",
+            "autorelease/policy-invariants.json",
             "unadmitted.txt",
         ]
         rejected = []
@@ -448,7 +448,7 @@ class Verifier:
         base = init_repo(repo)
         (repo / "src.txt").write_text("coordinated\n")
         run("git", "add", "src.txt", cwd=repo)
-        run("git", "commit", "-q", "-m", "validated maintenance", cwd=repo)
+        run("git", "commit", "-q", "-m", "validated autorelease", cwd=repo)
         head = run("git", "rev-parse", "HEAD", cwd=repo).stdout.strip()
         manifest = {
             "baseSha": base,
@@ -484,7 +484,7 @@ class Verifier:
         inputs["manifestPath"].write_bytes(canonical_json(inputs["manifest"]))
         inputs["plan"]["evidence"][0]["digest"] = sha256_bytes(body)
         admit_fixture(inputs)
-        source = (PHP_ROOT / "maintenance/control.py").read_text()
+        source = (PHP_ROOT / "autorelease/control.py").read_text()
         assert_true("supported-versions.php" in source and "BeautifulSoup" not in source, "source-format handling became a lifecycle parser")
         return ["evidence-manifest.json"]
 
@@ -493,7 +493,7 @@ class Verifier:
         base = init_repo(repo)
         (repo / "src.txt").write_text("validated\n")
         run("git", "add", "src.txt", cwd=repo)
-        run("git", "commit", "-q", "-m", "validated maintenance", cwd=repo)
+        run("git", "commit", "-q", "-m", "validated autorelease", cwd=repo)
         head = run("git", "rev-parse", "HEAD", cwd=repo).stdout.strip()
         manifest = {
             "baseSha": base,
@@ -531,12 +531,12 @@ class Verifier:
             "repositories do not pin the same reviewed Codex CLI version",
         )
         (directory / "codex-action-inputs.json").write_bytes(canonical_json(codex_contracts))
-        pins = json.loads((PHP_ROOT / ".github/maintenance-pins.json").read_text())
+        pins = json.loads((PHP_ROOT / ".github/autorelease-pins.json").read_text())
         assert_true(
             pins["actions"]["openai/codex-action"] == codex_contracts["php-bin"]["commit"],
             "Codex Action pin is not bound to the reviewed input contract",
         )
-        e2e = PHP_ROOT / ".github/workflows/maintenance-e2e.yml"
+        e2e = PHP_ROOT / ".github/workflows/autorelease-e2e.yml"
         e2e_text = e2e.read_text()
         assert_true(
             'status:{type:"string",const:"passed"}' in e2e_text
@@ -544,12 +544,12 @@ class Verifier:
             "credentialed agent canary schema does not declare string types",
         )
         assert_true(
-            pins["workflows"][".github/workflows/maintenance-e2e.yml"] == sha256_file(e2e),
+            pins["workflows"][".github/workflows/autorelease-e2e.yml"] == sha256_file(e2e),
             "reviewed production-parity workflow digest changed",
         )
-        watch_path = PHP_ROOT / ".github/workflows/maintenance-watch.yml"
+        watch_path = PHP_ROOT / ".github/workflows/autorelease-watch.yml"
         watch = watch_path.read_text()
-        release = (PHP_ROOT / ".github/workflows/maintenance-release.yml").read_text()
+        release = (PHP_ROOT / ".github/workflows/autorelease-publish.yml").read_text()
         watch_document = load_workflow(watch_path)
         workflow_permissions = watch_document.get("permissions", {})
         investigate = watch_document.get("jobs", {}).get("investigate", {})
@@ -560,7 +560,7 @@ class Verifier:
             "runtime investigation does not have resolved read-only contents permission",
         )
         assert_true("openai-api-key" not in release, "release job can read OpenAI credential")
-        admin = PHP_ROOT / "docs/maintenance-admin-evidence.json"
+        admin = PHP_ROOT / "docs/autorelease-admin-evidence.json"
         assert_true(admin.is_file(), "redacted administrator evidence is missing")
         evidence = json.loads(admin.read_text())
         assert_true(evidence.get("canary", {}).get("removed") is True, "admin canary was not removed")
@@ -568,7 +568,7 @@ class Verifier:
         assert_true(evidence.get("immutableReleasesEnabled") is True, "immutable releases were not enabled")
         agent_canary_environment = evidence.get("agentCanaryEnvironment", {})
         assert_true(
-            agent_canary_environment.get("name") == "php-maintenance-agent-canary"
+            agent_canary_environment.get("name") == "php-autorelease-canary"
             and agent_canary_environment.get("protectedBranchesOnly") is True
             and agent_canary_environment.get("administratorBypass") is False,
             "credentialed agent canary environment is not protected",
@@ -623,16 +623,16 @@ class Verifier:
     def a18(self, directory: pathlib.Path) -> list[str]:
         assert_true(not mutation_allowed({"unattendedMutation": "paused"}), "paused control allowed mutation")
         assert_true(mutation_allowed({"unattendedMutation": "enabled"}), "enabled control blocked mutation")
-        watch_workflow = (PHP_ROOT / ".github/workflows/maintenance-watch.yml").read_text()
-        release_workflow = (PHP_ROOT / ".github/workflows/maintenance-release.yml").read_text()
-        mise_workflow = (self.mise_root / ".github/workflows/maintenance-consumer.yml").read_text()
+        watch_workflow = (PHP_ROOT / ".github/workflows/autorelease-watch.yml").read_text()
+        release_workflow = (PHP_ROOT / ".github/workflows/autorelease-publish.yml").read_text()
+        mise_workflow = (self.mise_root / ".github/workflows/autorelease-consumer.yml").read_text()
         assert_true(
             "Unattended mutation is paused" in watch_workflow,
             "watcher pause does not stop downstream mutation",
         )
         assert_true(
             release_workflow.count("current-operator.json") >= 3,
-            "release effects are not guarded by the live operator state",
+            "release effects are not gated by the live operator state",
         )
         assert_true(
             "phpBinOperatorCommit" in mise_workflow and "operatorState" in mise_workflow,
@@ -659,11 +659,16 @@ class Verifier:
         return ["audit.json", "evidence.json"]
 
     def a20(self, directory: pathlib.Path) -> list[str]:
+        # The system documentation lives in AUTORELEASE.md; each README only
+        # points at it.
+        for doc in (PHP_ROOT / "AUTORELEASE.md", self.mise_root / "AUTORELEASE.md"):
+            body = doc.read_text()
+            assert_true("```mermaid" in body, f"AUTORELEASE.md has no Mermaid flow: {doc}")
+            assert_true("verify-autorelease-system" in body, f"AUTORELEASE.md lacks verifier command: {doc}")
+            assert_true("AUTORELEASE_OWNER" in body, f"AUTORELEASE.md lacks notification configuration: {doc}")
         for readme in (PHP_ROOT / "README.md", self.mise_root / "README.md"):
             body = readme.read_text()
-            assert_true("```mermaid" in body, f"README has no Mermaid flow: {readme}")
-            assert_true("verify-maintenance-system" in body, f"README lacks verifier command: {readme}")
-            assert_true("MAINTENANCE_OWNER" in body, f"README lacks notification configuration: {readme}")
+            assert_true("AUTORELEASE.md" in body, f"README does not link AUTORELEASE.md: {readme}")
         run("./scripts/test.sh", cwd=PHP_ROOT)
         run("./scripts/test.sh", cwd=self.mise_root)
         (directory / "commands.txt").write_text("(cd php-bin && ./scripts/test.sh)\n(cd mise-php && ./scripts/test.sh)\nverification: passed\n")
@@ -710,14 +715,14 @@ class Verifier:
         )
         configuration_paths = [
             PHP_ROOT / "support-policy.json",
-            PHP_ROOT / "maintenance/protected-paths.json",
+            PHP_ROOT / "autorelease/protected-paths.json",
             self.mise_root / "support-snapshot.json",
         ]
         instruction_roots = {"php-bin": PHP_ROOT, "mise-php": self.mise_root}
         instruction_names = ("shared.md", "investigation.md", "implementation.md", "repair.md")
         instruction_digests = {
-            f"{repo}/.github/codex/maintenance/{name}": sha256_file(
-                root / ".github/codex/maintenance" / name
+            f"{repo}/.github/codex/autorelease/{name}": sha256_file(
+                root / ".github/codex/autorelease" / name
             )
             for repo, root in instruction_roots.items()
             for name in instruction_names
@@ -734,11 +739,11 @@ class Verifier:
             "tests": self.results,
             "result": "passed" if all(item["result"] == "passed" for item in self.results) else "failed",
         }
-        report_path = self.output / "maintenance-verification.json"
+        report_path = self.output / "autorelease-verification.json"
         report_path.write_bytes(canonical_json(report))
         report_digest = sha256_file(report_path)
         lines = [
-            "# Maintenance verification",
+            "# Autorelease verification",
             "",
             f"- Result: **{report['result']}**",
             f"- php-bin: `{self.php_sha}`",
@@ -749,7 +754,7 @@ class Verifier:
             "| --- | --- | --- |",
         ]
         lines.extend(f"| {item['id']} | {item['name']} | {item['result']} |" for item in self.results)
-        (self.output / "maintenance-verification.md").write_text("\n".join(lines) + "\n")
+        (self.output / "autorelease-verification.md").write_text("\n".join(lines) + "\n")
         print(json.dumps({"result": report["result"], "report": str(report_path), "digest": report_digest}))
         return 0 if report["result"] == "passed" else 1
 

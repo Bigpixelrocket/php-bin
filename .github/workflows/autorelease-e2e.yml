@@ -1,4 +1,4 @@
-name: Maintenance end to end
+name: Autorelease end to end
 
 on:
   workflow_dispatch:
@@ -26,11 +26,49 @@ permissions:
   contents: read
 
 concurrency:
-  group: maintenance-e2e-${{ inputs.suite }}
+  group: autorelease-e2e-${{ inputs.suite }}
   cancel-in-progress: false
 
 jobs:
+  # Dispatch inputs select the refs every suite checks out. They are shaped once
+  # here, ahead of every other job, and republished as outputs so no raw inputs
+  # expression reaches a checkout or a run script.
+  preflight:
+    name: Validate dispatch inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      php_bin_sha: ${{ steps.validated.outputs.php_bin_sha }}
+      mise_php_sha: ${{ steps.validated.outputs.mise_php_sha }}
+      live_version: ${{ steps.validated.outputs.live_version }}
+    steps:
+      - name: Enforce exact input shapes
+        id: validated
+        env:
+          PHP_BIN_SHA: ${{ inputs.php_bin_sha }}
+          MISE_PHP_SHA: ${{ inputs.mise_php_sha }}
+          SUITE: ${{ inputs.suite }}
+          LIVE_VERSION: ${{ inputs.live_version }}
+        run: |
+          [[ "$PHP_BIN_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$MISE_PHP_SHA" =~ ^[0-9a-f]{40}$ ]]
+          # live_version is optional and only meaningful for live-canary, so it is
+          # shaped for that suite and republished empty for every other one. The
+          # blanking matters: an unshaped value reaching $GITHUB_OUTPUT could set
+          # arbitrary outputs.
+          if [[ "$SUITE" == "live-canary" ]]; then
+            [[ "$LIVE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]
+          else
+            LIVE_VERSION=
+          fi
+          {
+            echo "php_bin_sha=$PHP_BIN_SHA"
+            echo "mise_php_sha=$MISE_PHP_SHA"
+            echo "live_version=$LIVE_VERSION"
+          } >> "$GITHUB_OUTPUT"
+
   production-parity:
+    needs: preflight
     if: inputs.suite == 'production-parity'
     runs-on: macos-26
     timeout-minutes: 45
@@ -44,14 +82,14 @@ jobs:
         working-directory: control
         run: |
           # This reviewed pin detects workflow edits that omit the corresponding pin update.
-          expected="$(jq -r '.workflows[".github/workflows/maintenance-e2e.yml"]' .github/maintenance-pins.json)"
-          actual="sha256:$(shasum -a 256 .github/workflows/maintenance-e2e.yml | awk '{print $1}')"
+          expected="$(jq -r '.workflows[".github/workflows/autorelease-e2e.yml"]' .github/autorelease-pins.json)"
+          actual="sha256:$(shasum -a 256 .github/workflows/autorelease-e2e.yml | awk '{print $1}')"
           test "$actual" = "$expected"
       - name: Checkout exact php-bin commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: bigpixelrocket/php-bin
-          ref: ${{ inputs.php_bin_sha }}
+          ref: ${{ needs.preflight.outputs.php_bin_sha }}
           path: php-bin
           fetch-depth: 0
           persist-credentials: false
@@ -59,7 +97,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: bigpixelrocket/mise-php
-          ref: ${{ inputs.mise_php_sha }}
+          ref: ${{ needs.preflight.outputs.mise_php_sha }}
           path: mise-php
           fetch-depth: 0
           persist-credentials: false
@@ -75,37 +113,41 @@ jobs:
           test -z "${GH_TOKEN:-}"
           test -z "${GITHUB_TOKEN:-}"
       - name: Run stable cross-repository verifier
+        env:
+          PHP_BIN_SHA: ${{ needs.preflight.outputs.php_bin_sha }}
+          MISE_PHP_SHA: ${{ needs.preflight.outputs.mise_php_sha }}
         run: |
-          ./php-bin/scripts/verify-maintenance-system \
+          ./php-bin/scripts/verify-autorelease-system \
             --mise-repo ./mise-php \
-            --php-bin-sha "${{ inputs.php_bin_sha }}" \
-            --mise-php-sha "${{ inputs.mise_php_sha }}" \
+            --php-bin-sha "$PHP_BIN_SHA" \
+            --mise-php-sha "$MISE_PHP_SHA" \
             --output ./verification-results
       - name: Retain production-parity report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: maintenance-production-parity-${{ github.run_id }}
+          name: autorelease-production-parity-${{ github.run_id }}
           path: verification-results/
           if-no-files-found: error
           retention-days: 90
           include-hidden-files: true
 
   agent-canary:
+    needs: preflight
     if: inputs.suite == 'agent-canary'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    environment: php-maintenance-agent-canary
+    environment: php-autorelease-canary
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ inputs.php_bin_sha }}
+          ref: ${{ needs.preflight.outputs.php_bin_sha }}
           persist-credentials: false
       - name: Bind the credentialed canary to reviewed main
         env:
-          EXPECTED_SHA: ${{ inputs.php_bin_sha }}
+          EXPECTED_SHA: ${{ needs.preflight.outputs.php_bin_sha }}
         run: |
           test "$GITHUB_REF" = "refs/heads/main"
           test "$GITHUB_SHA" = "$EXPECTED_SHA"
@@ -152,12 +194,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: maintenance-agent-canary-${{ github.run_id }}
+          name: autorelease-agent-canary-${{ github.run_id }}
           path: canary/
           if-no-files-found: error
           retention-days: 90
 
   notification-canary:
+    needs: preflight
     if: inputs.suite == 'notification-canary'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -167,7 +210,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ inputs.php_bin_sha }}
+          ref: ${{ needs.preflight.outputs.php_bin_sha }}
           persist-credentials: false
       - name: Create, replay, transition, and close one namespaced issue
         env:
@@ -178,44 +221,44 @@ jobs:
           jq -n --arg actionKey "$action_key" \
             '{actionKey:$actionKey,state:"detected",severity:"info",summary:"Harmless notification delivery canary."}' \
             > canary/event.json
-          ./scripts/notify-maintenance --event canary/event.json --state canary/state.json --output canary/next.json \
-            --backend github --repo "${{ github.repository }}" --owner "${{ vars.MAINTENANCE_OWNER }}"
+          ./scripts/notify-autorelease --event canary/event.json --state canary/state.json --output canary/next.json \
+            --backend github --repo "${{ github.repository }}" --owner "${{ vars.AUTORELEASE_OWNER }}"
           mv canary/next.json canary/state.json
-          ./scripts/notify-maintenance --event canary/event.json --state canary/state.json --output canary/replay.json \
-            --backend github --repo "${{ github.repository }}" --owner "${{ vars.MAINTENANCE_OWNER }}"
+          ./scripts/notify-autorelease --event canary/event.json --state canary/state.json --output canary/replay.json \
+            --backend github --repo "${{ github.repository }}" --owner "${{ vars.AUTORELEASE_OWNER }}"
           test "$(jq -r .lastAction canary/replay.json)" = "none"
           jq '.state="php_bin_ready"' canary/event.json > canary/transition.json
-          ./scripts/notify-maintenance --event canary/transition.json --state canary/state.json --output canary/next.json \
-            --backend github --repo "${{ github.repository }}" --owner "${{ vars.MAINTENANCE_OWNER }}"
+          ./scripts/notify-autorelease --event canary/transition.json --state canary/state.json --output canary/next.json \
+            --backend github --repo "${{ github.repository }}" --owner "${{ vars.AUTORELEASE_OWNER }}"
           mv canary/next.json canary/state.json
           jq '.state="complete" | .finalResult="passed"' canary/event.json > canary/complete.json
-          ./scripts/notify-maintenance --event canary/complete.json --state canary/state.json --output canary/closed.json \
-            --backend github --repo "${{ github.repository }}" --owner "${{ vars.MAINTENANCE_OWNER }}"
+          ./scripts/notify-autorelease --event canary/complete.json --state canary/state.json --output canary/closed.json \
+            --backend github --repo "${{ github.repository }}" --owner "${{ vars.AUTORELEASE_OWNER }}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: maintenance-notification-canary-${{ github.run_id }}
+          name: autorelease-notification-canary-${{ github.run_id }}
           path: canary/
           if-no-files-found: error
           retention-days: 90
 
   live-canary:
+    needs: preflight
     if: inputs.suite == 'live-canary'
     runs-on: macos-26
     timeout-minutes: 20
-    environment: php-maintenance-release
+    environment: php-autorelease-publish
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: bigpixelrocket/mise-php
-          ref: ${{ inputs.mise_php_sha }}
+          ref: ${{ needs.preflight.outputs.mise_php_sha }}
           persist-credentials: false
       - uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4
       - name: Verify exact and branch-shorthand public installs
         env:
-          LIVE_VERSION: ${{ inputs.live_version }}
+          LIVE_VERSION: ${{ needs.preflight.outputs.live_version }}
         run: |
-          [[ "$LIVE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]
           branch="$LIVE_VERSION"
           branch="${branch%%-*}"
           branch="${branch%.*}"

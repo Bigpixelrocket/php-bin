@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deduplicate maintenance issue creation and transition comments."""
+"""Deduplicate autorelease issue creation and transition comments."""
 
 import argparse
 import json
@@ -9,7 +9,7 @@ import sys
 import re
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from maintenance.control import (  # noqa: E402
+from autorelease.control import (  # noqa: E402
     ControlError,
     load_json,
     notification_decision,
@@ -29,30 +29,42 @@ def gh(*arguments: str) -> str:
     return result.stdout.strip()
 
 
+# Issues opened before the autorelease rename carry "maintenance-" markers.
+# Both prefixes are searched so those issues keep deduplicating, and so the
+# "issue already exists" guard still fires for them. Drop the legacy prefix once
+# no action key predating the rename can recur.
+MARKER_PREFIXES = ("autorelease", "maintenance")
+FINGERPRINT_RE = re.compile(
+    r"<!-- (?:autorelease|maintenance)-fingerprint:(sha256:[0-9a-f]{64}) -->"
+)
+
+
 def find_issue(repo: str, action_key: str) -> dict | None:
-    marker = f"<!-- maintenance-action-key:{action_key} -->"
-    issues = json.loads(
-        gh(
-            "issue",
-            "list",
-            "--repo",
-            repo,
-            "--state",
-            "all",
-            "--search",
-            f'"{marker}" in:body',
-            "--json",
-            "number,body,state,url",
-            "--limit",
-            "100",
+    matches: dict[int, dict] = {}
+    for prefix in MARKER_PREFIXES:
+        marker = f"<!-- {prefix}-action-key:{action_key} -->"
+        issues = json.loads(
+            gh(
+                "issue",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                "all",
+                "--search",
+                f'"{marker}" in:body',
+                "--json",
+                "number,body,state,url",
+                "--limit",
+                "100",
+            )
         )
-    )
-    matches = [issue for issue in issues if marker in issue.get("body", "")]
+        for issue in issues:
+            if marker in issue.get("body", ""):
+                matches[issue["number"]] = issue
     if len(matches) > 1:
         raise ControlError("multiple issues exist for one action key")
-    if not matches:
-        return None
-    return matches[0]
+    return next(iter(matches.values()), None)
 
 
 def discover_github_prior(repo: str, action_key: str) -> dict | None:
@@ -65,9 +77,7 @@ def discover_github_prior(repo: str, action_key: str) -> dict | None:
     bodies = [detail.get("body", "")]
     bodies.extend(comment.get("body", "") for comment in detail.get("comments", []))
     fingerprints = [
-        match.group(1)
-        for body in bodies
-        for match in re.finditer(r"<!-- maintenance-fingerprint:(sha256:[0-9a-f]{64}) -->", body)
+        match.group(1) for body in bodies for match in FINGERPRINT_RE.finditer(body)
     ]
     return {
         "fingerprint": fingerprints[-1] if fingerprints else None,
@@ -77,10 +87,10 @@ def discover_github_prior(repo: str, action_key: str) -> dict | None:
 
 def apply_github(repo: str, owner: str, event: dict, decision: dict, prior: dict | None) -> dict:
     action_key = event["actionKey"]
-    marker = f"<!-- maintenance-action-key:{action_key} -->"
-    summary = event.get("summary", f"Maintenance event {action_key} entered {event.get('state')}.")
-    fingerprint_marker = f"<!-- maintenance-fingerprint:{decision['fingerprint']} -->"
-    body = f"{marker}\n{fingerprint_marker}\n\n# PHP maintenance event\n\n{summary}\n"
+    marker = f"<!-- autorelease-action-key:{action_key} -->"
+    summary = event.get("summary", f"Autorelease event {action_key} entered {event.get('state')}.")
+    fingerprint_marker = f"<!-- autorelease-fingerprint:{decision['fingerprint']} -->"
+    body = f"{marker}\n{fingerprint_marker}\n\n# PHP autorelease event\n\n{summary}\n"
     comment = (
         f"{fingerprint_marker}\n\nState: `{event.get('state')}`\n\n{summary}\n\n"
         f"Transition fingerprint: `{decision['fingerprint']}`"
@@ -99,7 +109,7 @@ def apply_github(repo: str, owner: str, event: dict, decision: dict, prior: dict
             "--repo",
             repo,
             "--title",
-            f"[maintenance] {action_key}",
+            f"[autorelease] {action_key}",
             "--body",
             body,
             "--assignee",
@@ -141,7 +151,7 @@ def main() -> int:
         issue = {}
         if args.backend == "github" and decision["action"] != "none":
             if not args.owner:
-                raise ControlError("MAINTENANCE_OWNER is required")
+                raise ControlError("AUTORELEASE_OWNER is required")
             issue = apply_github(args.repo, args.owner, event, decision, prior)
         updated = {
             "schemaVersion": 1,

@@ -33,7 +33,7 @@
     }
   },
   "canary": {
-    "variableName": "MAINTENANCE_ADMIN_CANARY",
+    "variableName": "AUTORELEASE_ADMIN_CANARY",
     "repositories": [
       "Bigpixelrocket/php-bin",
       "Bigpixelrocket/mise-php"
@@ -44,7 +44,7 @@
     "absenceVerified": true,
     "protectedPath": {
       "repository": "Bigpixelrocket/mise-php",
-      "path": "maintenance/MAINTENANCE_ADMIN_CANARY.json",
+      "path": "autorelease/AUTORELEASE_ADMIN_CANARY.json",
       "additionPullRequest": "https://github.com/Bigpixelrocket/mise-php/pull/10",
       "expectedGateFailure": "https://github.com/Bigpixelrocket/mise-php/actions/runs/30255504107/job/89943039916",
       "additionMergeCommit": "4160680862fe247addd4008b5fd71a7d8ff35019",
@@ -76,7 +76,7 @@
     "administratorBypass": false
   },
   "agentCanaryEnvironment": {
-    "name": "php-maintenance-agent-canary",
+    "name": "php-autorelease-canary",
     "protectedBranchesOnly": true,
     "administratorBypass": false,
     "purpose": "Exercise the pinned Codex Action and repository API key only from reviewed main workflow bytes."
@@ -101,7 +101,7 @@
       "assignedIssue": "https://github.com/Bigpixelrocket/php-bin/issues/12",
       "assignedIssueRun": "https://github.com/Bigpixelrocket/php-bin/actions/runs/30263155155",
       "failedActionsRun": "https://github.com/Bigpixelrocket/php-bin/actions/runs/30263272377",
-      "evidenceDescription": "Maintainer-provided inbox screenshot shows the assigned issue #12 email at 14:46 and the isolated maintenance end-to-end failure email at 14:48."
+      "evidenceDescription": "Maintainer-provided inbox screenshot shows the assigned issue #12 email at 14:46 and the isolated autorelease end-to-end failure email at 14:48."
     }
   },
   "secrets": {

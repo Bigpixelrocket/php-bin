@@ -1,6 +1,6 @@
-# Guarded PHP maintenance agent instructions
+# Autorelease agent instructions
 
-The overarching goal is one production maintenance system across
+The overarching goal is one production autorelease system across
 `bigpixelrocket/php-bin` and `bigpixelrocket/mise-php` that detects upstream
 PHP release or lifecycle changes, prepares bounded repository work, coordinates
 both repositories, and permits deterministic controls to publish immutable,

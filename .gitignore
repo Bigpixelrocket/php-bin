@@ -7,7 +7,7 @@ __pycache__/
 buildroot/
 downloads/
 log/
-maintenance-run/
+autorelease-run/
 pkgroot/
 source/
 verification-results/

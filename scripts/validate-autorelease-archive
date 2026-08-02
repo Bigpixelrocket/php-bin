@@ -3,6 +3,6 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from maintenance.control import main
+from autorelease.control import main
 
 raise SystemExit(main(["validate-archive", *sys.argv[1:]]))

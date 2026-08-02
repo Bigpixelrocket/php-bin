@@ -113,12 +113,12 @@ try:
         },
     )
     gh("api", f"repos/{args.repo}/immutable-releases", "--method", "PUT")
-    gh("variable", "set", "MAINTENANCE_OWNER", "--repo", args.repo, "--body", args.owner)
-    ensure_label(args.repo, "maintenance", "1d76db", "Guarded PHP maintenance event")
+    gh("variable", "set", "AUTORELEASE_OWNER", "--repo", args.repo, "--body", args.owner)
+    ensure_label(args.repo, "autorelease", "1d76db", "Autorelease event")
     ensure_label(args.repo, "attention-required", "d73a4a", "Owner action is required")
     environment = json.loads(gh(
         "api",
-        f"repos/{args.repo}/environments/php-maintenance-release",
+        f"repos/{args.repo}/environments/php-autorelease-publish",
         "--method",
         "PUT",
         input_value={
@@ -178,5 +178,5 @@ try:
     )
 except (subprocess.CalledProcessError, OSError, RuntimeError, json.JSONDecodeError) as error:
     detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) and error.stderr else str(error)
-    print(f"GitHub maintenance configuration failed: {detail}", file=sys.stderr)
+    print(f"GitHub autorelease configuration failed: {detail}", file=sys.stderr)
     raise SystemExit(1)
