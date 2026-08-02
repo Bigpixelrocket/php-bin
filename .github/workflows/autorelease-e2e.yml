@@ -75,11 +75,16 @@ jobs:
           test -z "${GH_TOKEN:-}"
           test -z "${GITHUB_TOKEN:-}"
       - name: Run stable cross-repository verifier
+        env:
+          PHP_BIN_SHA: ${{ inputs.php_bin_sha }}
+          MISE_PHP_SHA: ${{ inputs.mise_php_sha }}
         run: |
+          [[ "$PHP_BIN_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$MISE_PHP_SHA" =~ ^[0-9a-f]{40}$ ]]
           ./php-bin/scripts/verify-autorelease-system \
             --mise-repo ./mise-php \
-            --php-bin-sha "${{ inputs.php_bin_sha }}" \
-            --mise-php-sha "${{ inputs.mise_php_sha }}" \
+            --php-bin-sha "$PHP_BIN_SHA" \
+            --mise-php-sha "$MISE_PHP_SHA" \
             --output ./verification-results
       - name: Retain production-parity report
         if: always()

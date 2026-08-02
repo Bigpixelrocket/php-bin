@@ -33,14 +33,52 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Dispatch inputs reach actions/checkout and many run scripts. They are shaped
+  # once here, ahead of every other job, and republished as outputs so no raw
+  # inputs expression is expanded anywhere downstream.
+  preflight:
+    name: Validate dispatch inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.validated.outputs.version }}
+      exact_commit: ${{ steps.validated.outputs.exact_commit }}
+      action_key: ${{ steps.validated.outputs.action_key }}
+      investigation_run_id: ${{ steps.validated.outputs.investigation_run_id }}
+    steps:
+      - name: Enforce exact input shapes
+        id: validated
+        env:
+          VERSION: ${{ inputs.version }}
+          EXACT_COMMIT: ${{ inputs.exact_commit }}
+          ACTION_KEY: ${{ inputs.action_key }}
+          INVESTIGATION_RUN_ID: ${{ inputs.investigation_run_id }}
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]
+          [[ "$EXACT_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$ACTION_KEY" =~ ^[A-Za-z0-9._:-]+$ ]]
+          [[ "$INVESTIGATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          {
+            echo "version=$VERSION"
+            echo "exact_commit=$EXACT_COMMIT"
+            echo "action_key=$ACTION_KEY"
+            echo "investigation_run_id=$INVESTIGATION_RUN_ID"
+          } >> "$GITHUB_OUTPUT"
+
   release:
+    needs: preflight
     runs-on: macos-26
     timeout-minutes: 150
     environment: php-autorelease-publish
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      EXACT_COMMIT: ${{ needs.preflight.outputs.exact_commit }}
+      ACTION_KEY: ${{ needs.preflight.outputs.action_key }}
+      INVESTIGATION_RUN_ID: ${{ needs.preflight.outputs.investigation_run_id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ inputs.exact_commit }}
+          ref: ${{ needs.preflight.outputs.exact_commit }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -53,20 +91,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh run download "${{ inputs.investigation_run_id }}" \
-            --name "autorelease-investigation-${{ inputs.investigation_run_id }}" \
+          gh run download "$INVESTIGATION_RUN_ID" \
+            --name "autorelease-investigation-$INVESTIGATION_RUN_ID" \
             --dir admitted-run
       - name: Verify stable version and exact commit
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
-          EXACT_COMMIT: ${{ inputs.exact_commit }}
-          ACTION_KEY: ${{ inputs.action_key }}
         run: |
           ./autorelease/control.py validate-policy
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]
-          [[ "$EXACT_COMMIT" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$ACTION_KEY" =~ ^[A-Za-z0-9._:-]+$ ]]
           test "$(git rev-parse HEAD)" = "$EXACT_COMMIT"
           test "$(jq -r .actionKey admitted-run/autorelease-plan.json)" = "$ACTION_KEY"
           test "$(jq -r .releaseIntent.version admitted-run/autorelease-plan.json)" = "$VERSION"
@@ -97,13 +129,13 @@ jobs:
         run: |
           action="$(jq -r .action admitted-run/autorelease-plan.json)"
           if [[ "$action" == "new_branch" ]]; then
-            filename="$(printf '%s' "${{ inputs.action_key }}" | tr ':/' '--').json"
+            filename="$(printf '%s' "$ACTION_KEY" | tr ':/' '--').json"
             event="autorelease-events/$filename"
             test -f "$event"
             test "$(jq -r .state "$event")" = "php_bin_ready"
             gh api "repos/bigpixelrocket/mise-php/contents/readiness/$filename?ref=main" \
               --jq .content | base64 --decode > release-run/mise-readiness.json
-            test "$(jq -r .actionKey release-run/mise-readiness.json)" = "${{ inputs.action_key }}"
+            test "$(jq -r .actionKey release-run/mise-readiness.json)" = "$ACTION_KEY"
             test "$(jq -r .ready release-run/mise-readiness.json)" = "true"
             test "$(jq -r .policyDigest release-run/mise-readiness.json)" = "$(jq -r .supportPolicyDigest "$event")"
             test "$(jq -r .policyInvariantsDigest release-run/mise-readiness.json)" = "$(jq -r .policyInvariantsDigest "$event")"
@@ -119,13 +151,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p .artifacts
-          if gh release view "${{ inputs.version }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release download "${{ inputs.version }}" --repo "${{ github.repository }}" --dir .artifacts
+          if gh release view "$VERSION" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release download "$VERSION" --repo "${{ github.repository }}" --dir .artifacts
             ./scripts/validate-autorelease-archive \
-              --archive ".artifacts/php-${{ inputs.version }}-cli-macos-aarch64.tar.gz" \
-              --version "${{ inputs.version }}"
-            archive_digest="$(shasum -a 256 ".artifacts/php-${{ inputs.version }}-cli-macos-aarch64.tar.gz" | awk '{print $1}')"
-            grep -Fx "$archive_digest  php-${{ inputs.version }}-cli-macos-aarch64.tar.gz" .artifacts/SHA256SUMS
+              --archive ".artifacts/php-$VERSION-cli-macos-aarch64.tar.gz" \
+              --version "$VERSION"
+            archive_digest="$(shasum -a 256 ".artifacts/php-$VERSION-cli-macos-aarch64.tar.gz" | awk '{print $1}')"
+            grep -Fx "$archive_digest  php-$VERSION-cli-macos-aarch64.tar.gz" .artifacts/SHA256SUMS
             echo "reuse=true" >> "$GITHUB_OUTPUT"
           else
             echo "reuse=false" >> "$GITHUB_OUTPUT"
@@ -138,19 +170,19 @@ jobs:
         run: ./scripts/install-spc.sh
       - name: Build exact patch
         if: steps.existing.outputs.reuse != 'true'
-        run: ./scripts/build.sh "${{ inputs.version }}" s4
+        run: ./scripts/build.sh "$VERSION" s4
       - name: Package and validate staged bytes
         if: steps.existing.outputs.reuse != 'true'
         run: |
-          ./scripts/package.sh ".build/${{ inputs.version }}/s4/buildroot/bin/php" "${{ inputs.version }}"
+          ./scripts/package.sh ".build/$VERSION/s4/buildroot/bin/php" "$VERSION"
           ./scripts/validate-autorelease-archive \
-            --archive ".artifacts/php-${{ inputs.version }}-cli-macos-aarch64.tar.gz" \
-            --version "${{ inputs.version }}"
+            --archive ".artifacts/php-$VERSION-cli-macos-aarch64.tar.gz" \
+            --version "$VERSION"
       - name: Initialize release transaction and event
         run: |
           mkdir -p release-run
           printf '{"schemaVersion":1,"state":"requested","history":[]}\n' > release-run/transaction.json
-          filename="$(printf '%s' "${{ inputs.action_key }}" | tr ':/' '--').json"
+          filename="$(printf '%s' "$ACTION_KEY" | tr ':/' '--').json"
           if [[ -f "autorelease-events/$filename" ]]; then
             cp "autorelease-events/$filename" release-run/event.json
             if [[ "$(jq -r .state release-run/event.json)" == "php_bin_ready" \
@@ -168,9 +200,9 @@ jobs:
             mv release-run/next-event.json release-run/event.json
           else
             jq -n \
-              --arg actionKey "${{ inputs.action_key }}" \
+              --arg actionKey "$ACTION_KEY" \
               --arg classification "$(jq -r .action admitted-run/autorelease-plan.json)" \
-              --arg commit "${{ inputs.exact_commit }}" \
+              --arg commit "$EXACT_COMMIT" \
               --arg planDigest "$(jq -r .planDigest admitted-run/admission.json)" \
               --arg evidenceManifestDigest "$(jq -r .manifestDigest admitted-run/evidence/evidence-manifest.json)" \
               --argjson evidenceDigests "$(jq '[.evidence[].digest]' admitted-run/autorelease-plan.json)" \
@@ -189,8 +221,8 @@ jobs:
               --transaction release-run/transaction.json \
               --target "$target" \
               --assets .artifacts \
-              --version "${{ inputs.version }}" \
-              --commit "${{ inputs.exact_commit }}" \
+              --version "$VERSION" \
+              --commit "$EXACT_COMMIT" \
               --backend github \
               --repo "${{ github.repository }}" \
               --output release-run/next.json
@@ -201,9 +233,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           temporary="$(mktemp -d)"
-          gh release download "${{ inputs.version }}" --repo "${{ github.repository }}" --dir "$temporary"
+          gh release download "$VERSION" --repo "${{ github.repository }}" --dir "$temporary"
           port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
-          ./scripts/serve-autorelease-artifact --port "$port" --assets "$temporary" --version "${{ inputs.version }}" &
+          ./scripts/serve-autorelease-artifact --port "$port" --assets "$temporary" --version "$VERSION" &
           server_pid="$!"
           trap 'kill "$server_pid" 2>/dev/null || true' EXIT
           ready=false
@@ -221,9 +253,9 @@ jobs:
           export MISE_CONFIG_DIR="$temporary/mise/config"
           export MISE_STATE_DIR="$temporary/mise/state"
           mise plugin link php "$GITHUB_WORKSPACE/mise-php"
-          mise install "php@${{ inputs.version }}"
-          mise exec "php@${{ inputs.version }}" -- php -v
-          mise exec "php@${{ inputs.version }}" -- php -m | grep -Fx Core
+          mise install "php@$VERSION"
+          mise exec "php@$VERSION" -- php -v
+          mise exec "php@$VERSION" -- php -m | grep -Fx Core
           kill "$server_pid"
           wait "$server_pid" || true
           trap - EXIT
@@ -239,17 +271,17 @@ jobs:
               --transaction release-run/transaction.json \
               --target "$target" \
               --assets .artifacts \
-              --version "${{ inputs.version }}" \
-              --commit "${{ inputs.exact_commit }}" \
+              --version "$VERSION" \
+              --commit "$EXACT_COMMIT" \
               --backend github \
               --repo "${{ github.repository }}" \
               --output release-run/next.json
             mv release-run/next.json release-run/transaction.json
           done
-          test "$(gh release view "${{ inputs.version }}" --repo "${{ github.repository }}" --json isImmutable --jq .isImmutable)" = "true"
+          test "$(gh release view "$VERSION" --repo "${{ github.repository }}" --json isImmutable --jq .isImmutable)" = "true"
           verified=false
           for _ in {1..12}; do
-            if gh release verify "${{ inputs.version }}" --repo "${{ github.repository }}" --format json \
+            if gh release verify "$VERSION" --repo "${{ github.repository }}" --format json \
               > release-run/release-attestation.json; then
               verified=true
               break
@@ -265,22 +297,22 @@ jobs:
           export MISE_CACHE_DIR="$temporary/cache"
           export MISE_CONFIG_DIR="$temporary/config"
           export MISE_STATE_DIR="$temporary/state"
-          branch="${{ inputs.version }}"
+          branch="$VERSION"
           branch="${branch%%-*}"
           branch="${branch%.*}"
           mise plugin link php "$GITHUB_WORKSPACE/mise-php"
-          mise install "php@${{ inputs.version }}"
+          mise install "php@$VERSION"
           mise install "php@$branch"
-          mise exec "php@${{ inputs.version }}" -- php -v
+          mise exec "php@$VERSION" -- php -v
           mise exec "php@$branch" -- php -v
       - name: Complete durable event
         run: |
-          jq -n --arg version "${{ inputs.version }}" --argjson assets "$(jq .assetDigests release-run/transaction.json)" \
+          jq -n --arg version "$VERSION" --argjson assets "$(jq .assetDigests release-run/transaction.json)" \
             '[{kind:"published_release",version:$version,assetDigests:$assets}]' > release-run/evidence.json
           ./scripts/autorelease-event --event release-run/event.json --target released \
             --evidence release-run/evidence.json --output release-run/next-event.json
           mv release-run/next-event.json release-run/event.json
-          jq -n --arg version "${{ inputs.version }}" \
+          jq -n --arg version "$VERSION" \
             '[{kind:"fresh_public_mise_installs",version:$version,modes:["exact","branch_shorthand"]}]' > release-run/evidence.json
           ./scripts/autorelease-event --event release-run/event.json --target public_install_verified \
             --evidence release-run/evidence.json --output release-run/next-event.json
@@ -289,7 +321,7 @@ jobs:
           ./scripts/autorelease-event --event release-run/event.json --target complete \
             --evidence release-run/evidence.json --output release-run/next-event.json
           mv release-run/next-event.json release-run/event.json
-          jq '.severity="info" | .summary="PHP ${{ inputs.version }} was published and verified through fresh exact and branch-shorthand mise installs." | .finalResult="passed"' \
+          jq '.severity="info" | .summary="PHP $VERSION was published and verified through fresh exact and branch-shorthand mise installs." | .finalResult="passed"' \
             release-run/event.json > release-run/notification-event.json
       - name: Commit final event record through a checked PR
         id: event_pr
@@ -299,18 +331,18 @@ jobs:
           git fetch origin main
           git checkout -B "autorelease/event-${{ github.run_id }}" origin/main
           base="$(git rev-parse HEAD)"
-          filename="$(printf '%s' "${{ inputs.action_key }}" | tr ':/' '--').json"
+          filename="$(printf '%s' "$ACTION_KEY" | tr ':/' '--').json"
           cp release-run/event.json "autorelease-events/$filename"
           git add "autorelease-events/$filename"
           git -c user.name=autorelease -c user.email=autorelease@invalid \
-            commit -m "chore: complete ${{ inputs.action_key }}"
+            commit -m "chore: complete $ACTION_KEY"
           head="$(git rev-parse HEAD)"
           record="autorelease-events/$filename"
           digest="sha256:$(shasum -a 256 "$record" | awk '{print $1}')"
           gh auth setup-git
           git push origin HEAD
           url="$(gh pr create --base main --head "autorelease/event-${{ github.run_id }}" \
-            --title "chore: complete ${{ inputs.action_key }}" \
+            --title "chore: complete $ACTION_KEY" \
             --body "Durable event record for the immutable verified release transaction.")"
           echo "number=${url##*/}" >> "$GITHUB_OUTPUT"
           echo "base_sha=$base" >> "$GITHUB_OUTPUT"
@@ -347,16 +379,7 @@ jobs:
             --owner "${{ vars.AUTORELEASE_OWNER }}"
       - name: Record release failure diagnostic
         if: failure()
-        env:
-          ACTION_KEY: ${{ inputs.action_key }}
-          VERSION: ${{ inputs.version }}
-          EXACT_COMMIT: ${{ inputs.exact_commit }}
-          INVESTIGATION_RUN_ID: ${{ inputs.investigation_run_id }}
         run: |
-          [[ "$ACTION_KEY" =~ ^[A-Za-z0-9._:-]+$ ]]
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]
-          [[ "$EXACT_COMMIT" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$INVESTIGATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           mkdir -p release-run
           jq -n \
             --arg actionKey "$ACTION_KEY" \
@@ -371,7 +394,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: release-transaction-${{ inputs.version }}-${{ github.run_id }}
+          name: release-transaction-${{ needs.preflight.outputs.version }}-${{ github.run_id }}
           path: |
             .artifacts/
             release-run/
@@ -381,7 +404,7 @@ jobs:
 
   notify-failure:
     name: Notify actionable release failure
-    needs: [release]
+    needs: [preflight, release]
     if: always() && needs.release.result == 'failure'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -394,16 +417,10 @@ jobs:
           persist-credentials: false
       - name: Create structured critical event
         env:
-          ACTION_KEY: ${{ inputs.action_key }}
-          VERSION: ${{ inputs.version }}
-          EXACT_COMMIT: ${{ inputs.exact_commit }}
-          INVESTIGATION_RUN_ID: ${{ inputs.investigation_run_id }}
+          ACTION_KEY: ${{ needs.preflight.outputs.action_key }}
+          VERSION: ${{ needs.preflight.outputs.version }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          [[ "$ACTION_KEY" =~ ^[A-Za-z0-9._:-]+$ ]]
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]
-          [[ "$EXACT_COMMIT" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$INVESTIGATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           jq -n \
             --arg actionKey "$ACTION_KEY" \
             --arg summary "Autorelease failed for PHP $VERSION: $RUN_URL" \

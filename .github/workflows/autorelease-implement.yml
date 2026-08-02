@@ -23,29 +23,63 @@ permissions:
   actions: read
 
 jobs:
+  # Dispatch inputs reach actions/checkout and several run scripts. They are
+  # validated once here, ahead of every other job, and republished as outputs so
+  # no raw inputs expression is expanded anywhere downstream.
+  preflight:
+    name: Validate dispatch inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run_id: ${{ steps.validated.outputs.run_id }}
+      base_sha: ${{ steps.validated.outputs.base_sha }}
+      phase: ${{ steps.validated.outputs.phase }}
+    steps:
+      - name: Enforce exact input shapes
+        id: validated
+        env:
+          RUN_ID: ${{ inputs.investigation_run_id }}
+          BASE_SHA: ${{ inputs.exact_base_sha }}
+          PHASE: ${{ inputs.phase }}
+        run: |
+          [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PHASE" == "implementation" || "$PHASE" == "repair" ]]
+          {
+            echo "run_id=$RUN_ID"
+            echo "base_sha=$BASE_SHA"
+            echo "phase=$PHASE"
+          } >> "$GITHUB_OUTPUT"
+
   implement:
     name: Offline agent and patch sealing
+    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ inputs.exact_base_sha }}
+          ref: ${{ needs.preflight.outputs.base_sha }}
           fetch-depth: 0
           persist-credentials: false
       - name: Download admitted investigation
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh run download "${{ inputs.investigation_run_id }}" --name "autorelease-investigation-${{ inputs.investigation_run_id }}" --dir autorelease-run
+          RUN_ID: ${{ needs.preflight.outputs.run_id }}
+        run: gh run download "$RUN_ID" --name "autorelease-investigation-$RUN_ID" --dir autorelease-run
       - name: Enforce operator pause
         run: test "$(jq -r .unattendedMutation .github/autorelease-operator.json)" = "enabled"
       - name: Verify exact admitted base
+        env:
+          BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
         run: |
-          test "$(git rev-parse HEAD)" = "${{ inputs.exact_base_sha }}"
-          test "$(jq -r .preconditions.phpBinHead autorelease-run/autorelease-plan.json)" = "${{ inputs.exact_base_sha }}"
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          test "$(jq -r .preconditions.phpBinHead autorelease-run/autorelease-plan.json)" = "$BASE_SHA"
       - name: Prepare offline phase contract
+        env:
+          PHASE: ${{ needs.preflight.outputs.phase }}
         run: |
-          phase="${{ inputs.phase }}"
+          phase="$PHASE"
           ./scripts/prepare-agent-task \
             --phase "$phase" \
             --action-key "$(jq -r .actionKey autorelease-run/autorelease-plan.json)" \
@@ -85,10 +119,12 @@ jobs:
           allow-bot-users: github-actions[bot]
           codex-args: '["--strict-config","--ephemeral","--output-schema","schemas/agent-completion-assessment.schema.json"]'
       - name: Seal exact agent diff
+        env:
+          BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
         run: |
           ./scripts/seal-autorelease-patch \
             --repo . \
-            --base "${{ inputs.exact_base_sha }}" \
+            --base "$BASE_SHA" \
             --plan autorelease-run/implementation-plan.json \
             --result autorelease-run/implementation-result.json \
             --contract autorelease-run/implementation-contract.json \
@@ -104,7 +140,7 @@ jobs:
 
   validate:
     name: Clean deterministic validation
-    needs: implement
+    needs: [preflight, implement]
     outputs:
       passed: ${{ steps.checks.outputs.passed }}
     runs-on: ubuntu-latest
@@ -115,7 +151,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ inputs.exact_base_sha }}
+          ref: ${{ needs.preflight.outputs.base_sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -140,6 +176,8 @@ jobs:
           fi
       - name: Record validated SHA and tree
         if: steps.checks.outputs.passed == 'true'
+        env:
+          BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
         run: |
           export GIT_AUTHOR_NAME=autorelease-validator
           export GIT_AUTHOR_EMAIL=autorelease@invalid
@@ -149,7 +187,7 @@ jobs:
           export GIT_COMMITTER_DATE=2000-01-01T00:00:00Z
           git commit -m "chore: apply admitted autorelease patch"
           jq -n --arg headSha "$(git rev-parse HEAD)" --arg tree "$(git rev-parse HEAD^{tree})" '{headSha:$headSha,tree:$tree,checks:{"Script checks":"success"}}' > autorelease-run/validation.json
-          git bundle create autorelease-run/validated.bundle HEAD "^${{ inputs.exact_base_sha }}"
+          git bundle create autorelease-run/validated.bundle HEAD "^$BASE_SHA"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: steps.checks.outputs.passed == 'true'
         with:
@@ -169,7 +207,7 @@ jobs:
 
   repair:
     name: One bounded offline repair
-    needs: validate
+    needs: [preflight, validate]
     if: needs.validate.outputs.passed != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -179,7 +217,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ inputs.exact_base_sha }}
+          ref: ${{ needs.preflight.outputs.base_sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -237,11 +275,13 @@ jobs:
           allow-bot-users: github-actions[bot]
           codex-args: '["--strict-config","--ephemeral","--output-schema","schemas/agent-completion-assessment.schema.json"]'
       - name: Seal the combined repaired diff
+        env:
+          BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
         run: |
           mv autorelease-run/repair-plan.json autorelease-run/implementation-plan.json
           ./scripts/seal-autorelease-patch \
             --repo . \
-            --base "${{ inputs.exact_base_sha }}" \
+            --base "$BASE_SHA" \
             --plan autorelease-run/implementation-plan.json \
             --result autorelease-run/repair-result.json \
             --contract autorelease-run/repair-contract.json \
@@ -256,7 +296,7 @@ jobs:
 
   validate-repair:
     name: Clean deterministic repair validation
-    needs: repair
+    needs: [preflight, repair]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -265,7 +305,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ inputs.exact_base_sha }}
+          ref: ${{ needs.preflight.outputs.base_sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -280,6 +320,8 @@ jobs:
           cp autorelease-run/sealed-repair/sealed.patch autorelease-run/sealed/sealed.patch
           cp autorelease-run/sealed-repair/patch-manifest.json autorelease-run/sealed/patch-manifest.json
       - name: Record repaired validated SHA and tree
+        env:
+          BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
         run: |
           export GIT_AUTHOR_NAME=autorelease-validator
           export GIT_AUTHOR_EMAIL=autorelease@invalid
@@ -289,7 +331,7 @@ jobs:
           export GIT_COMMITTER_DATE=2000-01-01T00:00:00Z
           git commit -m "chore: apply admitted autorelease repair"
           jq -n --arg headSha "$(git rev-parse HEAD)" --arg tree "$(git rev-parse HEAD^{tree})" '{headSha:$headSha,tree:$tree,checks:{"Script checks":"success"}}' > autorelease-run/validation.json
-          git bundle create autorelease-run/validated.bundle HEAD "^${{ inputs.exact_base_sha }}"
+          git bundle create autorelease-run/validated.bundle HEAD "^$BASE_SHA"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: validated-autorelease-patch-${{ github.run_id }}
@@ -300,8 +342,11 @@ jobs:
 
   merge:
     name: Exact-SHA PR and merge admission
-    needs: [validate, validate-repair]
-    if: always() && (needs.validate.outputs.passed == 'true' || needs['validate-repair'].result == 'success')
+    needs: [preflight, validate, validate-repair]
+    # always() keeps this job reachable when repair paths skip, so the preflight
+    # result is asserted explicitly. Without it a rejected dispatch input would
+    # still reach checkout, with an empty ref.
+    if: always() && needs.preflight.result == 'success' && (needs.validate.outputs.passed == 'true' || needs['validate-repair'].result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 130
     permissions:
@@ -313,7 +358,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ inputs.exact_base_sha }}
+          ref: ${{ needs.preflight.outputs.base_sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
