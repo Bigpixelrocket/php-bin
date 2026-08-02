@@ -7,7 +7,7 @@ import pathlib
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from maintenance.control import ControlError, instruction_digest, write_json  # noqa: E402
+from autorelease.control import ControlError, instruction_digest, write_json  # noqa: E402
 
 
 CRITERIA = {

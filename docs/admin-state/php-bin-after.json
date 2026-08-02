@@ -81,9 +81,9 @@
           "custom_branch_policies": false,
           "protected_branches": true
         },
-        "html_url": "https://github.com/Bigpixelrocket/php-bin/deployments/activity_log?environments_filter=php-maintenance-agent-canary",
+        "html_url": "https://github.com/Bigpixelrocket/php-bin/deployments/activity_log?environments_filter=php-autorelease-canary",
         "id": 18869369898,
-        "name": "php-maintenance-agent-canary",
+        "name": "php-autorelease-canary",
         "node_id": "EN_kwDOTj2wQ88AAAAEZLO8Kg",
         "protection_rules": [
           {
@@ -93,7 +93,7 @@
           }
         ],
         "updated_at": "2026-07-28T09:03:03Z",
-        "url": "https://api.github.com/repos/Bigpixelrocket/php-bin/environments/php-maintenance-agent-canary"
+        "url": "https://api.github.com/repos/Bigpixelrocket/php-bin/environments/php-autorelease-canary"
       },
       {
         "can_admins_bypass": false,
@@ -102,9 +102,9 @@
           "custom_branch_policies": false,
           "protected_branches": true
         },
-        "html_url": "https://github.com/Bigpixelrocket/php-bin/deployments/activity_log?environments_filter=php-maintenance-release",
+        "html_url": "https://github.com/Bigpixelrocket/php-bin/deployments/activity_log?environments_filter=php-autorelease-publish",
         "id": 18804833478,
-        "name": "php-maintenance-release",
+        "name": "php-autorelease-publish",
         "node_id": "EN_kwDOTj2wQ88AAAAEYNr8xg",
         "protection_rules": [
           {
@@ -114,7 +114,7 @@
           }
         ],
         "updated_at": "2026-07-27T10:09:17Z",
-        "url": "https://api.github.com/repos/Bigpixelrocket/php-bin/environments/php-maintenance-release"
+        "url": "https://api.github.com/repos/Bigpixelrocket/php-bin/environments/php-autorelease-publish"
       }
     ],
     "total_count": 2
@@ -134,7 +134,7 @@
     "good first issue",
     "help wanted",
     "invalid",
-    "maintenance",
+    "autorelease",
     "question",
     "wontfix"
   ],
@@ -184,7 +184,7 @@
   },
   "snapshotDigest": "sha256:3d0ed7f751c408e71033bdc593f7eeba2161470658277281d1c409a7b0572797",
   "variables": [
-    "MAINTENANCE_OWNER"
+    "AUTORELEASE_OWNER"
   ],
   "workflowPermissions": {
     "can_approve_pull_request_reviews": true,

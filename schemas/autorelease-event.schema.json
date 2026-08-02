@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://bigpixelrocket.dev/schemas/maintenance-event.schema.json",
+  "$id": "https://bigpixelrocket.dev/schemas/autorelease-event.schema.json",
   "type": "object",
   "required": ["schemaVersion", "actionKey", "state", "history"],
   "properties": {

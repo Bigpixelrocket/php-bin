@@ -9,7 +9,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from maintenance.control import (  # noqa: E402
+from autorelease.control import (  # noqa: E402
     ControlError,
     LEGAL_RELEASE_TRANSITIONS,
     load_json,
@@ -121,13 +121,13 @@ def github_effect(
                 "--title",
                 f"PHP {version} for macOS arm64",
                 "--notes",
-                "Guarded maintenance release. Asset digests are recorded in SHA256SUMS.",
+                "Autorelease publication. Asset digests are recorded in SHA256SUMS.",
                 "--draft",
                 "--verify-tag",
                 capture=False,
             )
     elif target in {"draft_verified", "public_verified"}:
-        with tempfile.TemporaryDirectory(prefix="maintenance-download-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="autorelease-download-") as temporary:
             gh(
                 "release",
                 "download",

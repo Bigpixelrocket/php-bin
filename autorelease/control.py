@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic maintenance controls.
+"""Deterministic autorelease controls.
 
 This module deliberately does not classify PHP releases or lifecycle state.
 It validates authority, evidence, state transitions, and immutable effects
@@ -316,7 +316,7 @@ def validate_recaptured_evidence(
     admitted = indexed_captures(admitted_manifest, "admitted")
     current = indexed_captures(current_manifest, "current")
     evidence = plan.get("evidence")
-    require(isinstance(evidence, list) and bool(evidence), "maintenance plan has no evidence")
+    require(isinstance(evidence, list) and bool(evidence), "autorelease plan has no evidence")
     verified = []
     for item in evidence:
         require(isinstance(item, dict), "plan evidence entry must be an object")
@@ -329,43 +329,43 @@ def validate_recaptured_evidence(
         require(admitted[capture_id]["digest"] == digest, f"admitted evidence digest mismatch: {capture_id}")
         require(current[capture_id]["digest"] == digest, f"recaptured evidence changed: {capture_id}")
         verified.append(capture_id)
-    require(bool(verified), "maintenance plan cites no authoritative captured evidence")
+    require(bool(verified), "autorelease plan cites no authoritative captured evidence")
     return {"valid": True, "verifiedCaptureIds": sorted(verified)}
 
 
 def validate_completed_event_record(record: dict[str, Any]) -> None:
     """Validate a durable event as a complete, contiguous legal transition history."""
 
-    require(isinstance(record, dict), "maintenance event must be an object")
-    require(record.get("schemaVersion") == 1, "maintenance event version is invalid")
-    require(bool(ACTION_KEY_RE.fullmatch(record.get("actionKey", ""))), "maintenance event action key is invalid")
-    require(record.get("state") == "complete", "maintenance event is not complete")
+    require(isinstance(record, dict), "autorelease event must be an object")
+    require(record.get("schemaVersion") == 1, "autorelease event version is invalid")
+    require(bool(ACTION_KEY_RE.fullmatch(record.get("actionKey", ""))), "autorelease event action key is invalid")
+    require(record.get("state") == "complete", "autorelease event is not complete")
     history = record.get("history")
-    require(isinstance(history, list) and bool(history), "maintenance event has no transition history")
+    require(isinstance(history, list) and bool(history), "autorelease event has no transition history")
     current = history[0].get("from") if isinstance(history[0], dict) else None
     for transition in history:
-        require(isinstance(transition, dict), "maintenance event transition must be an object")
+        require(isinstance(transition, dict), "autorelease event transition must be an object")
         require(
             set(transition) == {"from", "to", "at", "evidence"},
-            "maintenance event transition fields changed",
+            "autorelease event transition fields changed",
         )
-        require(transition.get("from") == current, "maintenance event history is not contiguous")
+        require(transition.get("from") == current, "autorelease event history is not contiguous")
         target = transition.get("to")
-        require(target in LEGAL_EVENT_TRANSITIONS.get(current, set()), "maintenance event transition is illegal")
+        require(target in LEGAL_EVENT_TRANSITIONS.get(current, set()), "autorelease event transition is illegal")
         timestamp = transition.get("at")
         require(
             isinstance(timestamp, str) and timestamp.endswith("Z"),
-            "maintenance event transition timestamp is invalid",
+            "autorelease event transition timestamp is invalid",
         )
         evidence = transition.get("evidence")
         require(
             isinstance(evidence, list)
             and bool(evidence)
             and all(isinstance(item, dict) and bool(item) for item in evidence),
-            "maintenance event transition evidence is invalid",
+            "autorelease event transition evidence is invalid",
         )
         current = target
-    require(current == record["state"], "maintenance event state does not match its history")
+    require(current == record["state"], "autorelease event state does not match its history")
 
 
 def validate_evidence_state_record(record: dict[str, Any]) -> None:
@@ -500,7 +500,7 @@ def _validate_support_policy_document(
 
 
 def validate_support_policy(root: pathlib.Path = ROOT) -> dict[str, Any]:
-    invariants_path = root / "maintenance/policy-invariants.json"
+    invariants_path = root / "autorelease/policy-invariants.json"
     policy_path = root / "support-policy.json"
     invariants = load_json(invariants_path)
     policy = load_json(policy_path)
@@ -554,7 +554,7 @@ def validate_plan(
     policy_digest: str | None = None,
     completed_actions: set[str] | None = None,
 ) -> dict[str, Any]:
-    require(plan.get("schemaVersion") == 1, "unsupported maintenance plan version")
+    require(plan.get("schemaVersion") == 1, "unsupported autorelease plan version")
     require(
         plan.get("action")
         in {
@@ -567,7 +567,7 @@ def validate_plan(
             "blocked",
             "needs_human",
         },
-        "invalid maintenance action",
+        "invalid autorelease action",
     )
     action_key = plan.get("actionKey", "")
     require(bool(ACTION_KEY_RE.fullmatch(action_key)), "invalid action key")
@@ -783,7 +783,7 @@ def seal_patch(
                     raise ControlError("support policy is not valid JSON") from error
                 _branches, policy_evidence = _validate_support_policy_document(
                     policy,
-                    repo / "maintenance/policy-invariants.json",
+                    repo / "autorelease/policy-invariants.json",
                 )
                 evidence_digests = sorted(
                     {item.get("digest") for item in plan.get("evidence", []) if item.get("digest")}
@@ -948,7 +948,7 @@ def notification_decision(event: dict[str, Any], prior: dict[str, Any] | None) -
         "action": action,
         "fingerprint": fingerprint,
         "critical": critical,
-        "labels": ["maintenance", *(["attention-required"] if critical or event.get("humanActionRequired") else [])],
+        "labels": ["autorelease", *(["attention-required"] if critical or event.get("humanActionRequired") else [])],
     }
 
 
@@ -1087,7 +1087,7 @@ def capture_evidence(
     for source in sources:
         headers = {
             "Accept": "application/vnd.github+json, application/json, text/html",
-            "User-Agent": "bigpixelrocket-maintenance/1",
+            "User-Agent": "bigpixelrocket-autorelease/1",
         }
         if token and urllib.parse.urlparse(source.url).hostname == "api.github.com":
             headers["Authorization"] = f"Bearer {token}"
@@ -1195,7 +1195,7 @@ def validate_archive(archive: pathlib.Path, version: str) -> None:
 
 
 def cli_error(error: Exception) -> int:
-    print(f"maintenance control rejected input: {error}", file=sys.stderr)
+    print(f"autorelease control rejected input: {error}", file=sys.stderr)
     return 1
 
 

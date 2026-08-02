@@ -8,7 +8,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from maintenance.control import ControlError, load_json, seal_patch  # noqa: E402
+from autorelease.control import ControlError, load_json, seal_patch  # noqa: E402
 
 
 parser = argparse.ArgumentParser()

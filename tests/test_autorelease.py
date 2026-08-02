@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from maintenance.control import (
+from autorelease.control import (
     COMPLETION_EVIDENCE_REF_RE,
     ControlError,
     canonical_json,
@@ -35,7 +35,7 @@ from maintenance.control import (
 )
 
 
-class MaintenanceControlTests(unittest.TestCase):
+class AutoreleaseControlTests(unittest.TestCase):
     @staticmethod
     def _contract():
         return {
@@ -151,8 +151,8 @@ class MaintenanceControlTests(unittest.TestCase):
 
     def test_investigation_defers_required_checks_to_writable_jobs(self):
         root = pathlib.Path(__file__).resolve().parents[1]
-        instructions = (root / ".github/codex/maintenance/investigation.md").read_text()
-        watcher = (root / ".github/workflows/maintenance-watch.yml").read_text()
+        instructions = (root / ".github/codex/autorelease/investigation.md").read_text()
+        watcher = (root / ".github/workflows/autorelease-watch.yml").read_text()
         self.assertIn("Treat `requiredChecks` as downstream exact-head gates", instructions)
         self.assertIn("do not run them in this read-only", instructions)
         self.assertIn("not-yet-run status as unresolved", instructions)
@@ -344,7 +344,7 @@ class MaintenanceControlTests(unittest.TestCase):
         self.assertIsNone(retained_notification_issue({"issue": {"number": True}}))
 
         namespace = runpy.run_path(
-            str(pathlib.Path(__file__).resolve().parents[1] / "scripts/notify-maintenance")
+            str(pathlib.Path(__file__).resolve().parents[1] / "scripts/notify-autorelease")
         )
         apply_github = namespace["apply_github"]
         gh = mock.Mock(return_value="")
@@ -352,7 +352,7 @@ class MaintenanceControlTests(unittest.TestCase):
         decision = {
             "action": "comment_and_close",
             "fingerprint": "sha256:" + "a" * 64,
-            "labels": ["maintenance"],
+            "labels": ["autorelease"],
         }
         event = {"actionKey": "fixture", "state": "complete", "summary": "Done."}
         with mock.patch.dict(apply_github.__globals__, {"gh": gh, "find_issue": find_issue}):
@@ -369,11 +369,11 @@ class MaintenanceControlTests(unittest.TestCase):
 
     def test_invariants_and_durable_state_are_protected(self):
         self.assertTrue(path_is_protected(".github/codex-action-contract.json"))
-        self.assertTrue(path_is_protected("maintenance/policy-invariants.json"))
+        self.assertTrue(path_is_protected("autorelease/policy-invariants.json"))
         self.assertTrue(path_is_protected("scripts/validate-codex-action-inputs"))
         self.assertTrue(path_is_protected("scripts/dispatch-pr-checks"))
-        self.assertTrue(path_is_protected("maintenance-events/new-branch.json"))
-        self.assertTrue(path_is_protected("maintenance-state/last-evidence.json"))
+        self.assertTrue(path_is_protected("autorelease-events/new-branch.json"))
+        self.assertTrue(path_is_protected("autorelease-state/last-evidence.json"))
         self.assertFalse(path_is_protected("support-policy.json"))
 
     def test_token_created_prs_explicitly_dispatch_required_checks(self):
@@ -384,11 +384,11 @@ class MaintenanceControlTests(unittest.TestCase):
         self.assertIn("workflow_dispatch:", ci)
         self.assertIn("workflow_dispatch:", protected)
         self.assertIn("paths-ignore:", ci)
-        self.assertIn("maintenance-state/**", ci)
+        self.assertIn("autorelease-state/**", ci)
         self.assertIn("paths-ignore:", protected)
-        self.assertIn("maintenance-events/**", protected)
+        self.assertIn("autorelease-events/**", protected)
         self.assertIn("validate_completed_event_record", protected)
-        self.assertIn('maintenance/(event|eol-complete)-', protected)
+        self.assertIn('autorelease/(event|eol-complete)-', protected)
         self.assertIn("pr_number:", protected)
         self.assertIn("gh workflow run ci.yml", dispatcher)
         self.assertIn("gh workflow run protected-controls.yml", dispatcher)
@@ -396,9 +396,9 @@ class MaintenanceControlTests(unittest.TestCase):
         self.assertIn('"repos/$repository/statuses/$head_sha"', dispatcher)
         self.assertIn("Exact-head validator passed", dispatcher)
         for workflow in (
-            "maintenance-watch.yml",
-            "maintenance-implementation.yml",
-            "maintenance-release.yml",
+            "autorelease-watch.yml",
+            "autorelease-implement.yml",
+            "autorelease-publish.yml",
         ):
             body = (root / ".github/workflows" / workflow).read_text()
             self.assertIn("./scripts/dispatch-pr-checks", body)
@@ -406,7 +406,7 @@ class MaintenanceControlTests(unittest.TestCase):
             self.assertIn("checks: write", body)
             self.assertIn("statuses: write", body)
 
-        release = (root / ".github/workflows/maintenance-release.yml").read_text()
+        release = (root / ".github/workflows/autorelease-publish.yml").read_text()
         self.assertIn("validate-recaptured-evidence", release)
         self.assertIn("Notify actionable release failure", release)
         self.assertIn("release-run/failure.json", release)

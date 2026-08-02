@@ -1,7 +1,7 @@
 # Investigation phase
 
 Observable goal: classify exactly one action key from retained evidence and
-produce a schema-valid, evidence-bound maintenance plan without modifying a
+produce a schema-valid, evidence-bound autorelease plan without modifying a
 repository or causing a GitHub mutation.
 
 For every material release or lifecycle claim, cite one captured body by
@@ -14,18 +14,18 @@ captured evidence.
 Plan evidence `captureId` values may name only a capture in the evidence
 manifest or the two deterministic runtime inputs `evidence_manifest` and
 `watch_decision`. Those runtime IDs resolve only to
-`maintenance-run/evidence/evidence-manifest.json` and
-`maintenance-run/watch-decision.json`; no other runtime or repository file is
+`autorelease-run/evidence/evidence-manifest.json` and
+`autorelease-run/watch-decision.json`; no other runtime or repository file is
 admissible as plan evidence.
 
 The required runtime inputs are generated before this phase and are available
 at these exact paths:
 
-- `maintenance-run/evidence/evidence-manifest.json`
+- `autorelease-run/evidence/evidence-manifest.json`
 - the captured bodies named by each manifest entry, resolved relative to
-  `maintenance-run/evidence/`
-- `maintenance-run/preconditions.json`
-- `maintenance-run/watch-decision.json`
+  `autorelease-run/evidence/`
+- `autorelease-run/preconditions.json`
+- `autorelease-run/watch-decision.json`
 
 These runtime files are intentionally gitignored, so discovery commands that
 respect `.gitignore` (including `rg --files`) may omit them. Read the exact paths
@@ -43,7 +43,7 @@ advisory checks. Declare them in the plan, but do not run them in this read-only
 phase or treat their not-yet-run status as unresolved; writable deterministic
 jobs execute them before merge.
 
-If changed evidence has no maintenance consequence, use action `no_change` and
+If changed evidence has no autorelease consequence, use action `no_change` and
 the key `no_change:<first 16 hexadecimal characters of the evidence manifest
 digest>` so the reviewed snapshot remains uniquely auditable.
 
@@ -53,7 +53,7 @@ action, include a `php_release_feed` JSON-pointer evidence item whose resolved
 value is the exact `releaseIntent.version`; otherwise classify the tag-only
 change as `no_change` until the official feed publishes that version.
 
-The plan `actionKey` identifies the classified maintenance action, not the
+The plan `actionKey` identifies the classified autorelease action, not the
 phase-scoped action key in the event contract. It must use one of the reviewed
 forms enforced by the output schema: `no_change`, `new_patch`, `new_branch`,
 `branch_eol`, `recipe_rebuild`, `repair`, `source_unhealthy`, `health_failed`,

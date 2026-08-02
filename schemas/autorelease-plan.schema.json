@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://bigpixelrocket.dev/schemas/maintenance-plan.schema.json",
+  "$id": "https://bigpixelrocket.dev/schemas/autorelease-plan.schema.json",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "actionKey", "action", "agentContract", "evidence", "researchSources", "repositories", "preconditions", "editsRequired", "allowedPaths", "requiredChecks", "releaseIntent", "agentOperations", "budgets", "notification", "risk", "completionAssessment", "summary"],

@@ -1,4 +1,4 @@
-name: Maintenance end to end
+name: Autorelease end to end
 
 on:
   workflow_dispatch:
@@ -26,7 +26,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: maintenance-e2e-${{ inputs.suite }}
+  group: autorelease-e2e-${{ inputs.suite }}
   cancel-in-progress: false
 
 jobs:
@@ -44,8 +44,8 @@ jobs:
         working-directory: control
         run: |
           # This reviewed pin detects workflow edits that omit the corresponding pin update.
-          expected="$(jq -r '.workflows[".github/workflows/maintenance-e2e.yml"]' .github/maintenance-pins.json)"
-          actual="sha256:$(shasum -a 256 .github/workflows/maintenance-e2e.yml | awk '{print $1}')"
+          expected="$(jq -r '.workflows[".github/workflows/autorelease-e2e.yml"]' .github/autorelease-pins.json)"
+          actual="sha256:$(shasum -a 256 .github/workflows/autorelease-e2e.yml | awk '{print $1}')"
           test "$actual" = "$expected"
       - name: Checkout exact php-bin commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -76,7 +76,7 @@ jobs:
           test -z "${GITHUB_TOKEN:-}"
       - name: Run stable cross-repository verifier
         run: |
-          ./php-bin/scripts/verify-maintenance-system \
+          ./php-bin/scripts/verify-autorelease-system \
             --mise-repo ./mise-php \
             --php-bin-sha "${{ inputs.php_bin_sha }}" \
             --mise-php-sha "${{ inputs.mise_php_sha }}" \
@@ -85,7 +85,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: maintenance-production-parity-${{ github.run_id }}
+          name: autorelease-production-parity-${{ github.run_id }}
           path: verification-results/
           if-no-files-found: error
           retention-days: 90
@@ -95,7 +95,7 @@ jobs:
     if: inputs.suite == 'agent-canary'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    environment: php-maintenance-agent-canary
+    environment: php-autorelease-canary
     permissions:
       contents: read
     steps:
@@ -152,7 +152,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: maintenance-agent-canary-${{ github.run_id }}
+          name: autorelease-agent-canary-${{ github.run_id }}
           path: canary/
           if-no-files-found: error
           retention-days: 90
@@ -178,23 +178,23 @@ jobs:
           jq -n --arg actionKey "$action_key" \
             '{actionKey:$actionKey,state:"detected",severity:"info",summary:"Harmless notification delivery canary."}' \
             > canary/event.json
-          ./scripts/notify-maintenance --event canary/event.json --state canary/state.json --output canary/next.json \
-            --backend github --repo "${{ github.repository }}" --owner "${{ vars.MAINTENANCE_OWNER }}"
+          ./scripts/notify-autorelease --event canary/event.json --state canary/state.json --output canary/next.json \
+            --backend github --repo "${{ github.repository }}" --owner "${{ vars.AUTORELEASE_OWNER }}"
           mv canary/next.json canary/state.json
-          ./scripts/notify-maintenance --event canary/event.json --state canary/state.json --output canary/replay.json \
-            --backend github --repo "${{ github.repository }}" --owner "${{ vars.MAINTENANCE_OWNER }}"
+          ./scripts/notify-autorelease --event canary/event.json --state canary/state.json --output canary/replay.json \
+            --backend github --repo "${{ github.repository }}" --owner "${{ vars.AUTORELEASE_OWNER }}"
           test "$(jq -r .lastAction canary/replay.json)" = "none"
           jq '.state="php_bin_ready"' canary/event.json > canary/transition.json
-          ./scripts/notify-maintenance --event canary/transition.json --state canary/state.json --output canary/next.json \
-            --backend github --repo "${{ github.repository }}" --owner "${{ vars.MAINTENANCE_OWNER }}"
+          ./scripts/notify-autorelease --event canary/transition.json --state canary/state.json --output canary/next.json \
+            --backend github --repo "${{ github.repository }}" --owner "${{ vars.AUTORELEASE_OWNER }}"
           mv canary/next.json canary/state.json
           jq '.state="complete" | .finalResult="passed"' canary/event.json > canary/complete.json
-          ./scripts/notify-maintenance --event canary/complete.json --state canary/state.json --output canary/closed.json \
-            --backend github --repo "${{ github.repository }}" --owner "${{ vars.MAINTENANCE_OWNER }}"
+          ./scripts/notify-autorelease --event canary/complete.json --state canary/state.json --output canary/closed.json \
+            --backend github --repo "${{ github.repository }}" --owner "${{ vars.AUTORELEASE_OWNER }}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: maintenance-notification-canary-${{ github.run_id }}
+          name: autorelease-notification-canary-${{ github.run_id }}
           path: canary/
           if-no-files-found: error
           retention-days: 90
@@ -203,7 +203,7 @@ jobs:
     if: inputs.suite == 'live-canary'
     runs-on: macos-26
     timeout-minutes: 20
-    environment: php-maintenance-release
+    environment: php-autorelease-publish
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

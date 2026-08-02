@@ -1,7 +1,7 @@
 # Repository settings
 
 The plan executor installs these settings with
-`scripts/configure-github-maintenance` and verifies them with
+`scripts/configure-github-autorelease` and verifies them with
 `scripts/snapshot-github-admin-state`. Snapshots contain secret names, never
 secret values.
 
@@ -11,8 +11,8 @@ Required repository state:
 - Require the `Script checks` status check.
 - Require the base-controlled `Protected controls` status check. It passes
   automatically for unprotected generated paths and requires an exact-head
-  `loadinglucian` approval for paths in `maintenance/protected-paths.json`.
-  The sole deterministic exception is `maintenance-state/last-evidence.json`:
+  `loadinglucian` approval for paths in `autorelease/protected-paths.json`.
+  The sole deterministic exception is `autorelease-state/last-evidence.json`:
   a same-repository `github-actions[bot]` PR may pass only when it is a direct
   child of the current base, is tied to the still-running protected watcher,
   changes exactly that file, and the record has the reviewed healthy-capture
@@ -43,9 +43,9 @@ Required repository state:
 - Allow GitHub-owned Actions plus only `openai/codex-action` and
   `jdx/mise-action`, and require every Action reference to use a full commit
   SHA.
-- Create the protected `php-maintenance-release` environment, limited to
+- Create the protected `php-autorelease-publish` environment, limited to
   protected branches, and disable administrator bypass.
-- Create the protected `php-maintenance-agent-canary` environment with the
+- Create the protected `php-autorelease-canary` environment with the
   same protected-branch-only policy and disabled administrator bypass.
 - Enable Dependabot security updates, provider-pattern secret scanning, and
   secret-scanning push protection. Request validity checks and non-provider
@@ -53,9 +53,9 @@ Required repository state:
   organization has GitHub Secret Protection.
 - Enable GitHub immutable releases so future published tags and assets cannot
   be moved, replaced, or deleted.
-- Set `MAINTENANCE_OWNER=loadinglucian`.
+- Set `AUTORELEASE_OWNER=loadinglucian`.
 - Keep distinct repository-scoped `OPENAI_API_KEY` secrets.
-- Keep the `maintenance` and `attention-required` labels.
+- Keep the `autorelease` and `attention-required` labels.
 
 CODEOWNERS covers prompts, contracts, workflows, policy invariants, authority
 controls, and release code. Deterministic event/state records and admitted
@@ -71,7 +71,7 @@ The normal verification commands are:
   --repo bigpixelrocket/php-bin \
   --output docs/admin-state/php-bin.json
 
-./scripts/configure-github-maintenance \
+./scripts/configure-github-autorelease \
   --repo bigpixelrocket/php-bin \
   --owner loadinglucian \
   --required-check "Script checks"

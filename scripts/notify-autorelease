@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deduplicate maintenance issue creation and transition comments."""
+"""Deduplicate autorelease issue creation and transition comments."""
 
 import argparse
 import json
@@ -9,7 +9,7 @@ import sys
 import re
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from maintenance.control import (  # noqa: E402
+from autorelease.control import (  # noqa: E402
     ControlError,
     load_json,
     notification_decision,
@@ -30,7 +30,7 @@ def gh(*arguments: str) -> str:
 
 
 def find_issue(repo: str, action_key: str) -> dict | None:
-    marker = f"<!-- maintenance-action-key:{action_key} -->"
+    marker = f"<!-- autorelease-action-key:{action_key} -->"
     issues = json.loads(
         gh(
             "issue",
@@ -67,7 +67,7 @@ def discover_github_prior(repo: str, action_key: str) -> dict | None:
     fingerprints = [
         match.group(1)
         for body in bodies
-        for match in re.finditer(r"<!-- maintenance-fingerprint:(sha256:[0-9a-f]{64}) -->", body)
+        for match in re.finditer(r"<!-- autorelease-fingerprint:(sha256:[0-9a-f]{64}) -->", body)
     ]
     return {
         "fingerprint": fingerprints[-1] if fingerprints else None,
@@ -77,10 +77,10 @@ def discover_github_prior(repo: str, action_key: str) -> dict | None:
 
 def apply_github(repo: str, owner: str, event: dict, decision: dict, prior: dict | None) -> dict:
     action_key = event["actionKey"]
-    marker = f"<!-- maintenance-action-key:{action_key} -->"
-    summary = event.get("summary", f"Maintenance event {action_key} entered {event.get('state')}.")
-    fingerprint_marker = f"<!-- maintenance-fingerprint:{decision['fingerprint']} -->"
-    body = f"{marker}\n{fingerprint_marker}\n\n# PHP maintenance event\n\n{summary}\n"
+    marker = f"<!-- autorelease-action-key:{action_key} -->"
+    summary = event.get("summary", f"Autorelease event {action_key} entered {event.get('state')}.")
+    fingerprint_marker = f"<!-- autorelease-fingerprint:{decision['fingerprint']} -->"
+    body = f"{marker}\n{fingerprint_marker}\n\n# PHP autorelease event\n\n{summary}\n"
     comment = (
         f"{fingerprint_marker}\n\nState: `{event.get('state')}`\n\n{summary}\n\n"
         f"Transition fingerprint: `{decision['fingerprint']}`"
@@ -99,7 +99,7 @@ def apply_github(repo: str, owner: str, event: dict, decision: dict, prior: dict
             "--repo",
             repo,
             "--title",
-            f"[maintenance] {action_key}",
+            f"[autorelease] {action_key}",
             "--body",
             body,
             "--assignee",
@@ -141,7 +141,7 @@ def main() -> int:
         issue = {}
         if args.backend == "github" and decision["action"] != "none":
             if not args.owner:
-                raise ControlError("MAINTENANCE_OWNER is required")
+                raise ControlError("AUTORELEASE_OWNER is required")
             issue = apply_github(args.repo, args.owner, event, decision, prior)
         updated = {
             "schemaVersion": 1,

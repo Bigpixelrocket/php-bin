@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "patterns": [
+    ".github/codex/autorelease/**",
+    ".github/codex-action-contract.json",
+    ".github/autorelease-operator.json",
+    ".github/autorelease-pins.json",
+    ".github/workflows/**",
+    ".codex/**",
+    "schemas/**",
+    "autorelease/**",
+    "scripts/admit-autorelease-plan",
+    "scripts/capture-autorelease-evidence",
+    "scripts/configure-github-autorelease",
+    "scripts/dispatch-pr-checks",
+    "scripts/autorelease-event",
+    "scripts/notify-autorelease",
+    "scripts/prepare-agent-task",
+    "scripts/seal-autorelease-patch",
+    "scripts/snapshot-github-admin-state",
+    "scripts/validate-autorelease-archive",
+    "scripts/validate-codex-action-inputs",
+    "scripts/validate-structured-output-schemas",
+    "scripts/verify-merge-admission",
+    "scripts/publish-release",
+    "scripts/watch-autorelease-evidence",
+    "autorelease-events/**",
+    "autorelease-state/**",
+    ".github/CODEOWNERS"
+  ]
+}
