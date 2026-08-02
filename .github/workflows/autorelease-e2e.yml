@@ -40,18 +40,31 @@ jobs:
     outputs:
       php_bin_sha: ${{ steps.validated.outputs.php_bin_sha }}
       mise_php_sha: ${{ steps.validated.outputs.mise_php_sha }}
+      live_version: ${{ steps.validated.outputs.live_version }}
     steps:
       - name: Enforce exact input shapes
         id: validated
         env:
           PHP_BIN_SHA: ${{ inputs.php_bin_sha }}
           MISE_PHP_SHA: ${{ inputs.mise_php_sha }}
+          SUITE: ${{ inputs.suite }}
+          LIVE_VERSION: ${{ inputs.live_version }}
         run: |
           [[ "$PHP_BIN_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$MISE_PHP_SHA" =~ ^[0-9a-f]{40}$ ]]
+          # live_version is optional and only meaningful for live-canary, so it is
+          # shaped for that suite and republished empty for every other one. The
+          # blanking matters: an unshaped value reaching $GITHUB_OUTPUT could set
+          # arbitrary outputs.
+          if [[ "$SUITE" == "live-canary" ]]; then
+            [[ "$LIVE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]
+          else
+            LIVE_VERSION=
+          fi
           {
             echo "php_bin_sha=$PHP_BIN_SHA"
             echo "mise_php_sha=$MISE_PHP_SHA"
+            echo "live_version=$LIVE_VERSION"
           } >> "$GITHUB_OUTPUT"
 
   production-parity:
@@ -244,9 +257,8 @@ jobs:
       - uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4
       - name: Verify exact and branch-shorthand public installs
         env:
-          LIVE_VERSION: ${{ inputs.live_version }}
+          LIVE_VERSION: ${{ needs.preflight.outputs.live_version }}
         run: |
-          [[ "$LIVE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]
           branch="$LIVE_VERSION"
           branch="${branch%%-*}"
           branch="${branch%.*}"
