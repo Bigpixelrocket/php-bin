@@ -7,6 +7,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 
 
 def gh(*arguments: str, input_value: dict | None = None) -> str:
@@ -45,6 +46,16 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--repo", required=True)
 parser.add_argument("--owner", required=True)
 parser.add_argument("--required-check", required=True)
+# Environments are GitHub configuration rather than repository files, so a
+# source-only rename cannot move them. Naming each one at the call site keeps
+# the provisioned set and the reviewed docs/admin-state snapshot in step.
+parser.add_argument(
+    "--environment",
+    action="append",
+    required=True,
+    metavar="NAME",
+    help="Protected environment to create. Repeat once per environment.",
+)
 args = parser.parse_args()
 
 try:
@@ -116,24 +127,28 @@ try:
     gh("variable", "set", "AUTORELEASE_OWNER", "--repo", args.repo, "--body", args.owner)
     ensure_label(args.repo, "autorelease", "1d76db", "Autorelease event")
     ensure_label(args.repo, "attention-required", "d73a4a", "Owner action is required")
-    environment = json.loads(gh(
-        "api",
-        f"repos/{args.repo}/environments/php-autorelease-publish",
-        "--method",
-        "PUT",
-        input_value={
-            "wait_timer": 0,
-            "prevent_self_review": False,
-            "reviewers": [],
-            "can_admins_bypass": False,
-            "deployment_branch_policy": {
-                "protected_branches": True,
-                "custom_branch_policies": False,
+    for environment_name in args.environment:
+        environment = json.loads(gh(
+            "api",
+            # A name may contain a slash, which must stay one path segment.
+            f"repos/{args.repo}/environments/{urllib.parse.quote(environment_name, safe='')}",
+            "--method",
+            "PUT",
+            input_value={
+                "wait_timer": 0,
+                "prevent_self_review": False,
+                "reviewers": [],
+                "can_admins_bypass": False,
+                "deployment_branch_policy": {
+                    "protected_branches": True,
+                    "custom_branch_policies": False,
+                },
             },
-        },
-    ))
-    if environment.get("can_admins_bypass") is not False:
-        raise RuntimeError("GitHub did not disable administrator environment bypass")
+        ))
+        if environment.get("can_admins_bypass") is not False:
+            raise RuntimeError(
+                f"GitHub did not disable administrator environment bypass for {environment_name}"
+            )
     protection = {
         "required_status_checks": {
             "strict": True,
@@ -172,6 +187,7 @@ try:
                 "repo": args.repo,
                 "owner": args.owner,
                 "requiredCheck": args.required_check,
+                "environments": args.environment,
                 "unavailableSecurityFeatures": unavailable_security,
             }
         )
