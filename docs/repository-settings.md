@@ -74,5 +74,7 @@ The normal verification commands are:
 ./scripts/configure-github-autorelease \
   --repo bigpixelrocket/php-bin \
   --owner loadinglucian \
-  --required-check "Script checks"
+  --required-check "Script checks" \
+  --environment php-autorelease-publish \
+  --environment php-autorelease-canary
 ```
