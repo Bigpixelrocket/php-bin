@@ -71,49 +71,49 @@
     },
     "url": "https://api.github.com/repos/Bigpixelrocket/php-bin/branches/main/protection"
   },
-  "capturedAt": "2026-07-28T13:05:02Z",
+  "capturedAt": "2026-08-02T19:49:18Z",
   "environments": {
     "environments": [
       {
         "can_admins_bypass": false,
-        "created_at": "2026-07-28T09:02:31Z",
+        "created_at": "2026-08-02T18:10:24Z",
         "deployment_branch_policy": {
           "custom_branch_policies": false,
           "protected_branches": true
         },
         "html_url": "https://github.com/Bigpixelrocket/php-bin/deployments/activity_log?environments_filter=php-autorelease-canary",
-        "id": 18869369898,
+        "id": 19167744812,
         "name": "php-autorelease-canary",
-        "node_id": "EN_kwDOTj2wQ88AAAAEZLO8Kg",
+        "node_id": "EN_kwDOTj2wQ88AAAAEdnyTLA",
         "protection_rules": [
           {
-            "id": 61095875,
-            "node_id": "GA_kwDOTj2wQ84DpD_D",
+            "id": 61573670,
+            "node_id": "GA_kwDOTj2wQ84Dq4om",
             "type": "branch_policy"
           }
         ],
-        "updated_at": "2026-07-28T09:03:03Z",
+        "updated_at": "2026-08-02T18:10:24Z",
         "url": "https://api.github.com/repos/Bigpixelrocket/php-bin/environments/php-autorelease-canary"
       },
       {
         "can_admins_bypass": false,
-        "created_at": "2026-07-27T09:09:46Z",
+        "created_at": "2026-08-02T18:10:24Z",
         "deployment_branch_policy": {
           "custom_branch_policies": false,
           "protected_branches": true
         },
         "html_url": "https://github.com/Bigpixelrocket/php-bin/deployments/activity_log?environments_filter=php-autorelease-publish",
-        "id": 18804833478,
+        "id": 19167744598,
         "name": "php-autorelease-publish",
-        "node_id": "EN_kwDOTj2wQ88AAAAEYNr8xg",
+        "node_id": "EN_kwDOTj2wQ88AAAAEdnySVg",
         "protection_rules": [
           {
-            "id": 60997398,
-            "node_id": "GA_kwDOTj2wQ84Dor8W",
+            "id": 61573669,
+            "node_id": "GA_kwDOTj2wQ84Dq4ol",
             "type": "branch_policy"
           }
         ],
-        "updated_at": "2026-07-27T10:09:17Z",
+        "updated_at": "2026-08-02T18:10:24Z",
         "url": "https://api.github.com/repos/Bigpixelrocket/php-bin/environments/php-autorelease-publish"
       }
     ],
@@ -125,6 +125,7 @@
   },
   "labels": [
     "attention-required",
+    "autorelease",
     "bug",
     "dependencies",
     "documentation",
@@ -134,11 +135,10 @@
     "good first issue",
     "help wanted",
     "invalid",
-    "autorelease",
     "question",
     "wontfix"
   ],
-  "repository": "Bigpixelrocket/php-bin",
+  "repository": "bigpixelrocket/php-bin",
   "repositorySettings": {
     "allow_auto_merge": true,
     "allow_merge_commit": false,
@@ -182,7 +182,7 @@
     ],
     "verified_allowed": false
   },
-  "snapshotDigest": "sha256:3d0ed7f751c408e71033bdc593f7eeba2161470658277281d1c409a7b0572797",
+  "snapshotDigest": "sha256:56d971907683b94fb733a18d2ebbbd2b001b73b3c76a06a8c54f058656d9ed54",
   "variables": [
     "AUTORELEASE_OWNER"
   ],
