@@ -7,6 +7,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 
 
 def gh(*arguments: str, input_value: dict | None = None) -> str:
@@ -129,7 +130,8 @@ try:
     for environment_name in args.environment:
         environment = json.loads(gh(
             "api",
-            f"repos/{args.repo}/environments/{environment_name}",
+            # A name may contain a slash, which must stay one path segment.
+            f"repos/{args.repo}/environments/{urllib.parse.quote(environment_name, safe='')}",
             "--method",
             "PUT",
             input_value={
