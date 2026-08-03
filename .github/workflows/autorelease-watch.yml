@@ -19,12 +19,13 @@ jobs:
     timeout-minutes: 30
     outputs:
       trigger: ${{ steps.decision.outputs.trigger }}
-      # A deterministic decision carries its own action and key because it never calls
-      # the model, so the plan step that usually publishes them is skipped.
-      action_key: ${{ steps.plan.outputs.action_key || steps.decision.outputs.action_key }}
+      action_key: ${{ steps.plan.outputs.action_key }}
       edits_required: ${{ steps.plan.outputs.edits_required }}
       base_sha: ${{ steps.plan.outputs.base_sha }}
-      action: ${{ steps.plan.outputs.action || steps.decision.outputs.action }}
+      action: ${{ steps.plan.outputs.action }}
+      # Recovery is decided deterministically and runs beside the admitted plan, so it
+      # carries its own key rather than competing for the plan's.
+      record_action_key: ${{ steps.decision.outputs.action_key }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -52,7 +53,6 @@ jobs:
           {
             echo "trigger=$(jq -r .trigger autorelease-run/watch-decision.json)"
             echo "model_call=$(jq -r .modelCall autorelease-run/watch-decision.json)"
-            echo "action=$(jq -r .action autorelease-run/watch-decision.json)"
             echo "action_key=$(jq -r .actionKey autorelease-run/watch-decision.json)"
           } >> "$GITHUB_OUTPUT"
       - name: Record exact preconditions
@@ -147,7 +147,7 @@ jobs:
   coordinate:
     name: Dispatch admitted next phase
     needs: investigate
-    if: needs.investigate.outputs.action_key != ''
+    if: needs.investigate.outputs.action_key != '' || needs.investigate.outputs.record_action_key != ''
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -180,9 +180,125 @@ jobs:
           test "$(jq -r .unattendedMutation .github/autorelease-operator.json)" = "enabled" \
             && echo "enabled=true" >> "$GITHUB_OUTPUT" \
             || echo "enabled=false" >> "$GITHUB_OUTPUT"
+      - name: Recover the event record of a published release
+        id: recover
+        if: needs.investigate.outputs.record_action_key != ''
+        # A blocked or failing repair must never suppress the other watcher paths, so
+        # the step is allowed to fail here and is re-raised as a job failure after them.
+        continue-on-error: true
+        env:
+          ACTION_KEY: ${{ needs.investigate.outputs.record_action_key }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$(jq -r .unattendedMutation .github/autorelease-operator.json)" != "enabled" ]]; then
+            echo "Unattended mutation is paused; the missing event record is left for an operator."
+            exit 0
+          fi
+          # new_patch:8.5.9 is tag 8.5.9 and recipe_rebuild:8.5.9:2 is tag 8.5.9-2.
+          version="${ACTION_KEY#*:}"
+          version="${version/:/-}"
+          classification="${ACTION_KEY%%:*}"
+          filename="$(printf '%s' "$ACTION_KEY" | tr ':/' '--').json"
+          event="autorelease-events/$filename"
+          if [[ -f "$event" ]]; then
+            echo "The event record for $ACTION_KEY reached main after the decision was taken."
+            exit 0
+          fi
+          test "$(gh release view "$version" --repo "${{ github.repository }}" --json isDraft --jq .isDraft)" = "false"
+          test "$(gh release view "$version" --repo "${{ github.repository }}" --json isImmutable --jq .isImmutable)" = "true"
+          release_commit="$(gh api "repos/${{ github.repository }}/commits/$version" --jq .sha)"
+          [[ "$release_commit" =~ ^[0-9a-f]{40}$ ]]
+          # A hand-made release supplies both its assets and its own checksums, so the
+          # bytes are only trusted once an attestation ties them to a build of this
+          # repository, and the tag is only trusted once it is reachable from main.
+          gh release verify "$version" --repo "${{ github.repository }}" --format json \
+            > autorelease-plan-download/recovered-attestation.json
+          git merge-base --is-ancestor "$release_commit" origin/main
+          assets=autorelease-plan-download/recovered-release
+          mkdir -p "$assets"
+          gh release download "$version" --repo "${{ github.repository }}" --dir "$assets" --clobber
+          ./scripts/validate-autorelease-archive \
+            --archive "$assets/php-$version-cli-macos-aarch64.tar.gz" \
+            --version "$version"
+          archive_digest="$(shasum -a 256 "$assets/php-$version-cli-macos-aarch64.tar.gz" | awk '{print $1}')"
+          grep -Fx "$archive_digest  php-$version-cli-macos-aarch64.tar.gz" "$assets/SHA256SUMS"
+          checksums_digest="$(shasum -a 256 "$assets/SHA256SUMS" | awk '{print $1}')"
+          # The record states exactly what this run verified: the public release bytes.
+          # A fresh install is not reverifiable here, so it is never claimed as evidence.
+          jq -n \
+            --arg actionKey "$ACTION_KEY" \
+            --arg classification "$classification" \
+            --arg commit "$release_commit" \
+            --arg runId "${{ github.run_id }}" \
+            --arg evidenceManifestDigest "$(jq -r .manifestDigest autorelease-plan-download/evidence/evidence-manifest.json)" \
+            '{schemaVersion:1,actionKey:$actionKey,classification:$classification,state:"release_requested",history:[],phpBinCommit:$commit,evidenceManifestDigest:$evidenceManifestDigest,recoveredByRunId:$runId}' \
+            > autorelease-plan-download/recovered-event.json
+          jq -n \
+            --arg version "$version" \
+            --arg commit "$release_commit" \
+            --arg archive "sha256:$archive_digest" \
+            --arg checksums "sha256:$checksums_digest" \
+            --arg attestation "sha256:$(shasum -a 256 autorelease-plan-download/recovered-attestation.json | awk '{print $1}')" \
+            '[{kind:"published_immutable_release",version:$version,phpBinCommit:$commit,attestationDigest:$attestation,assetDigests:{("php-"+$version+"-cli-macos-aarch64.tar.gz"):$archive,"SHA256SUMS":$checksums}}]' \
+            > autorelease-plan-download/recovery-evidence.json
+          ./scripts/autorelease-event --event autorelease-plan-download/recovered-event.json --target released \
+            --evidence autorelease-plan-download/recovery-evidence.json \
+            --output autorelease-plan-download/recovered-event.next
+          mv autorelease-plan-download/recovered-event.next autorelease-plan-download/recovered-event.json
+          jq -n --arg version "$version" \
+            '[{kind:"public_release_bytes_reverified",version:$version,modes:["public_download"]}]' \
+            > autorelease-plan-download/recovery-evidence.json
+          ./scripts/autorelease-event --event autorelease-plan-download/recovered-event.json \
+            --target public_install_verified \
+            --evidence autorelease-plan-download/recovery-evidence.json \
+            --output autorelease-plan-download/recovered-event.next
+          mv autorelease-plan-download/recovered-event.next autorelease-plan-download/recovered-event.json
+          jq -n --arg runId "${{ github.run_id }}" '[{kind:"record_recovered_by_watcher",runId:$runId}]' \
+            > autorelease-plan-download/recovery-evidence.json
+          ./scripts/autorelease-event --event autorelease-plan-download/recovered-event.json --target complete \
+            --evidence autorelease-plan-download/recovery-evidence.json \
+            --output autorelease-plan-download/recovered-event.next
+          mv autorelease-plan-download/recovered-event.next autorelease-plan-download/recovered-event.json
+          base="$(git rev-parse HEAD)"
+          # The protected-controls exemption trusts this branch prefix from this
+          # workflow; a recovered record is filed exactly like an EOL completion.
+          branch="autorelease/eol-complete-${{ github.run_id }}"
+          git checkout -B "$branch"
+          cp autorelease-plan-download/recovered-event.json "$event"
+          git add "$event"
+          git -c user.name=autorelease-watcher -c user.email=autorelease@invalid \
+            commit -m "chore: complete $ACTION_KEY"
+          head="$(git rev-parse HEAD)"
+          digest="sha256:$(shasum -a 256 "$event" | awk '{print $1}')"
+          gh auth setup-git
+          git push origin HEAD
+          url="$(gh pr create --base main --head "$branch" --title "chore: complete $ACTION_KEY" \
+            --body "Recovered durable event record for an immutable published release.")"
+          number="${url##*/}"
+          ./scripts/dispatch-pr-checks \
+            --pr "$number" \
+            --check "Script checks" \
+            --output autorelease-plan-download/recovery-checks.json
+          ./scripts/assert-admission-checks --require-protected-controls --checks autorelease-plan-download/recovery-checks.json
+          test "$(gh pr view "$number" --json headRefOid --jq .headRefOid)" = "$head"
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$base"
+          test "$(git rev-list --parents -n 1 "$head")" = "$head $base"
+          test "$(git diff --name-only "$base" "$head")" = "$event"
+          test "sha256:$(git show "$head:$event" | shasum -a 256 | awk '{print $1}')" = "$digest"
+          gh pr merge "$number" --squash --delete-branch
+          echo "merged=true" >> "$GITHUB_OUTPUT"
+          jq --arg version "$version" \
+            '.severity="info" | .summary="The event record for the published PHP \($version) release was recovered by the watcher." | .finalResult="passed"' \
+            "$event" > autorelease-plan-download/recovery-notification.json
+          ./scripts/notify-autorelease \
+            --event autorelease-plan-download/recovery-notification.json \
+            --state autorelease-plan-download/recovery-notification-state.json \
+            --output autorelease-plan-download/recovery-notification-next.json \
+            --backend github --repo "${{ github.repository }}" --owner "${{ vars.AUTORELEASE_OWNER }}"
       - name: Prepare deterministic no-change evidence
         id: evidence
-        if: needs.investigate.outputs.action == 'no_change' && steps.operator.outputs.enabled == 'true'
+        if: needs.investigate.outputs.action == 'no_change' && steps.operator.outputs.enabled == 'true' && steps.recover.outputs.merged != 'true'
         run: |
           git checkout -B "autorelease/evidence-${{ github.run_id }}" origin/main
           mkdir -p autorelease-state
@@ -214,13 +330,30 @@ jobs:
       - name: Dispatch implementation or no-edit release
         env:
           EVIDENCE_ALREADY_RECORDED: ${{ steps.evidence.outputs.already_recorded }}
+          RECORD_ACTION_KEY: ${{ needs.investigate.outputs.record_action_key }}
+          RECOVERY_MERGED: ${{ steps.recover.outputs.merged }}
           GH_TOKEN: ${{ github.token }}
         run: |
           if [[ "$(jq -r .unattendedMutation .github/autorelease-operator.json)" != "enabled" ]]; then
             echo "Unattended mutation is paused; retained investigation remains read-only."
             exit 0
           fi
+          if [[ -n "$RECORD_ACTION_KEY" ]]; then
+            # A recovery attempt can leave the checkout on its own branch, and every
+            # path below measures its write against main.
+            git checkout -f main
+          fi
           action="${{ needs.investigate.outputs.action }}"
+          if [[ -z "$action" || "$action" == "none" ]]; then
+            echo "The run carries no admitted plan to dispatch."
+            exit 0
+          fi
+          if [[ "$RECOVERY_MERGED" == "true" && ( "$action" == "no_change" || "$action" == "branch_eol" ) ]]; then
+            # Both writes assert an untouched base, and the recovered record has just
+            # moved it; the next run replays this one against the new main.
+            echo "A recovered event record landed on main this run, so the $action write waits for the next run."
+            exit 0
+          fi
           if [[ "$action" == "no_change" && "$EVIDENCE_ALREADY_RECORDED" == "true" ]]; then
             echo "The exact deterministic evidence state is already recorded."
             exit 0
@@ -290,99 +423,6 @@ jobs:
             test "sha256:$(git show "$head:autorelease-state/last-evidence.json" | shasum -a 256 | awk '{print $1}')" = "$record_digest"
             gh pr merge "$number" --squash --delete-branch
             exit 0
-          elif [[ "$action" == "record_completed_event" ]]; then
-            action_key="${{ needs.investigate.outputs.action_key }}"
-            # new_patch:8.5.9 is tag 8.5.9 and recipe_rebuild:8.5.9:2 is tag 8.5.9-2.
-            version="${action_key#*:}"
-            version="${version/:/-}"
-            classification="${action_key%%:*}"
-            filename="$(printf '%s' "$action_key" | tr ':/' '--').json"
-            event="autorelease-events/$filename"
-            test ! -f "$event"
-            test "$(gh release view "$version" --repo "${{ github.repository }}" --json isDraft --jq .isDraft)" = "false"
-            test "$(gh release view "$version" --repo "${{ github.repository }}" --json isImmutable --jq .isImmutable)" = "true"
-            assets=autorelease-plan-download/recovered-release
-            mkdir -p "$assets"
-            gh release download "$version" --repo "${{ github.repository }}" --dir "$assets" --clobber
-            ./scripts/validate-autorelease-archive \
-              --archive "$assets/php-$version-cli-macos-aarch64.tar.gz" \
-              --version "$version"
-            archive_digest="$(shasum -a 256 "$assets/php-$version-cli-macos-aarch64.tar.gz" | awk '{print $1}')"
-            grep -Fx "$archive_digest  php-$version-cli-macos-aarch64.tar.gz" "$assets/SHA256SUMS"
-            checksums_digest="$(shasum -a 256 "$assets/SHA256SUMS" | awk '{print $1}')"
-            release_commit="$(gh api "repos/${{ github.repository }}/commits/$version" --jq .sha)"
-            [[ "$release_commit" =~ ^[0-9a-f]{40}$ ]]
-            # The record states exactly what this run verified: the public release bytes.
-            # A fresh install is not reverifiable here, so it is never claimed as evidence.
-            jq -n \
-              --arg actionKey "$action_key" \
-              --arg classification "$classification" \
-              --arg commit "$release_commit" \
-              --arg runId "${{ github.run_id }}" \
-              --arg evidenceManifestDigest "$(jq -r .manifestDigest autorelease-plan-download/evidence/evidence-manifest.json)" \
-              '{schemaVersion:1,actionKey:$actionKey,classification:$classification,state:"release_requested",history:[],phpBinCommit:$commit,evidenceManifestDigest:$evidenceManifestDigest,recoveredByRunId:$runId}' \
-              > autorelease-plan-download/recovered-event.json
-            jq -n \
-              --arg version "$version" \
-              --arg archive "sha256:$archive_digest" \
-              --arg checksums "sha256:$checksums_digest" \
-              '[{kind:"published_immutable_release",version:$version,assetDigests:{("php-"+$version+"-cli-macos-aarch64.tar.gz"):$archive,"SHA256SUMS":$checksums}}]' \
-              > autorelease-plan-download/recovery-evidence.json
-            ./scripts/autorelease-event --event autorelease-plan-download/recovered-event.json --target released \
-              --evidence autorelease-plan-download/recovery-evidence.json \
-              --output autorelease-plan-download/recovered-event.next
-            mv autorelease-plan-download/recovered-event.next autorelease-plan-download/recovered-event.json
-            jq -n --arg version "$version" \
-              '[{kind:"public_release_bytes_reverified",version:$version,modes:["public_download"]}]' \
-              > autorelease-plan-download/recovery-evidence.json
-            ./scripts/autorelease-event --event autorelease-plan-download/recovered-event.json \
-              --target public_install_verified \
-              --evidence autorelease-plan-download/recovery-evidence.json \
-              --output autorelease-plan-download/recovered-event.next
-            mv autorelease-plan-download/recovered-event.next autorelease-plan-download/recovered-event.json
-            jq -n --arg runId "${{ github.run_id }}" '[{kind:"record_recovered_by_watcher",runId:$runId}]' \
-              > autorelease-plan-download/recovery-evidence.json
-            ./scripts/autorelease-event --event autorelease-plan-download/recovered-event.json --target complete \
-              --evidence autorelease-plan-download/recovery-evidence.json \
-              --output autorelease-plan-download/recovered-event.next
-            mv autorelease-plan-download/recovered-event.next autorelease-plan-download/recovered-event.json
-            base="$(git rev-parse HEAD)"
-            # The protected-controls exemption trusts this branch prefix from this
-            # workflow; a recovered record is filed exactly like an EOL completion.
-            branch="autorelease/eol-complete-${{ github.run_id }}"
-            git checkout -B "$branch"
-            cp autorelease-plan-download/recovered-event.json "$event"
-            git add "$event"
-            git -c user.name=autorelease-watcher -c user.email=autorelease@invalid \
-              commit -m "chore: complete $action_key"
-            head="$(git rev-parse HEAD)"
-            digest="sha256:$(shasum -a 256 "$event" | awk '{print $1}')"
-            gh auth setup-git
-            git push origin HEAD
-            url="$(gh pr create --base main --head "$branch" --title "chore: complete $action_key" \
-              --body "Recovered durable event record for an immutable published release.")"
-            number="${url##*/}"
-            ./scripts/dispatch-pr-checks \
-              --pr "$number" \
-              --check "Script checks" \
-              --output autorelease-plan-download/recovery-checks.json
-            ./scripts/assert-admission-checks --require-protected-controls --checks autorelease-plan-download/recovery-checks.json
-            test "$(gh pr view "$number" --json headRefOid --jq .headRefOid)" = "$head"
-            git fetch origin main
-            test "$(git rev-parse origin/main)" = "$base"
-            test "$(git rev-list --parents -n 1 "$head")" = "$head $base"
-            test "$(git diff --name-only "$base" "$head")" = "$event"
-            test "sha256:$(git show "$head:$event" | shasum -a 256 | awk '{print $1}')" = "$digest"
-            gh pr merge "$number" --squash --delete-branch
-            jq --arg version "$version" \
-              '.severity="info" | .summary="The event record for the published PHP \($version) release was recovered by the watcher." | .finalResult="passed"' \
-              "$event" > autorelease-plan-download/recovery-notification.json
-            ./scripts/notify-autorelease \
-              --event autorelease-plan-download/recovery-notification.json \
-              --state autorelease-plan-download/recovery-notification-state.json \
-              --output autorelease-plan-download/recovery-notification-next.json \
-              --backend github --repo "${{ github.repository }}" --owner "${{ vars.AUTORELEASE_OWNER }}"
-            exit 0
           elif [[ "${{ needs.investigate.outputs.edits_required }}" == "true" ]]; then
             gh workflow run autorelease-implement.yml \
               --repo "${{ github.repository }}" \
@@ -391,6 +431,12 @@ jobs:
               -f exact_base_sha="${{ needs.investigate.outputs.base_sha }}" \
               -f phase=implementation
           elif [[ "$action" == "new_patch" || "$action" == "new_branch" || "$action" == "reconcile_partial" ]]; then
+            if [[ "${{ needs.investigate.outputs.action_key }}" == "$RECORD_ACTION_KEY" ]]; then
+              # The completed-action ledger the plan was admitted against is exactly the
+              # one missing this record, so the release it selects is already public.
+              echo "The selected action is already published and its record is being recovered."
+              exit 0
+            fi
             if [[ "$action" == "new_branch" ]]; then
               filename="$(printf '%s' "${{ needs.investigate.outputs.action_key }}" | tr ':/' '--').json"
               if ! gh api "repos/bigpixelrocket/mise-php/contents/readiness/$filename?ref=main" >/dev/null 2>&1; then
@@ -474,6 +520,13 @@ jobs:
           else
             echo "Action $action requires repository readiness before release." >&2
           fi
+      - name: Report an unrecovered event record
+        # Raised last so the failure reaches the owner without having blocked the
+        # reconciliation, lifecycle, and selection paths of the same run.
+        if: steps.recover.outcome == 'failure'
+        run: |
+          echo "Recovering the event record for ${{ needs.investigate.outputs.record_action_key }} failed." >&2
+          exit 1
 
   notify-failure:
     name: Notify actionable watcher failure
