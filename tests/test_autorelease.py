@@ -515,9 +515,15 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertEqual("none", route()["route"])
         self.assertEqual("no_admitted_plan", route(action="none")["reason"])
         self.assertEqual(
-            "eol_completion_deferred_by_recovery",
+            "record_write_deferred_by_recovery",
             route(action="branch_eol", recoveryMerged=True)["reason"],
         )
+        # A recovery merge moves main mid-run, so the no-change evidence record — which
+        # also commits against an untouched base — waits for the next scheduled run
+        # rather than wedging the evidence PR against a base the exemption cannot match.
+        deferred_no_change = route(action="no_change", recoveryMerged=True)
+        self.assertEqual("none", deferred_no_change["route"])
+        self.assertEqual("record_write_deferred_by_recovery", deferred_no_change["reason"])
         self.assertEqual(
             "evidence_state_already_recorded",
             route(action="no_change", evidenceAlreadyRecorded=True)["reason"],

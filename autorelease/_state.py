@@ -326,9 +326,9 @@ def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:
         return routed("none", "no_admitted_plan")
     if action == WATCH_RECOVERY_ACTION:
         return routed("none", "recovery_routed_by_recovery_route")
-    if recovery_merged and action == "branch_eol":
-        # The completion asserts an untouched base, which the recovered record just moved.
-        return routed("none", "eol_completion_deferred_by_recovery")
+    if recovery_merged and action in {"branch_eol", "no_change"}:
+        # Both routes commit against an untouched base, which the recovered record just moved.
+        return routed("none", "record_write_deferred_by_recovery")
     if action == "no_change" and evidence_recorded:
         return routed("none", "evidence_state_already_recorded")
     if action in {"blocked", "needs_human"}:
