@@ -20,6 +20,7 @@ from typing import Any, Callable
 
 from autorelease.control import (
     ControlError,
+    action_filename,
     audit_reconstruction,
     canonical_json,
     instruction_digest,
@@ -563,8 +564,43 @@ class Verifier:
             {"ready": True, "commit": "b" * 40, "repo": "mise-php"},
         ]
         result = verify_merge(repo, head, manifest, checks, preconditions, preconditions, readiness)
+        # php-bin files an event record under a name derived from the action key and
+        # mise-php reads that record back by the same derivation. A disagreement on any
+        # key form leaves one repository waiting on a file the other never wrote. This
+        # goes through mise-php's own entry point rather than its source text, so a
+        # differently written mapping that behaves identically still passes.
+        # One fixture per form both alphabets admit; a new form belongs here.
+        action_keys = [
+            "new_patch:8.5.9",
+            "new_branch:8.6",
+            "branch_eol:8.2:2026-12-31",
+            "recipe_rebuild:8.5.9:2",
+            "repair:8.5.9:deadbeef",
+            "source_unhealthy:deadbeef",
+            "health_failed:deadbeef",
+            "policy_failure:deadbeef",
+            "auth_failure:deadbeef",
+        ]
+        for action_key in action_keys:
+            mise_name = run(
+                "./scripts/consume-php-policy", "action-filename", action_key, cwd=self.mise_root
+            ).stdout.strip()
+            assert_true(
+                mise_name == action_filename(action_key),
+                f"mise-php names {action_key} {mise_name}, php-bin names it {action_filename(action_key)}",
+            )
+        # The one asymmetry is deliberate: a quiet run files no event record, so mise-php
+        # refuses to name a file for it rather than inventing one it will never read.
+        quiet = run(
+            "./scripts/consume-php-policy", "action-filename", "no_change:0123456789abcdef",
+            cwd=self.mise_root, check=False,
+        )
+        assert_true(quiet.returncode != 0, "mise-php names a record file for a quiet run")
         (directory / "coordination.json").write_bytes(canonical_json(result))
-        return ["coordination.json"]
+        (directory / "action-filenames.json").write_bytes(
+            canonical_json({key: action_filename(key) for key in action_keys})
+        )
+        return ["coordination.json", "action-filenames.json"]
 
     def a10(self, directory: pathlib.Path) -> list[str]:
         releases = (self.mise_root / "lib/releases.lua").read_text()
