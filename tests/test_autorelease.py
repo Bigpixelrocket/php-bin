@@ -738,6 +738,81 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertIn("release-transaction-state-${{ github.run_id }}", release)
         self.assertIn("jq -r .released release-state/transaction-state.json", release)
 
+    def test_the_jq_built_recovery_record_validates_as_a_completed_event(self):
+        # The recovery record is assembled by four `jq -n` programs in the watcher and
+        # was only ever judged by the protected-controls evaluator at merge time, so a
+        # field drifting out of one of those programs surfaced as a wedged PR on a live
+        # run rather than as a failing test. The programs are asserted to still be the
+        # workflow's own text and then run for real, so this test moves with the
+        # workflow or fails.
+        root = pathlib.Path(__file__).resolve().parents[1]
+        watcher = (root / ".github/workflows/autorelease-watch.yml").read_text()
+        recovery = watcher[
+            watcher.index("- name: Recover the event record of a published release"):
+            watcher.index("- name: Prepare deterministic no-change evidence")
+        ]
+        record_program = (
+            '{schemaVersion:1,actionKey:$actionKey,classification:$classification,'
+            'state:"release_requested",history:[],phpBinCommit:$commit,'
+            'evidenceManifestDigest:$evidenceManifestDigest,recoveredByRunId:$runId}'
+        )
+        released_program = (
+            '[{kind:"published_immutable_release",version:$version,phpBinCommit:$commit,'
+            'attestationDigest:$attestation,assetDigests:'
+            '{("php-"+$version+"-cli-macos-aarch64.tar.gz"):$archive,"SHA256SUMS":$checksums}}]'
+        )
+        verified_program = '[{kind:"public_release_bytes_reverified",version:$version,modes:["public_download"]}]'
+        complete_program = '[{kind:"record_recovered_by_watcher",runId:$runId}]'
+        for program in (record_program, released_program, verified_program, complete_program):
+            self.assertIn(program, recovery)
+
+        def jq(program, **args):
+            argv = ["jq", "-n"]
+            for name, value in args.items():
+                argv += ["--arg", name, value]
+            return subprocess.run(argv + [program], capture_output=True, text=True, check=True).stdout
+
+        version = "8.5.9"
+        commit = "c" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            work = pathlib.Path(temporary)
+            event = work / "recovered-event.json"
+            evidence = work / "recovery-evidence.json"
+            output = work / "recovered-event.next"
+            event.write_text(
+                jq(
+                    record_program,
+                    actionKey=f"new_patch:{version}",
+                    classification="new_patch",
+                    commit=commit,
+                    runId="4242",
+                    evidenceManifestDigest="sha256:" + "d" * 64,
+                )
+            )
+            transitions = (
+                ("released", lambda: jq(
+                    released_program,
+                    version=version,
+                    commit=commit,
+                    archive="sha256:" + "a" * 64,
+                    checksums="sha256:" + "b" * 64,
+                    attestation="sha256:" + "e" * 64,
+                )),
+                ("public_install_verified", lambda: jq(verified_program, version=version)),
+                ("complete", lambda: jq(complete_program, runId="4242")),
+            )
+            for target, build in transitions:
+                self.assertIn(f"--target {target}", recovery)
+                evidence.write_text(build())
+                subprocess.run(
+                    [str(root / "scripts/autorelease-event"),
+                     "--event", str(event), "--target", target,
+                     "--evidence", str(evidence), "--output", str(output)],
+                    capture_output=True, check=True,
+                )
+                output.replace(event)
+            validate_completed_event_record(json.loads(event.read_text()))
+
     def test_assert_admission_checks(self):
         script = str(pathlib.Path(__file__).resolve().parents[1] / "scripts/assert-admission-checks")
         ok = [{"name": "Script checks", "bucket": "pass"},
