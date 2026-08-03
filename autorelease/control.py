@@ -55,6 +55,9 @@ EVIDENCE_CAPTURE_IDS = {
 }
 RUNTIME_PLAN_EVIDENCE_IDS = {"evidence_manifest", "watch_decision"}
 STABLE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[1-9]\d*)?$")
+# A zero patch component is deliberately excluded: `8.6.0` is equally the tag of a
+# `new_branch:8.6` action, so its action key is not derivable from the tag alone.
+RECOVERABLE_RELEASE_TAG_RE = re.compile(r"^(\d+\.\d+\.[1-9]\d*)(?:-([1-9]\d*))?$")
 PROTECTED_PATHS = pathlib.Path(__file__).with_name("protected-paths.json")
 try:
     PROTECTED_PATTERNS = tuple(json.loads(PROTECTED_PATHS.read_text())["patterns"])
@@ -961,6 +964,35 @@ def retained_notification_issue(prior: dict[str, Any] | None) -> dict[str, Any] 
     return None
 
 
+def unrecorded_published_release(
+    releases: Iterable[dict[str, Any]],
+    events: Iterable[dict[str, Any]],
+) -> str | None:
+    """Return the action key of one published release that has no event record at all.
+
+    A live release with no record silently corrupts every later decision, because the
+    completed-action ledger is what admission uses to tell finished work from new work.
+    Recovery is fail-closed: a release is only claimed when immutability proves it came
+    from the guarded publish transaction and its action key is derivable from the tag
+    alone. Any existing record, complete or not, is left to its own path. One key is
+    returned per run; a further backlog is repaired by later runs.
+    """
+    recorded = {event.get("actionKey") for event in events}
+    keys = set()
+    for release in releases:
+        if not isinstance(release, dict):
+            continue
+        if release.get("draft") or release.get("prerelease") or release.get("immutable") is not True:
+            continue
+        tag = RECOVERABLE_RELEASE_TAG_RE.fullmatch(str(release.get("tag_name", "")))
+        if tag is None:
+            continue
+        key = f"recipe_rebuild:{tag.group(1)}:{tag.group(2)}" if tag.group(2) else f"new_patch:{tag.group(1)}"
+        if key not in recorded:
+            keys.add(key)
+    return min(keys, default=None)
+
+
 def watch_decision(
     manifest: dict[str, Any],
     previous: dict[str, Any],
@@ -968,16 +1000,23 @@ def watch_decision(
     health: dict[str, Any],
     *,
     self_evidence_update: bool = False,
+    releases: Iterable[dict[str, Any]] = (),
 ) -> dict[str, Any]:
+    events = list(events)
     incomplete = sorted(
         event.get("actionKey")
         for event in events
         if event.get("state") != "complete"
     )
+    # Ranked above every reconciliation and selection trigger, and below the two health
+    # triggers that decide whether the release evidence can be trusted at all.
+    unrecorded = unrecorded_published_release(releases, events)
     if not health.get("healthy", False):
         trigger = "health_failed"
     elif any(capture.get("status") != 200 for capture in manifest.get("captures", [])):
         trigger = "source_unhealthy"
+    elif unrecorded:
+        trigger = "record_missing"
     elif incomplete:
         trigger = "event_incomplete"
     elif previous.get("manifestDigest") != manifest.get("manifestDigest"):
@@ -1008,7 +1047,9 @@ def watch_decision(
         "trigger": trigger,
         "manifestDigest": manifest.get("manifestDigest"),
         "incompleteActions": incomplete,
-        "modelCall": trigger != "quiet",
+        "action": "record_completed_event" if trigger == "record_missing" else "none",
+        "actionKey": unrecorded if trigger == "record_missing" else "",
+        "modelCall": trigger not in {"quiet", "record_missing"},
     }
 
 

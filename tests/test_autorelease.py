@@ -106,6 +106,68 @@ class AutoreleaseControlTests(unittest.TestCase):
         )
         self.assertEqual("evidence_changed", external_change["trigger"])
 
+    @staticmethod
+    def _releases_manifest(status=200):
+        return {
+            "manifestDigest": "sha256:" + "a" * 64,
+            "captures": [{"captureId": "php_bin_releases", "status": status, "digest": "sha256:" + "b" * 64}],
+        }
+
+    def test_watch_flags_published_release_missing_event_record(self):
+        manifest = self._releases_manifest()
+        releases = [
+            {"tag_name": "8.5.9", "draft": False, "prerelease": False, "immutable": True},
+            {"tag_name": "8.5.8", "draft": False, "prerelease": False, "immutable": True},
+        ]
+        events = [{"actionKey": "new_patch:8.5.8", "state": "complete"}]
+        decision = watch_decision(manifest, manifest, events, {"healthy": True}, releases=releases)
+        self.assertEqual("record_completed_event", decision["action"])
+        self.assertEqual("new_patch:8.5.9", decision["actionKey"])
+        self.assertEqual("record_missing", decision["trigger"])
+        self.assertFalse(decision["modelCall"])
+
+        # A changed snapshot would otherwise select new work; the missing record wins.
+        changed = {"manifestDigest": "sha256:" + "c" * 64, "captures": manifest["captures"]}
+        moved = watch_decision(changed, manifest, events, {"healthy": True}, releases=releases)
+        self.assertEqual("record_completed_event", moved["action"])
+
+        rebuild = watch_decision(
+            manifest,
+            manifest,
+            [*events, {"actionKey": "new_patch:8.5.9", "state": "complete"}],
+            {"healthy": True},
+            releases=[*releases, {"tag_name": "8.5.9-2", "draft": False, "prerelease": False, "immutable": True}],
+        )
+        self.assertEqual("recipe_rebuild:8.5.9:2", rebuild["actionKey"])
+
+    def test_unprovable_release_records_are_not_recovered(self):
+        manifest = self._releases_manifest()
+        published = {"tag_name": "8.5.9", "draft": False, "prerelease": False, "immutable": True}
+        for release in (
+            {**published, "immutable": False},
+            {**published, "draft": True},
+            {**published, "prerelease": True},
+            {**published, "tag_name": "8.6.0"},
+            {**published, "tag_name": "8.5.9-rc1"},
+        ):
+            decision = watch_decision(manifest, manifest, [], {"healthy": True}, releases=[release])
+            self.assertEqual("none", decision["action"], release)
+            self.assertEqual("quiet", decision["trigger"], release)
+        unhealthy = self._releases_manifest(status=500)
+        self.assertEqual(
+            "source_unhealthy",
+            watch_decision(unhealthy, unhealthy, [], {"healthy": True}, releases=[published])["trigger"],
+        )
+        for state in ("complete", "released"):
+            decision = watch_decision(
+                manifest,
+                manifest,
+                [{"actionKey": "new_patch:8.5.9", "state": state}],
+                {"healthy": True},
+                releases=[published],
+            )
+            self.assertEqual("none", decision["action"], state)
+
     def test_completion_go_is_mechanical(self):
         contract = {
             "contractVersion": 1,

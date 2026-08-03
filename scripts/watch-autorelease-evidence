@@ -9,7 +9,9 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from autorelease.control import (  # noqa: E402
     ControlError,
+    load_capture,
     load_json,
+    require,
     validate_evidence_state_record,
     watch_decision,
     write_json,
@@ -51,12 +53,24 @@ try:
             raise ControlError("previous evidence state is missing and event reconstruction is ambiguous")
         if matching:
             previous["manifestDigest"] = matching[0]
+    # Only a healthy capture can prove a release; an unhealthy one already decides the
+    # run through the source_unhealthy trigger, so its body is never parsed.
+    releases: list[dict] = []
+    capture, body = load_capture(args.manifest, "php_bin_releases")
+    if capture.get("status") == 200:
+        try:
+            published = json.loads(body)
+        except json.JSONDecodeError as error:
+            raise ControlError(f"captured php-bin releases are not valid JSON: {error}") from error
+        require(isinstance(published, list), "captured php-bin releases are not an array")
+        releases = [item for item in published if isinstance(item, dict)]
     decision = watch_decision(
         manifest,
         previous,
         events,
         health,
         self_evidence_update=args.self_evidence_update,
+        releases=releases,
     )
     write_json(args.output, decision)
     print(json.dumps(decision))
