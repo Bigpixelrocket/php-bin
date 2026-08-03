@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 from autorelease.control import (
+    ACTION_KEY_RE,
     COMPLETION_EVIDENCE_REF_RE,
     ControlError,
     canonical_json,
@@ -318,6 +319,16 @@ class AutoreleaseControlTests(unittest.TestCase):
         record["history"][1]["from"] = "detected"
         with self.assertRaisesRegex(ControlError, "not contiguous"):
             validate_completed_event_record(record)
+
+    def test_future_branch_action_keys_admitted(self):
+        for key in (
+            "new_patch:8.6.1",
+            "new_patch:9.0.1",
+            "new_branch:8.6",
+            "new_branch:9.0",
+            "branch_eol:8.2:2026-12-31",
+        ):
+            self.assertIsNotNone(ACTION_KEY_RE.fullmatch(key), key)
 
     def test_published_asset_mismatch_fails_closed(self):
         with tempfile.TemporaryDirectory() as temporary:

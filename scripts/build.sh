@@ -92,7 +92,7 @@ echo "Verified macOS minimum: $MINIMUM_MACOS_VERSION"
 
 if [[ "$STAGE" == "s4" ]]; then
   PHP_MINOR="${PHP_VERSION%.*}"
-  if [[ "$PHP_VERSION" =~ ^8\.[2-5]$ ]]; then
+  if [[ "$PHP_VERSION" =~ ^[0-9]+\.[0-9]+$ ]]; then
     PHP_MINOR="$PHP_VERSION"
   fi
   "$SCRIPT_DIR/compare-modules.sh" \
