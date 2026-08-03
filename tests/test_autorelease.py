@@ -723,8 +723,8 @@ class AutoreleaseControlTests(unittest.TestCase):
         # branch, which git refuses while the recovery worktree still holds it. Line
         # continuations are folded first, or a call could hide --repo's absence by
         # wrapping its arguments onto the next line.
-        folded = re.sub(r"\\\n\s*", " ", recovery)
-        calls = re.findall(r"^\s*gh pr\s+(?:merge|close)\s.*$", folded, re.MULTILINE)
+        folded = re.sub(r"\\\n[^\S\n]*", " ", recovery)
+        calls = re.findall(r"^\s*gh\s+pr\s+(?:merge|close)\s.*$", folded, re.MULTILINE)
         self.assertEqual(2, len(calls))
         for call in calls:
             self.assertIn('--repo "${{ github.repository }}"', call)

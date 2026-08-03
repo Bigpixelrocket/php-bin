@@ -46,6 +46,28 @@ CODEX_ACTION = "openai/codex-action@"
 CANONICAL_CODEX_CONFIG = re.compile(
     r'cp\s+"?\.codex/\S+\.config\.toml"?\s+"\$RUNNER_TEMP/codex-home/config\.toml"'
 )
+# Markers of the lifecycle classifier the deterministic controls must never grow. A02
+# proves the controls stay deterministic by behavior; A04 and A11 back that with the
+# absence of any parser, so they must read the whole control package rather than the
+# facade alone — otherwise moving a parser into a submodule would satisfy both.
+FORBIDDEN_CLASSIFIER_MARKERS = ("BeautifulSoup", "support_table_to_events", "classify_php_release")
+
+
+def control_package_source() -> str:
+    """Return every deterministic control module's text as one searchable string.
+
+    `verify.py` is excluded because it is the harness, not a control: it names the
+    forbidden markers to assert their absence and would otherwise fail on itself.
+    """
+    modules = sorted(
+        path for path in (PHP_ROOT / "autorelease").glob("*.py") if path.name != "verify.py"
+    )
+    assert_true(
+        {"control.py", "_admission.py", "_evidence.py", "_state.py", "_validation.py"}
+        <= {path.name for path in modules},
+        "the control package no longer exposes the modules the absence checks scan",
+    )
+    return "\n".join(path.read_text() for path in modules)
 
 
 def run(*args: str, cwd: pathlib.Path, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -391,9 +413,11 @@ class Verifier:
             inputs = fixture_admission_inputs(target, action)
             admit_fixture(inputs)
             actions[action] = inputs["plan"]["actionKey"]
-        source = (PHP_ROOT / "autorelease/control.py").read_text()
-        forbidden_classifier_markers = ("BeautifulSoup", "support_table_to_events", "classify_php_release")
-        assert_true(not any(item in source for item in forbidden_classifier_markers), "deterministic control contains lifecycle classifier")
+        source = control_package_source()
+        assert_true(
+            not any(item in source for item in FORBIDDEN_CLASSIFIER_MARKERS),
+            "deterministic control contains lifecycle classifier",
+        )
         (directory / "classifications.json").write_bytes(canonical_json(actions))
         return ["classifications.json"]
 
@@ -630,8 +654,13 @@ class Verifier:
         inputs["manifestPath"].write_bytes(canonical_json(inputs["manifest"]))
         inputs["plan"]["evidence"][0]["digest"] = sha256_bytes(body)
         admit_fixture(inputs)
-        source = (PHP_ROOT / "autorelease/control.py").read_text()
-        assert_true("supported-versions.php" in source and "BeautifulSoup" not in source, "source-format handling became a lifecycle parser")
+        registry = (PHP_ROOT / "autorelease/control.py").read_text()
+        assert_true("supported-versions.php" in registry, "the authoritative source registry left the control surface")
+        source = control_package_source()
+        assert_true(
+            not any(item in source for item in FORBIDDEN_CLASSIFIER_MARKERS),
+            "source-format handling became a lifecycle parser",
+        )
         return ["evidence-manifest.json"]
 
     def a12(self, directory: pathlib.Path) -> list[str]:
