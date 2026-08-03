@@ -1,6 +1,7 @@
 import io
 import json
 import pathlib
+import re
 import runpy
 import subprocess
 import tarfile
@@ -587,6 +588,10 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertIn('git push origin --delete "$branch"', recovery)
         self.assertIn('git worktree remove --force "$worktree"', recovery)
         self.assertIn('exit "$status"', recovery)
+        # Every gh call here names the repository: without it gh also deletes the local
+        # branch, which git refuses while the recovery worktree still holds it.
+        for call in re.findall(r"^\s*gh pr (?:merge|close) .*$", recovery, re.MULTILINE):
+            self.assertIn('--repo "${{ github.repository }}"', call)
         # A published release downgrades the publish alarm from critical to warning.
         self.assertIn("release-transaction-state-${{ github.run_id }}", release)
         self.assertIn("jq -r .released release-state/transaction-state.json", release)

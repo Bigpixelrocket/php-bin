@@ -274,7 +274,7 @@ jobs:
           cleanup() {
             local status=$?
             if [[ -n "$number" ]]; then
-              gh pr close "$number" --delete-branch || true
+              gh pr close "$number" --repo "${{ github.repository }}" --delete-branch || true
             fi
             if [[ "$pushed" == "true" ]]; then
               git push origin --delete "$branch" || true
@@ -308,7 +308,9 @@ jobs:
           test "$(git rev-list --parents -n 1 "$head")" = "$head $base"
           test "$(git diff --name-only "$base" "$head")" = "$event"
           test "sha256:$(git show "$head:$event" | shasum -a 256 | awk '{print $1}')" = "$digest"
-          gh pr merge "$number" --squash --delete-branch
+          # --repo keeps the branch deletion remote-only. Without it gh also deletes the
+          # local branch, which git refuses while the recovery worktree still holds it.
+          gh pr merge "$number" --repo "${{ github.repository }}" --squash --delete-branch
           # The merge already retired both, so cleanup has nothing left to withdraw.
           number=""
           pushed=false
