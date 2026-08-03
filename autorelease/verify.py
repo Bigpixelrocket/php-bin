@@ -20,11 +20,13 @@ from typing import Any, Callable
 
 from autorelease.control import (
     ControlError,
+    action_filename,
     audit_reconstruction,
     canonical_json,
     instruction_digest,
     mutation_allowed,
     notification_decision,
+    path_is_protected,
     release_transition,
     retry_decision,
     seal_patch,
@@ -41,6 +43,34 @@ from autorelease.control import (
 PHP_ROOT = pathlib.Path(__file__).resolve().parents[1]
 PIN_RE = re.compile(r"^\s*uses:\s*[^#\s]+@([0-9a-f]{40})(?:\s*#.*)?$", re.MULTILINE)
 UNPINNED_RE = re.compile(r"^\s*uses:\s*[^#\s]+@(?![0-9a-f]{40}(?:\s|$))[^#\s]+", re.MULTILINE)
+CODEX_ACTION = "openai/codex-action@"
+CANONICAL_CODEX_CONFIG = re.compile(
+    r'cp\s+"?\.codex/\S+\.config\.toml"?\s+"\$RUNNER_TEMP/codex-home/config\.toml"'
+)
+# Markers of the lifecycle classifier the deterministic controls must never grow. A02
+# proves the controls stay deterministic by behavior; A04 and A11 back that with the
+# absence of any parser, so they must read the whole control package rather than the
+# facade alone — otherwise moving a parser into a submodule would satisfy both.
+FORBIDDEN_CLASSIFIER_MARKERS = ("BeautifulSoup", "support_table_to_events", "classify_php_release")
+
+
+def control_package_source() -> str:
+    """Return every deterministic control module's text as one searchable string.
+
+    `verify.py` is excluded because it is the harness, not a control: it names the
+    forbidden markers to assert their absence and would otherwise fail on itself.
+    """
+    # rglob, not glob: sub-packaging the controls is exactly the kind of move that
+    # made this scan necessary, and a nested module must not fall out of it.
+    modules = sorted(
+        path for path in (PHP_ROOT / "autorelease").rglob("*.py") if path.name != "verify.py"
+    )
+    assert_true(
+        {"control.py", "_admission.py", "_evidence.py", "_state.py", "_validation.py"}
+        <= {path.name for path in modules},
+        "the control package no longer exposes the modules the absence checks scan",
+    )
+    return "\n".join(path.read_text() for path in modules)
 
 
 def run(*args: str, cwd: pathlib.Path, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -63,6 +93,56 @@ def load_workflow(path: pathlib.Path) -> dict[str, Any]:
     document = json.loads(result.stdout)
     assert_true(isinstance(document, dict), f"workflow is not an object: {path}")
     return document
+
+
+def workflow_steps(document: dict[str, Any]) -> list[tuple[str, int, dict[str, Any]]]:
+    """Return every (job name, position in job, step) triple of a parsed workflow.
+
+    Acceptance checks assert on parsed structure so that reformatting a
+    workflow cannot pass or fail a control it does not change.
+    """
+    return [
+        (name, index, step)
+        for name, job in (document.get("jobs") or {}).items()
+        if isinstance(job, dict)
+        for index, step in enumerate(job.get("steps") or [])
+        if isinstance(step, dict)
+    ]
+
+
+def operator_gate_calls(run: str) -> list[str]:
+    """Return every operator-gate invocation in a workflow step, one per line.
+
+    The gate has two deliberate shapes. With `--require-enabled` the subcommand fails the
+    job; without it the subcommand only prints the state and exits 0, so a hard site that
+    loses the flag still reads like a gate while gating nothing. Callers therefore have to
+    inspect the invocation itself, not merely the presence of the subcommand name.
+    """
+    return [line.strip() for line in run.splitlines() if "operator-gate" in line]
+
+
+def credential_sites(node: Any, path: str) -> list[str]:
+    """Return every path in a parsed workflow whose keys or values name the OpenAI credential.
+
+    Both spellings reach an agent: `openai-api-key` as an action input and
+    `OPENAI_API_KEY` as an environment name. Either can be attached at the
+    workflow, job, or step level, or interpolated straight into a command, so
+    the whole parsed document is walked rather than one level of it.
+    """
+    if isinstance(node, dict):
+        return [
+            site
+            for key, value in node.items()
+            for site in ([f"{path}.{key}"] if names_credential(str(key)) else [])
+            + credential_sites(value, f"{path}.{key}")
+        ]
+    if isinstance(node, list):
+        return [site for index, item in enumerate(node) for site in credential_sites(item, f"{path}[{index}]")]
+    return [path] if names_credential(str(node)) else []
+
+
+def names_credential(text: str) -> bool:
+    return "openai-api-key" in text.lower() or "openai_api_key" in text.lower()
 
 
 def exact_head(repo: pathlib.Path) -> str:
@@ -336,9 +416,11 @@ class Verifier:
             inputs = fixture_admission_inputs(target, action)
             admit_fixture(inputs)
             actions[action] = inputs["plan"]["actionKey"]
-        source = (PHP_ROOT / "autorelease/control.py").read_text()
-        forbidden_classifier_markers = ("BeautifulSoup", "support_table_to_events", "classify_php_release")
-        assert_true(not any(item in source for item in forbidden_classifier_markers), "deterministic control contains lifecycle classifier")
+        source = control_package_source()
+        assert_true(
+            not any(item in source for item in FORBIDDEN_CLASSIFIER_MARKERS),
+            "deterministic control contains lifecycle classifier",
+        )
         (directory / "classifications.json").write_bytes(canonical_json(actions))
         return ["classifications.json"]
 
@@ -364,12 +446,39 @@ class Verifier:
         repeated = retry_decision({**event, "lastRejectionRepeated": True}, "fp", 2)
         assert_true(first["recallAgent"], "bounded repair was not allowed")
         assert_true(not exhausted["recallAgent"] and not repeated["recallAgent"], "exhausted identical failure recalled agent")
-        php_workflow = (PHP_ROOT / ".github/workflows/autorelease-implement.yml").read_text()
-        mise_workflow = (self.mise_root / ".github/workflows/autorelease-consumer.yml").read_text()
-        for name, workflow in {"php-bin": php_workflow, "mise-php": mise_workflow}.items():
-            assert_true("authoritative-checks.log" in workflow, f"{name} does not retain deterministic failure logs")
-            assert_true("Run one offline Codex repair" in workflow, f"{name} has no bounded repair invocation")
-            assert_true("validate-repair:" in workflow, f"{name} does not cleanly validate repaired bytes")
+        workflows = {
+            "php-bin": PHP_ROOT / ".github/workflows/autorelease-implement.yml",
+            "mise-php": self.mise_root / ".github/workflows/autorelease-consumer.yml",
+        }
+        for name, path in workflows.items():
+            document = load_workflow(path)
+            steps = workflow_steps(document)
+            assert_true(
+                any("authoritative-checks.log" in (step.get("run") or "") for _, _, step in steps),
+                f"{name} does not retain deterministic failure logs",
+            )
+            repair_agents = [
+                step
+                for job_name, _, step in steps
+                if job_name == "repair" and str(step.get("uses") or "").startswith(CODEX_ACTION)
+            ]
+            assert_true(
+                len(repair_agents) == 1,
+                f"{name} does not bound the repair phase to one agent invocation",
+            )
+            validation = document.get("jobs", {}).get("validate-repair", {})
+            assert_true(
+                "repair" in (validation.get("needs") or []),
+                f"{name} does not validate repaired bytes in a job that follows the repair",
+            )
+            assert_true(
+                any(
+                    "sealed-repair" in (step.get("run") or "")
+                    and "./scripts/test.sh" in (step.get("run") or "")
+                    for step in validation.get("steps") or []
+                ),
+                f"{name} does not cleanly validate repaired bytes",
+            )
         assert_true(
             'network_access = false' in (PHP_ROOT / ".codex/repair.config.toml").read_text()
             and 'network_access = false' in (self.mise_root / ".codex/repair.config.toml").read_text(),
@@ -386,20 +495,40 @@ class Verifier:
         return ["retry.json"]
 
     def a07(self, directory: pathlib.Path) -> list[str]:
-        watch = (PHP_ROOT / ".github/workflows/autorelease-watch.yml").read_text()
-        implementation = (PHP_ROOT / ".github/workflows/autorelease-implement.yml").read_text()
+        # Every reviewed agent invocation, keyed by the workflow and job that may
+        # start it, with the sandbox that bounds its network and write authority.
+        reviewed_sandboxes = {
+            ("autorelease-watch.yml", "investigate"): "read-only",
+            ("autorelease-implement.yml", "implement"): "workspace-write",
+            ("autorelease-implement.yml", "repair"): "workspace-write",
+        }
+        observed_sandboxes = {}
+        for name in ("autorelease-watch.yml", "autorelease-implement.yml"):
+            steps = workflow_steps(load_workflow(PHP_ROOT / ".github/workflows" / name))
+            for job_name, index, step in steps:
+                if not str(step.get("uses") or "").startswith(CODEX_ACTION):
+                    continue
+                inputs = step.get("with") or {}
+                observed_sandboxes[(name, job_name)] = inputs.get("sandbox")
+                assert_true(
+                    not any(
+                        item.startswith("--profile")
+                        for item in json.loads(inputs.get("codex-args") or "[]")
+                    ),
+                    f"{name}:{job_name} selects a named profile instead of the canonical config",
+                )
+                assert_true(
+                    any(
+                        other_job == job_name
+                        and other_index < index
+                        and CANONICAL_CODEX_CONFIG.search(other.get("run") or "")
+                        for other_job, other_index, other in steps
+                    ),
+                    f"{name}:{job_name} starts the agent without loading its canonical config",
+                )
         assert_true(
-            "sandbox: read-only" in watch
-            and 'cp .codex/investigation.config.toml "$RUNNER_TEMP/codex-home/config.toml"' in watch
-            and '"--profile"' not in watch,
-            "investigation sandbox or canonical config loading is missing",
-        )
-        assert_true(
-            "sandbox: workspace-write" in implementation
-            and 'cp ".codex/$phase.config.toml" "$RUNNER_TEMP/codex-home/config.toml"' in implementation
-            and 'cp .codex/repair.config.toml "$RUNNER_TEMP/codex-home/config.toml"' in implementation
-            and '"--profile"' not in implementation,
-            "phase-bound implementation/repair canonical config loading is missing",
+            observed_sandboxes == reviewed_sandboxes,
+            "investigation and implementation agents are not bound to their reviewed sandboxes",
         )
         assert_true('network_access = false' in (PHP_ROOT / ".codex/implementation.config.toml").read_text(), "implementation network is not disabled")
         assert_true('allowed_domains = ["php.net", "github.com", "docs.github.com"]' in (PHP_ROOT / ".codex/investigation.config.toml").read_text(), "investigation allowlist changed")
@@ -462,14 +591,84 @@ class Verifier:
             {"ready": True, "commit": "b" * 40, "repo": "mise-php"},
         ]
         result = verify_merge(repo, head, manifest, checks, preconditions, preconditions, readiness)
+        # php-bin files an event record under a name derived from the action key and
+        # mise-php reads that record back by the same derivation. A disagreement on any
+        # key form leaves one repository waiting on a file the other never wrote. This
+        # goes through mise-php's own entry point rather than its source text, so a
+        # differently written mapping that behaves identically still passes.
+        # One fixture per form both alphabets admit; a new form belongs here.
+        action_keys = [
+            "new_patch:8.5.9",
+            "new_branch:8.6",
+            "branch_eol:8.2:2026-12-31",
+            "recipe_rebuild:8.5.9:2",
+            "repair:8.5.9:deadbeef",
+            "source_unhealthy:deadbeef",
+            "health_failed:deadbeef",
+            "policy_failure:deadbeef",
+            "auth_failure:deadbeef",
+        ]
+        for action_key in action_keys:
+            mise_name = run(
+                "./scripts/consume-php-policy", "action-filename", action_key, cwd=self.mise_root
+            ).stdout.strip()
+            assert_true(
+                mise_name == action_filename(action_key),
+                f"mise-php names {action_key} {mise_name}, php-bin names it {action_filename(action_key)}",
+            )
+        # The one asymmetry is deliberate: a quiet run files no event record, so mise-php
+        # refuses to name a file for it rather than inventing one it will never read.
+        quiet = run(
+            "./scripts/consume-php-policy", "action-filename", "no_change:0123456789abcdef",
+            cwd=self.mise_root, check=False,
+        )
+        assert_true(quiet.returncode != 0, "mise-php names a record file for a quiet run")
+        # mise-php's byte-parity gate fails closed on the first step of every consumer
+        # run when a shared file drifts, and only a human can re-sync its protected copy.
+        # A shared file that either repository lets an agent rewrite is therefore a
+        # cross-repository stall, and neither repository's own tests can see it: each
+        # checks the manifest against its own pattern list alone. The verdicts come from
+        # mise-php's own admission module so a rewritten matcher still has to answer.
+        shared_paths = json.loads((self.mise_root / "autorelease/shared-files.json").read_text())["paths"]
+        assert_true(bool(shared_paths), "the shared-file manifest is empty, so it gates nothing")
+        mise_protection = json.loads(
+            run(
+                "python3", "-c",
+                "import json, sys; sys.path.insert(0, '.'); "
+                "from autorelease.admission import protected; "
+                "print(json.dumps({path: protected(path) for path in json.loads(sys.argv[1])}))",
+                json.dumps(shared_paths),
+                cwd=self.mise_root,
+            ).stdout
+        )
+        for path in shared_paths:
+            assert_true(path_is_protected(path), f"php-bin does not protect shared file {path}")
+            assert_true(mise_protection[path], f"mise-php does not protect shared file {path}")
         (directory / "coordination.json").write_bytes(canonical_json(result))
-        return ["coordination.json"]
+        (directory / "action-filenames.json").write_bytes(
+            canonical_json({key: action_filename(key) for key in action_keys})
+        )
+        (directory / "shared-file-protection.json").write_bytes(
+            canonical_json(
+                {path: {"php-bin": path_is_protected(path), "mise-php": mise_protection[path]} for path in shared_paths}
+            )
+        )
+        return ["coordination.json", "action-filenames.json", "shared-file-protection.json"]
 
     def a10(self, directory: pathlib.Path) -> list[str]:
         releases = (self.mise_root / "lib/releases.lua").read_text()
         available = (self.mise_root / "hooks/available.lua").read_text()
         install = (self.mise_root / "hooks/pre_install.lua").read_text()
-        assert_true("M.is_supported_version" in releases and "8%.[2-5]" in releases, "active shorthand boundary missing")
+        policy = (self.mise_root / "lib/policy.lua").read_text()
+        maintained = json.loads((self.mise_root / "support-snapshot.json").read_text())["maintainedBranches"]
+        assert_true(
+            "M.is_supported_version" in releases and "policy.maintained" in releases,
+            "active shorthand boundary is not derived from the maintained policy",
+        )
+        assert_true(
+            re.findall(r'"(\d+\.\d+)"', policy) == maintained,
+            "the plugin maintained branch set is not the reviewed support snapshot",
+        )
         assert_true("is_supported_version" in available, "EOL versions can be discovered")
         assert_true("is_exact_stable_version" in install, "historical exact installation is blocked")
         (directory / "eol-policy.txt").write_text("discovery=maintained-only\ninstallation=exact-stable-history\npublication=maintained-only\n")
@@ -484,8 +683,13 @@ class Verifier:
         inputs["manifestPath"].write_bytes(canonical_json(inputs["manifest"]))
         inputs["plan"]["evidence"][0]["digest"] = sha256_bytes(body)
         admit_fixture(inputs)
-        source = (PHP_ROOT / "autorelease/control.py").read_text()
-        assert_true("supported-versions.php" in source and "BeautifulSoup" not in source, "source-format handling became a lifecycle parser")
+        registry = (PHP_ROOT / "autorelease/control.py").read_text()
+        assert_true("supported-versions.php" in registry, "the authoritative source registry left the control surface")
+        source = control_package_source()
+        assert_true(
+            not any(item in source for item in FORBIDDEN_CLASSIFIER_MARKERS),
+            "source-format handling became a lifecycle parser",
+        )
         return ["evidence-manifest.json"]
 
     def a12(self, directory: pathlib.Path) -> list[str]:
@@ -537,20 +741,33 @@ class Verifier:
             "Codex Action pin is not bound to the reviewed input contract",
         )
         e2e = PHP_ROOT / ".github/workflows/autorelease-e2e.yml"
-        e2e_text = e2e.read_text()
+        canary_schema_steps = [
+            step
+            for job_name, _, step in workflow_steps(load_workflow(e2e))
+            if job_name == "agent-canary" and "canary/schema.json" in (step.get("run") or "")
+        ]
         assert_true(
-            'status:{type:"string",const:"passed"}' in e2e_text
-            and 'nonce:{type:"string",const:$nonce}' in e2e_text,
-            "credentialed agent canary schema does not declare string types",
+            len(canary_schema_steps) == 1,
+            "the credentialed agent canary does not build its output schema in one step",
+        )
+        # The canary schema is generated, so the generator is rendered here and
+        # the resulting schema is asserted instead of its source formatting.
+        program = re.search(r"'([^']+)'\s*>\s*canary/schema\.json", canary_schema_steps[0]["run"])
+        assert_true(program is not None, "the credentialed agent canary schema is not built by one jq program")
+        canary_schema = json.loads(
+            run("jq", "-n", "--arg", "nonce", "fixture-nonce", program.group(1), cwd=PHP_ROOT).stdout
+        )
+        assert_true(
+            canary_schema.get("additionalProperties") is False
+            and canary_schema.get("properties", {}).get("status") == {"type": "string", "const": "passed"}
+            and canary_schema.get("properties", {}).get("nonce") == {"type": "string", "const": "fixture-nonce"},
+            "credentialed agent canary schema does not bind status and nonce to exact strings",
         )
         assert_true(
             pins["workflows"][".github/workflows/autorelease-e2e.yml"] == sha256_file(e2e),
             "reviewed production-parity workflow digest changed",
         )
-        watch_path = PHP_ROOT / ".github/workflows/autorelease-watch.yml"
-        watch = watch_path.read_text()
-        release = (PHP_ROOT / ".github/workflows/autorelease-publish.yml").read_text()
-        watch_document = load_workflow(watch_path)
+        watch_document = load_workflow(PHP_ROOT / ".github/workflows/autorelease-watch.yml")
         workflow_permissions = watch_document.get("permissions", {})
         investigate = watch_document.get("jobs", {}).get("investigate", {})
         investigate_permissions = investigate.get("permissions", workflow_permissions)
@@ -559,7 +776,20 @@ class Verifier:
             and investigate_permissions.get("contents") == "read",
             "runtime investigation does not have resolved read-only contents permission",
         )
-        assert_true("openai-api-key" not in release, "release job can read OpenAI credential")
+        # The release transaction runs no agent, so no part of it may carry the
+        # credential: not a workflow, job, or step environment, not an input,
+        # and not an interpolation inside a command body.
+        release_credential_sites = sorted(
+            set(
+                credential_sites(
+                    load_workflow(PHP_ROOT / ".github/workflows/autorelease-publish.yml"), "autorelease-publish"
+                )
+            )
+        )
+        assert_true(
+            not release_credential_sites,
+            f"the release transaction can read the OpenAI credential: {release_credential_sites}",
+        )
         admin = PHP_ROOT / "docs/autorelease-admin-evidence.json"
         assert_true(admin.is_file(), "redacted administrator evidence is missing")
         evidence = json.loads(admin.read_text())
@@ -623,19 +853,60 @@ class Verifier:
     def a18(self, directory: pathlib.Path) -> list[str]:
         assert_true(not mutation_allowed({"unattendedMutation": "paused"}), "paused control allowed mutation")
         assert_true(mutation_allowed({"unattendedMutation": "enabled"}), "enabled control blocked mutation")
-        watch_workflow = (PHP_ROOT / ".github/workflows/autorelease-watch.yml").read_text()
-        release_workflow = (PHP_ROOT / ".github/workflows/autorelease-publish.yml").read_text()
-        mise_workflow = (self.mise_root / ".github/workflows/autorelease-consumer.yml").read_text()
+        watch_steps = workflow_steps(load_workflow(PHP_ROOT / ".github/workflows/autorelease-watch.yml"))
+        dispatch_steps = [step for _, _, step in watch_steps if "gh workflow run" in (step.get("run") or "")]
+        assert_true(dispatch_steps, "watcher no longer dispatches downstream mutation")
         assert_true(
-            "Unattended mutation is paused" in watch_workflow,
+            all("operator-gate" in step["run"] for step in dispatch_steps),
             "watcher pause does not stop downstream mutation",
         )
+        # The watcher gates are the soft shape on purpose: they log their own message and
+        # exit 0. That is only safe while they test the reported state, so assert the
+        # comparison and assert the absence of the flag, keeping them distinguishable from
+        # the hard sites rather than letting either shape satisfy one check.
+        soft_gate_calls = [call for _, _, step in watch_steps for call in operator_gate_calls(step.get("run") or "")]
+        assert_true(soft_gate_calls, "the watcher no longer reads the operator control")
         assert_true(
-            release_workflow.count("current-operator.json") >= 3,
+            all('"enabled"' in call and "--require-enabled" not in call for call in soft_gate_calls),
+            "a watcher operator gate neither tests the reported state nor fails the job",
+        )
+        # Every gate outside the watcher must fail its job, which is the flag rather than
+        # the subcommand: without it the gate reports the state and the job releases anyway.
+        hard_gate_calls = [
+            call
+            for name in ("autorelease-publish.yml", "autorelease-implement.yml")
+            for _, _, step in workflow_steps(load_workflow(PHP_ROOT / ".github/workflows" / name))
+            for call in operator_gate_calls(step.get("run") or "")
+        ]
+        assert_true(hard_gate_calls, "the release and implementation workflows no longer read the operator control")
+        assert_true(
+            all("--require-enabled" in call for call in hard_gate_calls),
+            "an operator gate that must fail its job only reports the state",
+        )
+        release_steps = workflow_steps(load_workflow(PHP_ROOT / ".github/workflows/autorelease-publish.yml"))
+        effect_steps = [
+            (job_name, step)
+            for job_name, _, step in release_steps
+            if "./scripts/publish-release" in (step.get("run") or "")
+        ]
+        assert_true(effect_steps, "release workflow performs no release transition")
+        assert_true(
+            all(
+                job_name == "release"
+                and "operator-gate --operator-file release-run/current-operator.json --require-enabled" in step["run"]
+                for job_name, step in effect_steps
+            ),
             "release effects are not gated by the live operator state",
         )
+        mise_steps = workflow_steps(load_workflow(self.mise_root / ".github/workflows/autorelease-consumer.yml"))
+        operator_bound_jobs = {
+            job_name
+            for job_name, _, step in mise_steps
+            if "phpBinOperatorCommit" in (step.get("run") or "")
+            and "operatorState" in (step.get("run") or "")
+        }
         assert_true(
-            "phpBinOperatorCommit" in mise_workflow and "operatorState" in mise_workflow,
+            {"investigate", "merge-and-record-readiness"} <= operator_bound_jobs,
             "mise synchronization is not bound to the php-bin operator control",
         )
         event = {"actionKey": "new_patch:8.5.9", "state": "release_requested", "history": []}

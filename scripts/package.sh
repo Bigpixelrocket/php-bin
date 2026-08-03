@@ -14,8 +14,8 @@ fi
 PHP_BIN="$1"
 RELEASE_TAG="$2"
 
-if [[ ! "$RELEASE_TAG" =~ ^8\.[2-5]\.[0-9]+(-[1-9][0-9]*)?$ ]]; then
-  echo "Release tag must look like 8.4.5 or 8.4.5-1." >&2
+if [[ ! "$RELEASE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]; then
+  echo "Release tag must be an exact patch version like 8.4.5, optionally with a build number like 8.4.5-1." >&2
   exit 2
 fi
 
@@ -31,7 +31,9 @@ if [[ "$ACTUAL_VERSION" != "$PHP_PATCH_VERSION" ]]; then
   exit 1
 fi
 
-ARTIFACT_DIR="$PROJECT_ROOT/.artifacts"
+# The build and release workflows read .artifacts from the working tree, so that
+# stays the default; the override exists for callers that must not write there.
+ARTIFACT_DIR="${ARTIFACT_DIR:-$PROJECT_ROOT/.artifacts}"
 ARTIFACT_NAME="php-${RELEASE_TAG}-cli-macos-aarch64.tar.gz"
 TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/php-bin-package.XXXXXX")"
 trap 'rm -rf "$TEMP_DIR"' EXIT

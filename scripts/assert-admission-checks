@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Re-asserts that the dispatch-pr-checks output records every required
+# admission check as passing. The authoritative gate runs inside
+# dispatch-pr-checks itself; this script is a belt-and-braces check that
+# the file consumed by merge steps still shows the expected verdicts.
+# --require-protected-controls marks flows whose pull requests must never
+# touch protected paths; sealed-patch flows omit it.
+set -euo pipefail
+require_protected="false"
+check_name="Script checks"
+checks_file=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --require-protected-controls) require_protected="true"; shift ;;
+    --check-name) check_name="$2"; shift 2 ;;
+    --checks) checks_file="$2"; shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+[[ -n "$checks_file" ]]
+jq -e --arg name "$check_name" '[.[] | select(.name==$name) | .bucket] == ["pass"]' "$checks_file" > /dev/null
+if [[ "$require_protected" == "true" ]]; then
+  jq -e '[.[] | select(.name=="Protected controls") | .bucket] == ["pass"]' "$checks_file" > /dev/null
+fi
+echo "Admission checks passed (protected controls required: $require_protected)."

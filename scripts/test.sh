@@ -26,15 +26,17 @@ if "$SCRIPT_DIR/compare-modules.sh" \
   exit 1
 fi
 
+# The packaging check runs inside checkouts that autorelease then inspects for
+# an exact tree, so its output goes to scratch space instead of the working
+# tree, where a leftover file would read as an unsealed edit.
+ARTIFACT_DIR="${RUNNER_TEMP:-$(mktemp -d)}/php-bin-test-artifacts"
+export ARTIFACT_DIR
+trap 'rm -rf "$ARTIFACT_DIR"' EXIT
+
 "$SCRIPT_DIR/package.sh" "$PROJECT_ROOT/tests/fixtures/php" 8.4.99
-tar -tzf "$PROJECT_ROOT/.artifacts/php-8.4.99-cli-macos-aarch64.tar.gz" \
+tar -tzf "$ARTIFACT_DIR/php-8.4.99-cli-macos-aarch64.tar.gz" \
   | grep -Eq '^\./bin/php$'
-grep -Fq 'php-8.4.99-cli-macos-aarch64.tar.gz' \
-  "$PROJECT_ROOT/.artifacts/SHA256SUMS"
-rm -f \
-  "$PROJECT_ROOT/.artifacts/php-8.4.99-cli-macos-aarch64.tar.gz" \
-  "$PROJECT_ROOT/.artifacts/SHA256SUMS"
-rmdir "$PROJECT_ROOT/.artifacts" 2>/dev/null || true
+grep -Fq 'php-8.4.99-cli-macos-aarch64.tar.gz' "$ARTIFACT_DIR/SHA256SUMS"
 
 (
   cd "$PROJECT_ROOT"

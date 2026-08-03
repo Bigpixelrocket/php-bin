@@ -15,6 +15,10 @@ from typing import Any
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 CONTRACT_PATH = ROOT / ".github/codex-action-contract.json"
 BOT_USER_RE = re.compile(r"^[A-Za-z0-9-]+(?:\[bot\])?$")
+CANONICAL_CONFIG_RE = re.compile(
+    r'cp\s+"?\.codex/\S+\.config\.toml"?\s+"\$RUNNER_TEMP/codex-home/config\.toml"'
+)
+UNLOADED_CONFIG_RE = re.compile(r'cp\s+"?\.codex/\S+\.config\.toml"?\s+"\$RUNNER_TEMP/codex-home/"')
 
 
 def load_workflow(path: pathlib.Path) -> dict[str, Any]:
@@ -54,12 +58,7 @@ def validate() -> dict[str, Any]:
     required_bot_users = set(contract["securityInputs"]["allow-bot-users"]["requiredValues"])
     expected_ref = f"{action}@{commit}"
     invocations = []
-    canonical_config_copies = 0
     for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
-        workflow_body = path.read_text()
-        canonical_config_copies += workflow_body.count('"$RUNNER_TEMP/codex-home/config.toml"')
-        if re.search(r'cp\s+\.codex/\S+\.config\.toml\s+"\$RUNNER_TEMP/codex-home/"', workflow_body):
-            raise ValueError(f"{path.relative_to(ROOT)} copies a phase config under an unloaded filename")
         document = load_workflow(path)
         jobs = document.get("jobs", {})
         if not isinstance(jobs, dict):
@@ -67,9 +66,10 @@ def validate() -> dict[str, Any]:
         for job_name, job in jobs.items():
             if not isinstance(job, dict):
                 continue
-            for index, step in enumerate(job.get("steps", [])):
-                if not isinstance(step, dict):
-                    continue
+            steps = [step for step in job.get("steps", []) if isinstance(step, dict)]
+            for index, step in enumerate(steps):
+                if UNLOADED_CONFIG_RE.search(step.get("run") or ""):
+                    raise ValueError(f"{path.relative_to(ROOT)} copies a phase config under an unloaded filename")
                 uses = step.get("uses")
                 if not isinstance(uses, str) or not uses.startswith(f"{action}@"):
                     continue
@@ -104,15 +104,15 @@ def validate() -> dict[str, Any]:
                 bot_users = {item.strip() for item in allow_bot_users.split(",") if item.strip()}
                 if bot_users != required_bot_users or not all(BOT_USER_RE.fullmatch(item) for item in bot_users):
                     raise ValueError(f"{location} allow-bot-users does not match the reviewed bot allowlist")
+                # Only a config at the canonical filename is loaded from the
+                # Codex home, so every invocation needs one earlier in its job.
+                if not any(CANONICAL_CONFIG_RE.search(earlier.get("run") or "") for earlier in steps[:index]):
+                    raise ValueError(f"{location} starts without a canonical Codex config load in its job")
                 invocations.append({"workflow": str(path.relative_to(ROOT)), "job": job_name, "step": index + 1})
 
     expected_count = contract["expectedInvocations"]
     if len(invocations) != expected_count:
         raise ValueError(f"expected {expected_count} Codex Action invocations, found {len(invocations)}")
-    if canonical_config_copies != expected_count:
-        raise ValueError(
-            f"expected {expected_count} canonical Codex config copies, found {canonical_config_copies}"
-        )
     return {
         "action": action,
         "commit": commit,

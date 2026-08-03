@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   scripts:
     name: Script checks
@@ -24,6 +28,8 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install --yes shellcheck
       - name: Check shell scripts
-        run: shellcheck scripts/*.sh
+        # The extensionless bash scripts are named one by one: every other
+        # extensionless script under scripts/ is Python, which shellcheck cannot read.
+        run: shellcheck scripts/*.sh scripts/assert-admission-checks scripts/dispatch-pr-checks
       - name: Run contract tests
         run: scripts/test.sh

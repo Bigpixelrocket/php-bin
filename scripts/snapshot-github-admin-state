@@ -3,12 +3,16 @@
 
 import argparse
 import datetime as dt
-import hashlib
 import json
 import pathlib
 import subprocess
 import sys
 from typing import Any
+
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from autorelease.control import canonical_json, sha256_bytes  # noqa: E402
 
 
 def gh_api(endpoint: str, allow_missing: bool = False) -> list[Any]:
@@ -51,11 +55,6 @@ def paginated_items(pages: list[Any], key: str | None = None) -> list[Any]:
         else:
             raise RuntimeError("GitHub API paginated response contains a non-list page")
     return items
-
-
-def digest(value: dict[str, Any]) -> str:
-    body = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
-    return "sha256:" + hashlib.sha256(body).hexdigest()
 
 
 parser = argparse.ArgumentParser()
@@ -132,7 +131,7 @@ try:
             item["name"] for item in paginated_items(gh_api(f"repos/{args.repo}/labels"))
         ),
     }
-    snapshot["snapshotDigest"] = digest(snapshot)
+    snapshot["snapshotDigest"] = sha256_bytes(canonical_json(snapshot))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n")
     print(json.dumps({"repository": args.repo, "output": str(args.output), "digest": snapshot["snapshotDigest"]}))

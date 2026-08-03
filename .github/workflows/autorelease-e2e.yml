@@ -29,6 +29,10 @@ concurrency:
   group: autorelease-e2e-${{ inputs.suite }}
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   # Dispatch inputs select the refs every suite checks out. They are shaped once
   # here, ahead of every other job, and republished as outputs so no raw inputs
@@ -138,8 +142,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: php-autorelease-canary
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

@@ -10,6 +10,6 @@
     "openai/codex-action": "52fe01ec70a42f454c9d2ebd47598f9fd6893d56"
   },
   "workflows": {
-    ".github/workflows/autorelease-e2e.yml": "sha256:677ad87c8c58bdb61e6fc8e54782b70a89533ac4916827414a7d639985949c6b"
+    ".github/workflows/autorelease-e2e.yml": "sha256:5ae830a817f55657a6583dd3ed121c1156de1ce843a23e0b7ed8fa56a0f0f274"
   }
 }

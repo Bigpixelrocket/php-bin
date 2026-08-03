@@ -3,6 +3,7 @@
   "patterns": [
     ".github/codex/autorelease/**",
     ".github/codex-action-contract.json",
+    ".github/dependabot.yml",
     ".github/autorelease-operator.json",
     ".github/autorelease-pins.json",
     ".github/workflows/**",
@@ -10,6 +11,7 @@
     "schemas/**",
     "autorelease/**",
     "scripts/admit-autorelease-plan",
+    "scripts/assert-admission-checks",
     "scripts/capture-autorelease-evidence",
     "scripts/configure-github-autorelease",
     "scripts/dispatch-pr-checks",
@@ -28,6 +30,17 @@
     "scripts/watch-autorelease-evidence",
     "autorelease-events/**",
     "autorelease-state/**",
-    ".github/CODEOWNERS"
+    ".github/CODEOWNERS",
+    "scripts/test.sh",
+    "scripts/build.sh",
+    "scripts/package.sh",
+    "scripts/compare-modules.sh",
+    "scripts/check-public-language.sh",
+    "tests/*",
+    "scripts/lib.sh",
+    "scripts/install-spc.sh",
+    "scripts/install-build-deps.sh",
+    ".spc-version",
+    ".spc-sha256"
   ]
 }

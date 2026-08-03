@@ -9,13 +9,12 @@ server, DNS, databases, or a desktop UI.
 
 ## Status
 
-Public macOS arm64 releases are available for every maintained PHP branch:
-[8.2.32](https://github.com/bigpixelrocket/php-bin/releases/tag/8.2.32),
-[8.3.32](https://github.com/bigpixelrocket/php-bin/releases/tag/8.3.32),
-[8.4.23](https://github.com/bigpixelrocket/php-bin/releases/tag/8.4.23), and
-[8.5.9](https://github.com/bigpixelrocket/php-bin/releases/tag/8.5.9).
-Each release is rebuilt on macOS 26 arm64 and published only after its exact
-module baseline and deployment target checks pass.
+Public macOS arm64 releases are available for every maintained PHP branch. See
+[the releases page](https://github.com/bigpixelrocket/php-bin/releases) for the
+current set; it is published automatically, so any list repeated here would go
+stale on the next patch. Each release is rebuilt on macOS 26 arm64 and
+published only after its exact module baseline and deployment target checks
+pass.
 
 ## Autorelease
 
@@ -84,8 +83,8 @@ requests.
 For an ordinary stable patch, the admitted no-edit intent goes directly to
 `Autorelease publish transaction`; no implementation job or PR is created. A
 recipe change uses a sealed automation PR first. Never move an existing tag or
-replace a published asset. Use a rebuild tag such as `8.5.9-1` when the PHP
-patch is unchanged but the recipe changes the bytes.
+replace a published asset. When the PHP patch is unchanged but the recipe
+changes the bytes, the admitted plan requests a rebuild tag such as `8.5.9-1`.
 
 ### New PHP branch
 
@@ -96,15 +95,17 @@ resolve extension compatibility and exact-module drift without weakening a
 gate. Publication waits for readiness records tied to the same action key,
 evidence digests, php-bin policy commit, and exact repository commits.
 
-A new major such as PHP `9.0` follows the same process, but every validator and
-parser anchored to PHP 8 must be reviewed explicitly.
+A new major such as PHP `9.0` follows the same process unchanged: no validator,
+regular expression, or policy file is anchored to PHP 8, so any maintained
+major and minor is admissible without a code change.
 
 ### End-of-life branches
 
-When captured upstream evidence shows EOL, publication for that branch stops
-and coordinated admitted changes remove its shorthand and active build support.
-Existing GitHub Releases remain immutable and exact historical installation
-continues to work.
+When captured upstream evidence shows EOL, the same unattended path stops new
+publication for that branch and delists it: admitted changes remove its
+shorthand and active build support in both repositories. Nothing is deleted or
+retracted. Every already-published GitHub Release stays immutable, and exact
+historical installation of those versions keeps working indefinitely.
 
 Runtime packages required by particular extensions are documented in
 [`docs/runtime-deps.md`](docs/runtime-deps.md). The build and release workflow
@@ -114,7 +115,9 @@ is documented in [`docs/release-process.md`](docs/release-process.md).
 
 - macOS 26 (Tahoe) or newer
 - arm64 / aarch64
-- Currently supported PHP branches: 8.2 through 8.5
+- Supported PHP branches: whichever branches
+  [`support-policy.json`](support-policy.json) currently lists, which the
+  autorelease system regenerates from upstream lifecycle evidence
 - CLI SAPI
 
 Other operating systems, Intel Macs, and PHP 7.x are outside the v1 target.

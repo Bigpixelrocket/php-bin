@@ -32,6 +32,10 @@ concurrency:
   group: autorelease-publish-${{ inputs.version }}
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   # Dispatch inputs reach actions/checkout and many run scripts. They are shaped
   # once here, ahead of every other job, and republished as outputs so no raw
@@ -40,6 +44,8 @@ jobs:
     name: Validate dispatch inputs
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
     outputs:
       version: ${{ steps.validated.outputs.version }}
       exact_commit: ${{ steps.validated.outputs.exact_commit }}
@@ -104,11 +110,11 @@ jobs:
           test "$(jq -r .releaseIntent.version admitted-run/autorelease-plan.json)" = "$VERSION"
           test "$(jq -r .preconditions.phpBinHead admitted-run/autorelease-plan.json)" = "$EXACT_COMMIT"
           test "$(jq -r .preconditions.supportPolicyDigest admitted-run/autorelease-plan.json)" = "$(./autorelease/control.py digest support-policy.json)"
-          test "$(jq -r .unattendedMutation .github/autorelease-operator.json)" = "enabled"
+          ./autorelease/control.py operator-gate --operator-file .github/autorelease-operator.json --require-enabled
           mkdir -p release-run
           gh api "repos/${{ github.repository }}/contents/.github/autorelease-operator.json?ref=main" \
             --jq .content | base64 --decode > release-run/current-operator.json
-          test "$(jq -r .unattendedMutation release-run/current-operator.json)" = "enabled"
+          ./autorelease/control.py operator-gate --operator-file release-run/current-operator.json --require-enabled
           mise_commit="$(jq -r .sha admitted-run/evidence/raw/mise_php_state.body)"
           [[ "$mise_commit" =~ ^[0-9a-f]{40}$ ]]
           git -C mise-php fetch origin "$mise_commit"
@@ -129,7 +135,7 @@ jobs:
         run: |
           action="$(jq -r .action admitted-run/autorelease-plan.json)"
           if [[ "$action" == "new_branch" ]]; then
-            filename="$(printf '%s' "$ACTION_KEY" | tr ':/' '--').json"
+            filename="$(./autorelease/control.py action-filename "$ACTION_KEY")"
             event="autorelease-events/$filename"
             test -f "$event"
             test "$(jq -r .state "$event")" = "php_bin_ready"
@@ -182,7 +188,7 @@ jobs:
         run: |
           mkdir -p release-run
           printf '{"schemaVersion":1,"state":"requested","history":[]}\n' > release-run/transaction.json
-          filename="$(printf '%s' "$ACTION_KEY" | tr ':/' '--').json"
+          filename="$(./autorelease/control.py action-filename "$ACTION_KEY")"
           if [[ -f "autorelease-events/$filename" ]]; then
             cp "autorelease-events/$filename" release-run/event.json
             if [[ "$(jq -r .state release-run/event.json)" == "php_bin_ready" \
@@ -215,7 +221,7 @@ jobs:
         run: |
           gh api "repos/${{ github.repository }}/contents/.github/autorelease-operator.json?ref=main" \
             --jq .content | base64 --decode > release-run/current-operator.json
-          test "$(jq -r .unattendedMutation release-run/current-operator.json)" = "enabled"
+          ./autorelease/control.py operator-gate --operator-file release-run/current-operator.json --require-enabled
           for target in built draft_created draft_verified; do
             ./scripts/publish-release \
               --transaction release-run/transaction.json \
@@ -265,7 +271,7 @@ jobs:
         run: |
           gh api "repos/${{ github.repository }}/contents/.github/autorelease-operator.json?ref=main" \
             --jq .content | base64 --decode > release-run/current-operator.json
-          test "$(jq -r .unattendedMutation release-run/current-operator.json)" = "enabled"
+          ./autorelease/control.py operator-gate --operator-file release-run/current-operator.json --require-enabled
           for target in published public_verified complete; do
             ./scripts/publish-release \
               --transaction release-run/transaction.json \
@@ -289,6 +295,26 @@ jobs:
             sleep 5
           done
           test "$verified" = "true"
+      - name: Record whether the immutable release is live
+        if: always()
+        run: |
+          mkdir -p release-run
+          released=false
+          if [[ -f release-run/transaction.json ]]; then
+            case "$(jq -r .state release-run/transaction.json)" in
+              published|public_verified|complete) released=true ;;
+            esac
+          fi
+          jq -n --argjson released "$released" --arg version "$VERSION" \
+            '{schemaVersion:1,released:$released,version:$version}' > release-run/transaction-state.json
+      - name: Retain the transaction state for triage
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-transaction-state-${{ github.run_id }}
+          path: release-run/transaction-state.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Verify fresh public exact-version and branch-shorthand installs
         run: |
           unset MISE_PHP_API_BASE_URL
@@ -332,7 +358,7 @@ jobs:
           git fetch origin main
           git checkout -B "autorelease/event-${{ github.run_id }}" origin/main
           base="$(git rev-parse HEAD)"
-          filename="$(printf '%s' "$ACTION_KEY" | tr ':/' '--').json"
+          filename="$(./autorelease/control.py action-filename "$ACTION_KEY")"
           cp release-run/event.json "autorelease-events/$filename"
           git add "autorelease-events/$filename"
           git -c user.name=autorelease -c user.email=autorelease@invalid \
@@ -358,7 +384,7 @@ jobs:
             --pr "${{ steps.event_pr.outputs.number }}" \
             --check "Script checks" \
             --output release-run/event-checks.json
-          jq -e '[.[] | select(.name=="Script checks") | .bucket] == ["pass"]' release-run/event-checks.json
+          ./scripts/assert-admission-checks --checks release-run/event-checks.json
           actual="$(gh pr view "${{ steps.event_pr.outputs.number }}" --json headRefOid --jq .headRefOid)"
           test "$actual" = "${{ steps.event_pr.outputs.head_sha }}"
           git fetch origin main
@@ -413,23 +439,50 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
+      actions: read
       contents: read
       issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Create structured critical event
+      # A run that fails before the state is retained keeps the critical default below.
+      - name: Download the retained transaction state
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-transaction-state-${{ github.run_id }}
+          path: release-state
+      - name: Create a structured event keyed on the transaction state
         env:
           ACTION_KEY: ${{ needs.preflight.outputs.action_key }}
           VERSION: ${{ needs.preflight.outputs.version }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # A live release is not a critical failure: the watcher files the missing
+          # event record on its own. Only an unpublished release stops the pipeline.
+          released=false
+          if [[ -f release-state/transaction-state.json ]]; then
+            released="$(jq -r .released release-state/transaction-state.json)"
+          fi
+          if [[ "$released" == "true" ]]; then
+            state=released
+            severity=warning
+            summary="PHP $VERSION was published; its event record is pending and the watcher will recover it: $RUN_URL"
+            fingerprint="release-record-pending:$ACTION_KEY"
+          else
+            state=blocked
+            severity=critical
+            summary="Autorelease failed for PHP $VERSION: $RUN_URL"
+            fingerprint="release-failure:$ACTION_KEY"
+          fi
           jq -n \
             --arg actionKey "$ACTION_KEY" \
-            --arg summary "Autorelease failed for PHP $VERSION: $RUN_URL" \
-            --arg failureFingerprint "release-failure:$ACTION_KEY" \
-            '{actionKey:$actionKey,state:"blocked",severity:"critical",humanActionRequired:false,summary:$summary,failureFingerprint:$failureFingerprint}' \
+            --arg state "$state" \
+            --arg severity "$severity" \
+            --arg summary "$summary" \
+            --arg failureFingerprint "$fingerprint" \
+            '{actionKey:$actionKey,state:$state,severity:$severity,humanActionRequired:false,summary:$summary,failureFingerprint:$failureFingerprint}' \
             > event.json
       - name: Notify owner
         env:
