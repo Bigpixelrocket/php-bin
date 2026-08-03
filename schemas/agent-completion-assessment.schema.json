@@ -19,14 +19,15 @@
     "phaseStatus": {"type": "string", "enum": ["complete", "blocked", "needs_human"]},
     "criteria": {
       "type": "array",
+      "minItems": 1,
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["id", "status", "evidence"],
         "properties": {
-          "id": {"type": "string"},
+          "id": {"type": "string", "minLength": 1},
           "status": {"type": "string", "enum": ["passed", "failed", "unresolved"]},
-          "evidence": {"type": "array", "items": {"type": "string"}}
+          "evidence": {"type": "array", "items": {"type": "string", "minLength": 1}}
         }
       }
     },
