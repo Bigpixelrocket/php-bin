@@ -543,6 +543,25 @@ class AutoreleaseControlTests(unittest.TestCase):
             route(action="new_patch", recordActionKey="recipe_rebuild:8.5.9:2")["recoveryRoute"],
         )
         self.assertEqual("recover_record", route(recordActionKey="new_patch:8.5.9")["recoveryRoute"])
+        # Composing the two functions is the reading their names invite, so a raw
+        # watch_decision must route rather than raise: its own action names the repair the
+        # recovery overlay owns, and its own key is the key that overlay recovers.
+        missing_record = watch_decision(
+            self._releases_manifest(),
+            self._releases_manifest(),
+            [{"actionKey": "new_patch:8.5.8", "state": "complete"}],
+            {"healthy": True},
+            releases=[
+                {"tag_name": "8.5.9", "draft": False, "prerelease": False, "immutable": True},
+                {"tag_name": "8.5.8", "draft": False, "prerelease": False, "immutable": True},
+            ],
+        )
+        self.assertEqual("record_completed_event", missing_record["action"])
+        composed = route_watch_action(missing_record)
+        self.assertEqual("none", composed["route"])
+        self.assertEqual("recovery_routed_by_recovery_route", composed["reason"])
+        self.assertEqual("recover_record", composed["recoveryRoute"])
+        self.assertEqual("new_patch:8.5.9", composed["recordActionKey"])
         # Only the lifecycle actions notify, and blocked plans notify through their route.
         self.assertEqual("lifecycle", route(action="new_branch")["notify"])
         self.assertEqual("lifecycle", route(action="branch_eol")["notify"])

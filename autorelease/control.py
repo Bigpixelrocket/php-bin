@@ -1079,6 +1079,9 @@ def watch_decision(
 # Only these two admitted actions announce themselves before their route runs, and only
 # these three select a release for the publish transaction.
 WATCH_LIFECYCLE_NOTIFICATION_ACTIONS = frozenset({"new_branch", "branch_eol"})
+# `watch_decision` names a missing event record as its own action. The recovery overlay
+# owns that repair, so it is a route the plan never takes rather than an unrouted one.
+WATCH_RECOVERY_ACTION = "record_completed_event"
 WATCH_PUBLISH_ACTIONS = frozenset({"new_patch", "new_branch", "reconcile_partial"})
 
 
@@ -1102,6 +1105,10 @@ def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:
     recovery_merged = bool(decision.get("recoveryMerged"))
     evidence_recorded = bool(decision.get("evidenceAlreadyRecorded"))
 
+    # The workflow passes the recovery key separately, but a caller handing this function
+    # a raw `watch_decision` carries it as that decision's own key, so both are accepted.
+    recovery_key = record_action_key or (action_key if action == WATCH_RECOVERY_ACTION else "")
+
     def routed(route: str, reason: str, notify: str = "none") -> dict[str, Any]:
         return {
             "schemaVersion": 1,
@@ -1110,12 +1117,14 @@ def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:
             "notify": notify,
             "action": action,
             "actionKey": action_key,
-            "recordActionKey": record_action_key,
-            "recoveryRoute": "recover_record" if record_action_key else "none",
+            "recordActionKey": recovery_key,
+            "recoveryRoute": "recover_record" if recovery_key else "none",
         }
 
     if action in {"", "none"}:
         return routed("none", "no_admitted_plan")
+    if action == WATCH_RECOVERY_ACTION:
+        return routed("none", "recovery_routed_by_recovery_route")
     if recovery_merged and action == "branch_eol":
         # The completion asserts an untouched base, which the recovered record just moved.
         return routed("none", "eol_completion_deferred_by_recovery")

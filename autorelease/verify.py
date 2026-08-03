@@ -84,6 +84,17 @@ def workflow_steps(document: dict[str, Any]) -> list[tuple[str, int, dict[str, A
     ]
 
 
+def operator_gate_calls(run: str) -> list[str]:
+    """Return every operator-gate invocation in a workflow step, one per line.
+
+    The gate has two deliberate shapes. With `--require-enabled` the subcommand fails the
+    job; without it the subcommand only prints the state and exits 0, so a hard site that
+    loses the flag still reads like a gate while gating nothing. Callers therefore have to
+    inspect the invocation itself, not merely the presence of the subcommand name.
+    """
+    return [line.strip() for line in run.splitlines() if "operator-gate" in line]
+
+
 def credential_sites(node: Any, path: str) -> list[str]:
     """Return every path in a parsed workflow whose keys or values name the OpenAI credential.
 
@@ -755,6 +766,29 @@ class Verifier:
             all("operator-gate" in step["run"] for step in dispatch_steps),
             "watcher pause does not stop downstream mutation",
         )
+        # The watcher gates are the soft shape on purpose: they log their own message and
+        # exit 0. That is only safe while they test the reported state, so assert the
+        # comparison and assert the absence of the flag, keeping them distinguishable from
+        # the hard sites rather than letting either shape satisfy one check.
+        soft_gate_calls = [call for _, _, step in watch_steps for call in operator_gate_calls(step.get("run") or "")]
+        assert_true(soft_gate_calls, "the watcher no longer reads the operator control")
+        assert_true(
+            all('"enabled"' in call and "--require-enabled" not in call for call in soft_gate_calls),
+            "a watcher operator gate neither tests the reported state nor fails the job",
+        )
+        # Every gate outside the watcher must fail its job, which is the flag rather than
+        # the subcommand: without it the gate reports the state and the job releases anyway.
+        hard_gate_calls = [
+            call
+            for name in ("autorelease-publish.yml", "autorelease-implement.yml")
+            for _, _, step in workflow_steps(load_workflow(PHP_ROOT / ".github/workflows" / name))
+            for call in operator_gate_calls(step.get("run") or "")
+        ]
+        assert_true(hard_gate_calls, "the release and implementation workflows no longer read the operator control")
+        assert_true(
+            all("--require-enabled" in call for call in hard_gate_calls),
+            "an operator gate that must fail its job only reports the state",
+        )
         release_steps = workflow_steps(load_workflow(PHP_ROOT / ".github/workflows/autorelease-publish.yml"))
         effect_steps = [
             (job_name, step)
@@ -765,7 +799,7 @@ class Verifier:
         assert_true(
             all(
                 job_name == "release"
-                and "operator-gate --operator-file release-run/current-operator.json" in step["run"]
+                and "operator-gate --operator-file release-run/current-operator.json --require-enabled" in step["run"]
                 for job_name, step in effect_steps
             ),
             "release effects are not gated by the live operator state",
