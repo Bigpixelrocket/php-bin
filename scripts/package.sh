@@ -31,7 +31,9 @@ if [[ "$ACTUAL_VERSION" != "$PHP_PATCH_VERSION" ]]; then
   exit 1
 fi
 
-ARTIFACT_DIR="$PROJECT_ROOT/.artifacts"
+# The build and release workflows read .artifacts from the working tree, so that
+# stays the default; the override exists for callers that must not write there.
+ARTIFACT_DIR="${ARTIFACT_DIR:-$PROJECT_ROOT/.artifacts}"
 ARTIFACT_NAME="php-${RELEASE_TAG}-cli-macos-aarch64.tar.gz"
 TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/php-bin-package.XXXXXX")"
 trap 'rm -rf "$TEMP_DIR"' EXIT
