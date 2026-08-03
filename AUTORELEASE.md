@@ -19,6 +19,17 @@ paths admitted by the evidence-bound plan. It has no GitHub write credential
 and cannot change the prompts, contracts, workflows, policy, admission,
 sealing, merge, or release controls.
 
+The line between the two is deliberate. The *harness* is protected: `scripts/`
+gates such as `test.sh`, `lib.sh`, `build.sh`, `package.sh`, and
+`compare-modules.sh`, the toolchain pins `.spc-version` and `.spc-sha256`,
+`tests/`, `autorelease/**`, `schemas/**`, `.github/workflows/**`, and the
+pinned Codex prompts and contracts under `.github/`. The *product* is
+agent-admissible: `patches/`, `stages/`, `craft.yml`, `extensions.txt`, and
+`expected-modules/`, and in `mise-php` the equivalent `hooks/*.lua`, `lib/`,
+and `metadata.lua`. A model may change what is built, never what decides
+whether the build was correct, so the protected tests are the standing control
+on every product change.
+
 ```mermaid
 flowchart TD
   capture["Capture fixed raw evidence"] --> changed{"Digest or health changed?"}
@@ -43,6 +54,14 @@ and never overwrites, deletes, or retags a published release. A first release
 on a new PHP branch also requires exact-commit `php_bin_ready` and `mise_ready`
 records.
 
+Validation deliberately runs the repository's own scripts at the sealed model
+commit: `autorelease-implement.yml`, and `autorelease-consumer.yml` in
+`mise-php`, check out the base SHA, apply the sealed patch, and run
+`./scripts/test.sh` from that tree. That is safe precisely because the gates
+themselves are protected paths: a model patch that touched `autorelease/**`,
+`tests/`, or any gate script is rejected at admission and never reaches
+validation, so the code under test can never be the code doing the testing.
+
 Failures use one deduplicated issue per action key, assigned to the username in
 `AUTORELEASE_OWNER`. Only a meaningful state, evidence, fingerprint, required
 action, or final-result change adds a comment. Critical failures stop mutation.
@@ -60,6 +79,30 @@ flowchart TD
   issue --> email["GitHub inbox and email"]
   issue --> actions["Actions failure email fallback"]
 ```
+
+## Unattended lifecycle
+
+Adding or retiring a PHP branch takes zero human input. Nothing in the system
+is anchored to a particular major or minor: the action keys, version
+validators, and policy files all accept any `<major>.<minor>`, so PHP `8.6`,
+`9.0`, and `10.0` all travel the same path with no code change.
+
+When upstream evidence first shows a new branch, the admitted implementation
+patch adds `expected-modules/<branch>.txt` and whatever recipe inputs the
+staged S0–S4 builds need, `support-policy.json` regenerates from the accepted
+policy, and `mise-php` regenerates `support-snapshot.json` and
+`lib/policy.lua` from it. The readiness and event records then merge on their
+own: `autorelease-events/`, `autorelease-state/`, and `mise-php`'s
+`readiness/` sit outside CODEOWNERS precisely so their exact-SHA automation
+PRs satisfy branch protection without a reviewer, while every protected
+control still cannot. Publication waits only on machine facts — matching
+`php_bin_ready` and `mise_ready` records at exact commits.
+
+Retirement is the mirror image and equally unattended. Captured EOL evidence
+stops new builds and publication for that branch and delists it from
+`mise ls-remote` and branch-shorthand resolution. It removes nothing: every
+release already published stays immutable, and an exact version such as
+`8.2.29` installs exactly as before, indefinitely.
 
 Unattended mutation is controlled by
 `.github/autorelease-operator.json`. Set `unattendedMutation` to `paused` in a
@@ -104,9 +147,12 @@ protected `main`; feature-branch runs cannot enter its credentialed
 environment.
 
 Inspect `autorelease-events/`, generated `support-policy.json`, the reviewed
-`autorelease/policy-invariants.json`, retained workflow
-artifacts, the event issue marker, and `docs/autorelease-verification.md` to
-reconstruct a decision. `scripts/snapshot-github-admin-state` captures settings,
+`autorelease/policy-invariants.json`, retained workflow artifacts, the event
+issue marker, and the `autorelease-verification.json` report and
+`autorelease-verification.md` summary that `scripts/verify-autorelease-system`
+writes into its `--output` directory, to reconstruct a decision. It is
+generated per run and is not a checked-in file.
+`scripts/snapshot-github-admin-state` captures settings,
 variables, and secret names without secret values. Recovery never skips
 admission or a failed gate: correct the external dependency or submit a
 reviewed protected-control change, then rerun the normal workflow.

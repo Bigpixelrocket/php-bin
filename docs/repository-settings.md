@@ -69,7 +69,7 @@ The normal verification commands are:
 ```bash
 ./scripts/snapshot-github-admin-state \
   --repo bigpixelrocket/php-bin \
-  --output docs/admin-state/php-bin.json
+  --output docs/admin-state/php-bin-after.json
 
 ./scripts/configure-github-autorelease \
   --repo bigpixelrocket/php-bin \
