@@ -247,17 +247,16 @@ def validate_support_policy(root: pathlib.Path = ROOT) -> dict[str, Any]:
     }
 
 
-def validate_plan(
+def _validate_plan_shape(
     plan: dict[str, Any],
     manifest_path: pathlib.Path,
-    contract: dict[str, Any],
-    shared_path: pathlib.Path,
-    phase_path: pathlib.Path,
-    event_contract_path: pathlib.Path,
-    repo_heads: dict[str, str] | None = None,
-    policy_digest: str | None = None,
-    completed_actions: set[str] | None = None,
-) -> dict[str, Any]:
+    completed_actions: set[str] | None,
+) -> str:
+    """Reject a plan whose identity is wrong, and return the action key it claims.
+
+    Nothing later in admission means anything until the plan names one reviewed
+    action and one well-formed key that no completed event already owns.
+    """
     require(plan.get("schemaVersion") == 1, "unsupported autorelease plan version")
     require(
         plan.get("action")
@@ -289,6 +288,23 @@ def validate_plan(
         action_key not in (completed_actions or set()),
         "action key already completed",
     )
+    return action_key
+
+
+def _validate_plan_preconditions(
+    plan: dict[str, Any],
+    contract: dict[str, Any],
+    shared_path: pathlib.Path,
+    phase_path: pathlib.Path,
+    event_contract_path: pathlib.Path,
+    repo_heads: dict[str, str] | None,
+    policy_digest: str | None,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """Bind the plan to the instructions it was written against and the state it saw.
+
+    Returns the instruction digests the admission record carries and the declared
+    preconditions, which the plan's own evidence references are resolved against.
+    """
     expected_digests = {
         "shared": instruction_digest(shared_path),
         "phaseTemplate": instruction_digest(phase_path),
@@ -329,6 +345,19 @@ def validate_plan(
             declared_heads.get("supportPolicyDigest") == policy_digest,
             "stale support policy precondition",
         )
+    return expected_digests, declared_heads
+
+
+def _validate_plan_actions(
+    plan: dict[str, Any],
+    manifest_path: pathlib.Path,
+    declared_heads: dict[str, Any],
+) -> None:
+    """Reject the effects the plan asks for: evidence, paths, release, and budgets.
+
+    Every claim is re-derived from the captured bodies and the reviewed bounds
+    rather than trusted from the plan that asserts it.
+    """
     evidence_refs = {}
     resolved_evidence = []
     for index, evidence in enumerate(plan.get("evidence", [])):
@@ -414,6 +443,36 @@ def validate_plan(
         value = budgets.get(field)
         require(isinstance(value, int) and not isinstance(value, bool), f"{field} must be an integer")
         require(0 < value <= upper, f"{label} budget is outside reviewed bound")
+
+
+def validate_plan(
+    plan: dict[str, Any],
+    manifest_path: pathlib.Path,
+    contract: dict[str, Any],
+    shared_path: pathlib.Path,
+    phase_path: pathlib.Path,
+    event_contract_path: pathlib.Path,
+    repo_heads: dict[str, str] | None = None,
+    policy_digest: str | None = None,
+    completed_actions: set[str] | None = None,
+) -> dict[str, Any]:
+    """Admit one agent plan, or reject it.
+
+    The three gates run in a fixed order: what the plan is, what it was written
+    against, and what it asks for. A later gate reads values the earlier one
+    proved, so none of them is safe to reorder.
+    """
+    action_key = _validate_plan_shape(plan, manifest_path, completed_actions)
+    expected_digests, declared_heads = _validate_plan_preconditions(
+        plan,
+        contract,
+        shared_path,
+        phase_path,
+        event_contract_path,
+        repo_heads,
+        policy_digest,
+    )
+    _validate_plan_actions(plan, manifest_path, declared_heads)
     return {
         "admitted": True,
         "admittedAt": utc_now(),
