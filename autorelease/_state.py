@@ -290,6 +290,14 @@ def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:
     nothing — those return `route: "none"` with the reason, so an idle run stays green.
     Anything else raises instead of falling through to a silent success, which is what an
     unrouted combination used to do.
+
+    Invariant: `recoveryRoute` must depend on `recordActionKey` alone. The watch workflow
+    calls this function twice in one run — the recover step reads `recoveryRoute` from a
+    call that supplies only the record key, then the dispatch step reads `route` from a
+    call that supplies the whole decision. Both agree today only because the recovery
+    overlay ignores every other field. A field added to the recovery decision would make
+    the first call answer from an incomplete decision and silently disagree with the
+    second, so it must be passed to both callers in the same change.
     """
     action = str(decision.get("action") or "")
     action_key = str(decision.get("actionKey") or "")
