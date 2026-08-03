@@ -468,6 +468,22 @@ class AutoreleaseControlTests(unittest.TestCase):
             release.index("Notify owner of completed release"),
         )
 
+    def test_assert_admission_checks(self):
+        script = str(pathlib.Path(__file__).resolve().parents[1] / "scripts/assert-admission-checks")
+        ok = [{"name": "Script checks", "bucket": "pass"},
+              {"name": "Protected controls", "bucket": "pass"}]
+        missing_protected = [{"name": "Script checks", "bucket": "pass"}]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = pathlib.Path(temporary, "checks.json")
+            path.write_text(json.dumps(ok))
+            subprocess.run([script, "--checks", str(path),
+                            "--require-protected-controls"], check=True)
+            path.write_text(json.dumps(missing_protected))
+            subprocess.run([script, "--checks", str(path)], check=True)
+            result = subprocess.run([script, "--checks", str(path),
+                                     "--require-protected-controls"], capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+
     def test_malformed_contract_shapes_fail_closed(self):
         contract = self._contract()
         contract["allowedAuthority"] = [[]]

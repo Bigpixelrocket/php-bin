@@ -10,6 +10,7 @@
     "schemas/**",
     "autorelease/**",
     "scripts/admit-autorelease-plan",
+    "scripts/assert-admission-checks",
     "scripts/capture-autorelease-evidence",
     "scripts/configure-github-autorelease",
     "scripts/dispatch-pr-checks",

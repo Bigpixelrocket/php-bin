@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Asserts dispatch-pr-checks output shows every required admission check
+# passing. --require-protected-controls is used by flows whose PRs must not
+# touch protected paths; sealed-patch flows omit it because sealed patches
+# may edit support-policy.json under seal verification instead.
+set -euo pipefail
+require_protected="false"
+check_name="Script checks"
+checks_file=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --require-protected-controls) require_protected="true"; shift ;;
+    --check-name) check_name="$2"; shift 2 ;;
+    --checks) checks_file="$2"; shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+[[ -n "$checks_file" ]]
+jq -e --arg name "$check_name" '[.[] | select(.name==$name) | .bucket] == ["pass"]' "$checks_file" > /dev/null
+if [[ "$require_protected" == "true" ]]; then
+  jq -e '[.[] | select(.name=="Protected controls") | .bucket] == ["pass"]' "$checks_file" > /dev/null
+fi
+echo "Admission checks passed (protected controls required: $require_protected)."

@@ -395,7 +395,7 @@ jobs:
             --pr "${{ steps.pr.outputs.number }}" \
             --check "Script checks" \
             --output autorelease-run/pr-checks.json
-          jq -e '[.[] | select(.name=="Script checks") | .bucket] == ["pass"]' autorelease-run/pr-checks.json
+          ./scripts/assert-admission-checks --checks autorelease-run/pr-checks.json
       - name: Re-verify exact SHA, sealed tree, and preconditions
         env:
           GH_TOKEN: ${{ github.token }}
@@ -499,7 +499,7 @@ jobs:
             --pr "${{ steps.readiness.outputs.number }}" \
             --check "Script checks" \
             --output autorelease-run/readiness-checks.json
-          jq -e '[.[] | select(.name=="Script checks") | .bucket] == ["pass"]' autorelease-run/readiness-checks.json
+          ./scripts/assert-admission-checks --checks autorelease-run/readiness-checks.json
           actual="$(gh pr view "${{ steps.readiness.outputs.number }}" --json headRefOid --jq .headRefOid)"
           test "$actual" = "${{ steps.readiness.outputs.head_sha }}"
           git fetch origin main

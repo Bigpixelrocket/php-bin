@@ -8,6 +8,7 @@
 /autorelease/ @loadinglucian
 /schemas/ @loadinglucian
 /scripts/admit-autorelease-plan @loadinglucian
+/scripts/assert-admission-checks @loadinglucian
 /scripts/capture-autorelease-evidence @loadinglucian
 /scripts/configure-github-autorelease @loadinglucian
 /scripts/dispatch-pr-checks @loadinglucian

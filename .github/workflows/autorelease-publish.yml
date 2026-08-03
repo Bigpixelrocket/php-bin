@@ -358,7 +358,7 @@ jobs:
             --pr "${{ steps.event_pr.outputs.number }}" \
             --check "Script checks" \
             --output release-run/event-checks.json
-          jq -e '[.[] | select(.name=="Script checks") | .bucket] == ["pass"]' release-run/event-checks.json
+          ./scripts/assert-admission-checks --checks release-run/event-checks.json
           actual="$(gh pr view "${{ steps.event_pr.outputs.number }}" --json headRefOid --jq .headRefOid)"
           test "$actual" = "${{ steps.event_pr.outputs.head_sha }}"
           git fetch origin main
