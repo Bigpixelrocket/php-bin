@@ -28,6 +28,12 @@
     "scripts/watch-autorelease-evidence",
     "autorelease-events/**",
     "autorelease-state/**",
-    ".github/CODEOWNERS"
+    ".github/CODEOWNERS",
+    "scripts/test.sh",
+    "scripts/build.sh",
+    "scripts/package.sh",
+    "scripts/compare-modules.sh",
+    "scripts/check-public-language.sh",
+    "tests/*"
   ]
 }

@@ -410,6 +410,19 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertTrue(path_is_protected("autorelease-state/last-evidence.json"))
         self.assertFalse(path_is_protected("support-policy.json"))
 
+    def test_gate_harness_paths_are_protected(self):
+        for path in ("scripts/test.sh", "scripts/build.sh", "scripts/package.sh",
+                     "scripts/compare-modules.sh", "scripts/check-public-language.sh",
+                     "tests/test_autorelease.py"):
+            self.assertTrue(path_is_protected(path), path)
+
+    def test_codeowners_covers_every_protected_script(self):
+        patterns = json.loads(pathlib.Path("autorelease/protected-paths.json").read_text())["patterns"]
+        codeowners = pathlib.Path(".github/CODEOWNERS").read_text()
+        for pattern in patterns:
+            if "*" not in pattern:
+                self.assertIn(f"/{pattern} ", codeowners, pattern)
+
     def test_token_created_prs_explicitly_dispatch_required_checks(self):
         root = pathlib.Path(__file__).resolve().parents[1]
         ci = (root / ".github/workflows/ci.yml").read_text()
