@@ -19,10 +19,12 @@ jobs:
     timeout-minutes: 30
     outputs:
       trigger: ${{ steps.decision.outputs.trigger }}
-      action_key: ${{ steps.plan.outputs.action_key }}
+      # A deterministic decision carries its own action and key because it never calls
+      # the model, so the plan step that usually publishes them is skipped.
+      action_key: ${{ steps.plan.outputs.action_key || steps.decision.outputs.action_key }}
       edits_required: ${{ steps.plan.outputs.edits_required }}
       base_sha: ${{ steps.plan.outputs.base_sha }}
-      action: ${{ steps.plan.outputs.action }}
+      action: ${{ steps.plan.outputs.action || steps.decision.outputs.action }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -47,9 +49,14 @@ jobs:
             --events autorelease-events \
             "${self_update[@]}" \
             --output autorelease-run/watch-decision.json
-          echo "trigger=$(jq -r .trigger autorelease-run/watch-decision.json)" >> "$GITHUB_OUTPUT"
+          {
+            echo "trigger=$(jq -r .trigger autorelease-run/watch-decision.json)"
+            echo "model_call=$(jq -r .modelCall autorelease-run/watch-decision.json)"
+            echo "action=$(jq -r .action autorelease-run/watch-decision.json)"
+            echo "action_key=$(jq -r .actionKey autorelease-run/watch-decision.json)"
+          } >> "$GITHUB_OUTPUT"
       - name: Record exact preconditions
-        if: steps.decision.outputs.trigger != 'quiet'
+        if: steps.decision.outputs.model_call == 'true'
         run: |
           jq -n \
             --arg phpBinHead "$(git rev-parse HEAD)" \
@@ -67,7 +74,7 @@ jobs:
             printf '[]\n' > autorelease-run/completed-actions.json
           fi
       - name: Prepare investigation contract
-        if: steps.decision.outputs.trigger != 'quiet'
+        if: steps.decision.outputs.model_call == 'true'
         run: |
           ./scripts/prepare-agent-task \
             --phase investigation \
@@ -90,7 +97,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/codex-home"
           cp .codex/investigation.config.toml "$RUNNER_TEMP/codex-home/config.toml"
       - name: Run read-only Codex investigation
-        if: steps.decision.outputs.trigger != 'quiet'
+        if: steps.decision.outputs.model_call == 'true'
         uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -105,7 +112,7 @@ jobs:
           allow-bot-users: github-actions[bot]
           codex-args: '["--strict-config","--ephemeral","--output-schema","schemas/autorelease-plan.schema.json"]'
       - name: Admit plan against exact evidence
-        if: steps.decision.outputs.trigger != 'quiet'
+        if: steps.decision.outputs.model_call == 'true'
         run: |
           ./scripts/admit-autorelease-plan \
             --plan autorelease-run/autorelease-plan.json \
@@ -121,7 +128,7 @@ jobs:
             --output autorelease-run/admission.json
       - name: Expose admitted plan
         id: plan
-        if: steps.decision.outputs.trigger != 'quiet'
+        if: steps.decision.outputs.model_call == 'true'
         run: |
           echo "action_key=$(jq -r .actionKey autorelease-run/autorelease-plan.json)" >> "$GITHUB_OUTPUT"
           echo "edits_required=$(jq -r .editsRequired autorelease-run/autorelease-plan.json)" >> "$GITHUB_OUTPUT"
@@ -282,6 +289,99 @@ jobs:
             test "$(git diff --name-only "$base" "$head")" = "autorelease-state/last-evidence.json"
             test "sha256:$(git show "$head:autorelease-state/last-evidence.json" | shasum -a 256 | awk '{print $1}')" = "$record_digest"
             gh pr merge "$number" --squash --delete-branch
+            exit 0
+          elif [[ "$action" == "record_completed_event" ]]; then
+            action_key="${{ needs.investigate.outputs.action_key }}"
+            # new_patch:8.5.9 is tag 8.5.9 and recipe_rebuild:8.5.9:2 is tag 8.5.9-2.
+            version="${action_key#*:}"
+            version="${version/:/-}"
+            classification="${action_key%%:*}"
+            filename="$(printf '%s' "$action_key" | tr ':/' '--').json"
+            event="autorelease-events/$filename"
+            test ! -f "$event"
+            test "$(gh release view "$version" --repo "${{ github.repository }}" --json isDraft --jq .isDraft)" = "false"
+            test "$(gh release view "$version" --repo "${{ github.repository }}" --json isImmutable --jq .isImmutable)" = "true"
+            assets=autorelease-plan-download/recovered-release
+            mkdir -p "$assets"
+            gh release download "$version" --repo "${{ github.repository }}" --dir "$assets" --clobber
+            ./scripts/validate-autorelease-archive \
+              --archive "$assets/php-$version-cli-macos-aarch64.tar.gz" \
+              --version "$version"
+            archive_digest="$(shasum -a 256 "$assets/php-$version-cli-macos-aarch64.tar.gz" | awk '{print $1}')"
+            grep -Fx "$archive_digest  php-$version-cli-macos-aarch64.tar.gz" "$assets/SHA256SUMS"
+            checksums_digest="$(shasum -a 256 "$assets/SHA256SUMS" | awk '{print $1}')"
+            release_commit="$(gh api "repos/${{ github.repository }}/commits/$version" --jq .sha)"
+            [[ "$release_commit" =~ ^[0-9a-f]{40}$ ]]
+            # The record states exactly what this run verified: the public release bytes.
+            # A fresh install is not reverifiable here, so it is never claimed as evidence.
+            jq -n \
+              --arg actionKey "$action_key" \
+              --arg classification "$classification" \
+              --arg commit "$release_commit" \
+              --arg runId "${{ github.run_id }}" \
+              --arg evidenceManifestDigest "$(jq -r .manifestDigest autorelease-plan-download/evidence/evidence-manifest.json)" \
+              '{schemaVersion:1,actionKey:$actionKey,classification:$classification,state:"release_requested",history:[],phpBinCommit:$commit,evidenceManifestDigest:$evidenceManifestDigest,recoveredByRunId:$runId}' \
+              > autorelease-plan-download/recovered-event.json
+            jq -n \
+              --arg version "$version" \
+              --arg archive "sha256:$archive_digest" \
+              --arg checksums "sha256:$checksums_digest" \
+              '[{kind:"published_immutable_release",version:$version,assetDigests:{("php-"+$version+"-cli-macos-aarch64.tar.gz"):$archive,"SHA256SUMS":$checksums}}]' \
+              > autorelease-plan-download/recovery-evidence.json
+            ./scripts/autorelease-event --event autorelease-plan-download/recovered-event.json --target released \
+              --evidence autorelease-plan-download/recovery-evidence.json \
+              --output autorelease-plan-download/recovered-event.next
+            mv autorelease-plan-download/recovered-event.next autorelease-plan-download/recovered-event.json
+            jq -n --arg version "$version" \
+              '[{kind:"public_release_bytes_reverified",version:$version,modes:["public_download"]}]' \
+              > autorelease-plan-download/recovery-evidence.json
+            ./scripts/autorelease-event --event autorelease-plan-download/recovered-event.json \
+              --target public_install_verified \
+              --evidence autorelease-plan-download/recovery-evidence.json \
+              --output autorelease-plan-download/recovered-event.next
+            mv autorelease-plan-download/recovered-event.next autorelease-plan-download/recovered-event.json
+            jq -n --arg runId "${{ github.run_id }}" '[{kind:"record_recovered_by_watcher",runId:$runId}]' \
+              > autorelease-plan-download/recovery-evidence.json
+            ./scripts/autorelease-event --event autorelease-plan-download/recovered-event.json --target complete \
+              --evidence autorelease-plan-download/recovery-evidence.json \
+              --output autorelease-plan-download/recovered-event.next
+            mv autorelease-plan-download/recovered-event.next autorelease-plan-download/recovered-event.json
+            base="$(git rev-parse HEAD)"
+            # The protected-controls exemption trusts this branch prefix from this
+            # workflow; a recovered record is filed exactly like an EOL completion.
+            branch="autorelease/eol-complete-${{ github.run_id }}"
+            git checkout -B "$branch"
+            cp autorelease-plan-download/recovered-event.json "$event"
+            git add "$event"
+            git -c user.name=autorelease-watcher -c user.email=autorelease@invalid \
+              commit -m "chore: complete $action_key"
+            head="$(git rev-parse HEAD)"
+            digest="sha256:$(shasum -a 256 "$event" | awk '{print $1}')"
+            gh auth setup-git
+            git push origin HEAD
+            url="$(gh pr create --base main --head "$branch" --title "chore: complete $action_key" \
+              --body "Recovered durable event record for an immutable published release.")"
+            number="${url##*/}"
+            ./scripts/dispatch-pr-checks \
+              --pr "$number" \
+              --check "Script checks" \
+              --output autorelease-plan-download/recovery-checks.json
+            ./scripts/assert-admission-checks --require-protected-controls --checks autorelease-plan-download/recovery-checks.json
+            test "$(gh pr view "$number" --json headRefOid --jq .headRefOid)" = "$head"
+            git fetch origin main
+            test "$(git rev-parse origin/main)" = "$base"
+            test "$(git rev-list --parents -n 1 "$head")" = "$head $base"
+            test "$(git diff --name-only "$base" "$head")" = "$event"
+            test "sha256:$(git show "$head:$event" | shasum -a 256 | awk '{print $1}')" = "$digest"
+            gh pr merge "$number" --squash --delete-branch
+            jq --arg version "$version" \
+              '.severity="info" | .summary="The event record for the published PHP \($version) release was recovered by the watcher." | .finalResult="passed"' \
+              "$event" > autorelease-plan-download/recovery-notification.json
+            ./scripts/notify-autorelease \
+              --event autorelease-plan-download/recovery-notification.json \
+              --state autorelease-plan-download/recovery-notification-state.json \
+              --output autorelease-plan-download/recovery-notification-next.json \
+              --backend github --repo "${{ github.repository }}" --owner "${{ vars.AUTORELEASE_OWNER }}"
             exit 0
           elif [[ "${{ needs.investigate.outputs.edits_required }}" == "true" ]]; then
             gh workflow run autorelease-implement.yml \

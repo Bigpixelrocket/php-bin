@@ -530,6 +530,23 @@ class AutoreleaseControlTests(unittest.TestCase):
             release.index("Notify owner of completed release"),
         )
 
+    def test_recovered_event_records_use_the_trusted_watcher_branch_prefix(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        watcher = (root / ".github/workflows/autorelease-watch.yml").read_text()
+        release = (root / ".github/workflows/autorelease-publish.yml").read_text()
+        protected = (root / ".github/workflows/protected-controls.yml").read_text()
+        recovery = watcher[watcher.index('elif [[ "$action" == "record_completed_event" ]]'):]
+        # The exemption only trusts this prefix from this workflow on these events.
+        self.assertIn('branch="autorelease/eol-complete-${{ github.run_id }}"', recovery)
+        self.assertIn("--require-protected-controls", recovery)
+        self.assertIn('".github/workflows/autorelease-watch.yml"', protected)
+        self.assertIn('{"schedule", "workflow_dispatch"}', protected)
+        self.assertIn("schedule:", watcher)
+        self.assertIn("workflow_dispatch:", watcher)
+        # A published release downgrades the publish alarm from critical to warning.
+        self.assertIn("release-transaction-state-${{ github.run_id }}", release)
+        self.assertIn("jq -r .released release-state/transaction-state.json", release)
+
     def test_assert_admission_checks(self):
         script = str(pathlib.Path(__file__).resolve().parents[1] / "scripts/assert-admission-checks")
         ok = [{"name": "Script checks", "bucket": "pass"},
