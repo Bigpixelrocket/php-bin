@@ -41,6 +41,10 @@ from autorelease.control import (
 PHP_ROOT = pathlib.Path(__file__).resolve().parents[1]
 PIN_RE = re.compile(r"^\s*uses:\s*[^#\s]+@([0-9a-f]{40})(?:\s*#.*)?$", re.MULTILINE)
 UNPINNED_RE = re.compile(r"^\s*uses:\s*[^#\s]+@(?![0-9a-f]{40}(?:\s|$))[^#\s]+", re.MULTILINE)
+CODEX_ACTION = "openai/codex-action@"
+CANONICAL_CODEX_CONFIG = re.compile(
+    r'cp\s+"?\.codex/\S+\.config\.toml"?\s+"\$RUNNER_TEMP/codex-home/config\.toml"'
+)
 
 
 def run(*args: str, cwd: pathlib.Path, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -63,6 +67,21 @@ def load_workflow(path: pathlib.Path) -> dict[str, Any]:
     document = json.loads(result.stdout)
     assert_true(isinstance(document, dict), f"workflow is not an object: {path}")
     return document
+
+
+def workflow_steps(document: dict[str, Any]) -> list[tuple[str, int, dict[str, Any]]]:
+    """Return every (job name, position in job, step) triple of a parsed workflow.
+
+    Acceptance checks assert on parsed structure so that reformatting a
+    workflow cannot pass or fail a control it does not change.
+    """
+    return [
+        (name, index, step)
+        for name, job in (document.get("jobs") or {}).items()
+        if isinstance(job, dict)
+        for index, step in enumerate(job.get("steps") or [])
+        if isinstance(step, dict)
+    ]
 
 
 def exact_head(repo: pathlib.Path) -> str:
@@ -364,12 +383,39 @@ class Verifier:
         repeated = retry_decision({**event, "lastRejectionRepeated": True}, "fp", 2)
         assert_true(first["recallAgent"], "bounded repair was not allowed")
         assert_true(not exhausted["recallAgent"] and not repeated["recallAgent"], "exhausted identical failure recalled agent")
-        php_workflow = (PHP_ROOT / ".github/workflows/autorelease-implement.yml").read_text()
-        mise_workflow = (self.mise_root / ".github/workflows/autorelease-consumer.yml").read_text()
-        for name, workflow in {"php-bin": php_workflow, "mise-php": mise_workflow}.items():
-            assert_true("authoritative-checks.log" in workflow, f"{name} does not retain deterministic failure logs")
-            assert_true("Run one offline Codex repair" in workflow, f"{name} has no bounded repair invocation")
-            assert_true("validate-repair:" in workflow, f"{name} does not cleanly validate repaired bytes")
+        workflows = {
+            "php-bin": PHP_ROOT / ".github/workflows/autorelease-implement.yml",
+            "mise-php": self.mise_root / ".github/workflows/autorelease-consumer.yml",
+        }
+        for name, path in workflows.items():
+            document = load_workflow(path)
+            steps = workflow_steps(document)
+            assert_true(
+                any("authoritative-checks.log" in (step.get("run") or "") for _, _, step in steps),
+                f"{name} does not retain deterministic failure logs",
+            )
+            repair_agents = [
+                step
+                for job_name, _, step in steps
+                if job_name == "repair" and str(step.get("uses") or "").startswith(CODEX_ACTION)
+            ]
+            assert_true(
+                len(repair_agents) == 1,
+                f"{name} does not bound the repair phase to one agent invocation",
+            )
+            validation = document.get("jobs", {}).get("validate-repair", {})
+            assert_true(
+                "repair" in (validation.get("needs") or []),
+                f"{name} does not validate repaired bytes in a job that follows the repair",
+            )
+            assert_true(
+                any(
+                    "sealed-repair" in (step.get("run") or "")
+                    and "./scripts/test.sh" in (step.get("run") or "")
+                    for step in validation.get("steps") or []
+                ),
+                f"{name} does not cleanly validate repaired bytes",
+            )
         assert_true(
             'network_access = false' in (PHP_ROOT / ".codex/repair.config.toml").read_text()
             and 'network_access = false' in (self.mise_root / ".codex/repair.config.toml").read_text(),
@@ -386,20 +432,40 @@ class Verifier:
         return ["retry.json"]
 
     def a07(self, directory: pathlib.Path) -> list[str]:
-        watch = (PHP_ROOT / ".github/workflows/autorelease-watch.yml").read_text()
-        implementation = (PHP_ROOT / ".github/workflows/autorelease-implement.yml").read_text()
+        # Every reviewed agent invocation, keyed by the workflow and job that may
+        # start it, with the sandbox that bounds its network and write authority.
+        reviewed_sandboxes = {
+            ("autorelease-watch.yml", "investigate"): "read-only",
+            ("autorelease-implement.yml", "implement"): "workspace-write",
+            ("autorelease-implement.yml", "repair"): "workspace-write",
+        }
+        observed_sandboxes = {}
+        for name in ("autorelease-watch.yml", "autorelease-implement.yml"):
+            steps = workflow_steps(load_workflow(PHP_ROOT / ".github/workflows" / name))
+            for job_name, index, step in steps:
+                if not str(step.get("uses") or "").startswith(CODEX_ACTION):
+                    continue
+                inputs = step.get("with") or {}
+                observed_sandboxes[(name, job_name)] = inputs.get("sandbox")
+                assert_true(
+                    not any(
+                        item.startswith("--profile")
+                        for item in json.loads(inputs.get("codex-args") or "[]")
+                    ),
+                    f"{name}:{job_name} selects a named profile instead of the canonical config",
+                )
+                assert_true(
+                    any(
+                        other_job == job_name
+                        and other_index < index
+                        and CANONICAL_CODEX_CONFIG.search(other.get("run") or "")
+                        for other_job, other_index, other in steps
+                    ),
+                    f"{name}:{job_name} starts the agent without loading its canonical config",
+                )
         assert_true(
-            "sandbox: read-only" in watch
-            and 'cp .codex/investigation.config.toml "$RUNNER_TEMP/codex-home/config.toml"' in watch
-            and '"--profile"' not in watch,
-            "investigation sandbox or canonical config loading is missing",
-        )
-        assert_true(
-            "sandbox: workspace-write" in implementation
-            and 'cp ".codex/$phase.config.toml" "$RUNNER_TEMP/codex-home/config.toml"' in implementation
-            and 'cp .codex/repair.config.toml "$RUNNER_TEMP/codex-home/config.toml"' in implementation
-            and '"--profile"' not in implementation,
-            "phase-bound implementation/repair canonical config loading is missing",
+            observed_sandboxes == reviewed_sandboxes,
+            "investigation and implementation agents are not bound to their reviewed sandboxes",
         )
         assert_true('network_access = false' in (PHP_ROOT / ".codex/implementation.config.toml").read_text(), "implementation network is not disabled")
         assert_true('allowed_domains = ["php.net", "github.com", "docs.github.com"]' in (PHP_ROOT / ".codex/investigation.config.toml").read_text(), "investigation allowlist changed")
@@ -469,7 +535,16 @@ class Verifier:
         releases = (self.mise_root / "lib/releases.lua").read_text()
         available = (self.mise_root / "hooks/available.lua").read_text()
         install = (self.mise_root / "hooks/pre_install.lua").read_text()
-        assert_true("M.is_supported_version" in releases and "8%.[2-5]" in releases, "active shorthand boundary missing")
+        policy = (self.mise_root / "lib/policy.lua").read_text()
+        maintained = json.loads((self.mise_root / "support-snapshot.json").read_text())["maintainedBranches"]
+        assert_true(
+            "M.is_supported_version" in releases and "policy.maintained" in releases,
+            "active shorthand boundary is not derived from the maintained policy",
+        )
+        assert_true(
+            re.findall(r'"(\d+\.\d+)"', policy) == maintained,
+            "the plugin maintained branch set is not the reviewed support snapshot",
+        )
         assert_true("is_supported_version" in available, "EOL versions can be discovered")
         assert_true("is_exact_stable_version" in install, "historical exact installation is blocked")
         (directory / "eol-policy.txt").write_text("discovery=maintained-only\ninstallation=exact-stable-history\npublication=maintained-only\n")
@@ -537,20 +612,33 @@ class Verifier:
             "Codex Action pin is not bound to the reviewed input contract",
         )
         e2e = PHP_ROOT / ".github/workflows/autorelease-e2e.yml"
-        e2e_text = e2e.read_text()
+        canary_schema_steps = [
+            step
+            for job_name, _, step in workflow_steps(load_workflow(e2e))
+            if job_name == "agent-canary" and "canary/schema.json" in (step.get("run") or "")
+        ]
         assert_true(
-            'status:{type:"string",const:"passed"}' in e2e_text
-            and 'nonce:{type:"string",const:$nonce}' in e2e_text,
-            "credentialed agent canary schema does not declare string types",
+            len(canary_schema_steps) == 1,
+            "the credentialed agent canary does not build its output schema in one step",
+        )
+        # The canary schema is generated, so the generator is rendered here and
+        # the resulting schema is asserted instead of its source formatting.
+        program = re.search(r"'([^']+)'\s*>\s*canary/schema\.json", canary_schema_steps[0]["run"])
+        assert_true(program is not None, "the credentialed agent canary schema is not built by one jq program")
+        canary_schema = json.loads(
+            run("jq", "-n", "--arg", "nonce", "fixture-nonce", program.group(1), cwd=PHP_ROOT).stdout
+        )
+        assert_true(
+            canary_schema.get("additionalProperties") is False
+            and canary_schema.get("properties", {}).get("status") == {"type": "string", "const": "passed"}
+            and canary_schema.get("properties", {}).get("nonce") == {"type": "string", "const": "fixture-nonce"},
+            "credentialed agent canary schema does not bind status and nonce to exact strings",
         )
         assert_true(
             pins["workflows"][".github/workflows/autorelease-e2e.yml"] == sha256_file(e2e),
             "reviewed production-parity workflow digest changed",
         )
-        watch_path = PHP_ROOT / ".github/workflows/autorelease-watch.yml"
-        watch = watch_path.read_text()
-        release = (PHP_ROOT / ".github/workflows/autorelease-publish.yml").read_text()
-        watch_document = load_workflow(watch_path)
+        watch_document = load_workflow(PHP_ROOT / ".github/workflows/autorelease-watch.yml")
         workflow_permissions = watch_document.get("permissions", {})
         investigate = watch_document.get("jobs", {}).get("investigate", {})
         investigate_permissions = investigate.get("permissions", workflow_permissions)
@@ -559,7 +647,18 @@ class Verifier:
             and investigate_permissions.get("contents") == "read",
             "runtime investigation does not have resolved read-only contents permission",
         )
-        assert_true("openai-api-key" not in release, "release job can read OpenAI credential")
+        credentialed_release_steps = [
+            f"{job_name}:step-{index + 1}"
+            for job_name, index, step in workflow_steps(
+                load_workflow(PHP_ROOT / ".github/workflows/autorelease-publish.yml")
+            )
+            if "openai-api-key" in (step.get("with") or {})
+            or any("OPENAI_API_KEY" in str(value) for value in (step.get("env") or {}).values())
+        ]
+        assert_true(
+            not credentialed_release_steps,
+            f"release transaction steps can read the OpenAI credential: {credentialed_release_steps}",
+        )
         admin = PHP_ROOT / "docs/autorelease-admin-evidence.json"
         assert_true(admin.is_file(), "redacted administrator evidence is missing")
         evidence = json.loads(admin.read_text())
@@ -623,19 +722,38 @@ class Verifier:
     def a18(self, directory: pathlib.Path) -> list[str]:
         assert_true(not mutation_allowed({"unattendedMutation": "paused"}), "paused control allowed mutation")
         assert_true(mutation_allowed({"unattendedMutation": "enabled"}), "enabled control blocked mutation")
-        watch_workflow = (PHP_ROOT / ".github/workflows/autorelease-watch.yml").read_text()
-        release_workflow = (PHP_ROOT / ".github/workflows/autorelease-publish.yml").read_text()
-        mise_workflow = (self.mise_root / ".github/workflows/autorelease-consumer.yml").read_text()
+        watch_steps = workflow_steps(load_workflow(PHP_ROOT / ".github/workflows/autorelease-watch.yml"))
+        dispatch_steps = [step for _, _, step in watch_steps if "gh workflow run" in (step.get("run") or "")]
+        assert_true(dispatch_steps, "watcher no longer dispatches downstream mutation")
         assert_true(
-            "Unattended mutation is paused" in watch_workflow,
+            all("unattendedMutation" in step["run"] for step in dispatch_steps),
             "watcher pause does not stop downstream mutation",
         )
+        release_steps = workflow_steps(load_workflow(PHP_ROOT / ".github/workflows/autorelease-publish.yml"))
+        effect_steps = [
+            (job_name, step)
+            for job_name, _, step in release_steps
+            if "./scripts/publish-release" in (step.get("run") or "")
+        ]
+        assert_true(effect_steps, "release workflow performs no release transition")
         assert_true(
-            release_workflow.count("current-operator.json") >= 3,
+            all(
+                job_name == "release"
+                and "current-operator.json" in step["run"]
+                and "unattendedMutation" in step["run"]
+                for job_name, step in effect_steps
+            ),
             "release effects are not gated by the live operator state",
         )
+        mise_steps = workflow_steps(load_workflow(self.mise_root / ".github/workflows/autorelease-consumer.yml"))
+        operator_bound_jobs = {
+            job_name
+            for job_name, _, step in mise_steps
+            if "phpBinOperatorCommit" in (step.get("run") or "")
+            and "operatorState" in (step.get("run") or "")
+        }
         assert_true(
-            "phpBinOperatorCommit" in mise_workflow and "operatorState" in mise_workflow,
+            {"investigate", "merge-and-record-readiness"} <= operator_bound_jobs,
             "mise synchronization is not bound to the php-bin operator control",
         )
         event = {"actionKey": "new_patch:8.5.9", "state": "release_requested", "history": []}
