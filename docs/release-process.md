@@ -35,9 +35,11 @@ A human changes what gets built, never how it gets released:
 3. Confirm `scripts/test.sh` and public-language checks pass.
 4. Open a pull request with the build log and module diff.
 
-After that merges, the next admitted rebuild picks it up. Use a rebuild
+After that merges, the next admitted plan picks it up and requests a rebuild
 revision such as `8.4.5-1` when the PHP patch is unchanged but the recipe
-changes the bytes.
+changes the bytes. The revision is a field of the admitted
+`recipe_rebuild:<version>:<n>` action key, so it is proposed by the plan and
+validated at admission, never chosen by hand.
 
 Never upload a locally built replacement over an existing release asset. A
 changed recipe or artifact requires a new rebuild revision.

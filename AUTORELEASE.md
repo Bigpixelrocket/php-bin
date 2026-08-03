@@ -25,10 +25,10 @@ gates such as `test.sh`, `lib.sh`, `build.sh`, `package.sh`, and
 `tests/`, `autorelease/**`, `schemas/**`, `.github/workflows/**`, and the
 pinned Codex prompts and contracts under `.github/`. The *product* is
 agent-admissible: `patches/`, `stages/`, `craft.yml`, `extensions.txt`, and
-`expected-modules/`, and in `mise-php` the equivalent `hooks/*.lua`, `lib/`,
-and `metadata.lua`. A model may change what is built, never what decides
+`expected-modules/`. A model may change what is built, never what decides
 whether the build was correct, so the protected tests are the standing control
-on every product change.
+on every product change. `mise-php` draws the same line over its own paths;
+its `AUTORELEASE.md` owns that list.
 
 ```mermaid
 flowchart TD
@@ -102,7 +102,7 @@ Retirement is the mirror image and equally unattended. Captured EOL evidence
 stops new builds and publication for that branch and delists it from
 `mise ls-remote` and branch-shorthand resolution. It removes nothing: every
 release already published stays immutable, and an exact version such as
-`8.2.29` installs exactly as before, indefinitely.
+`8.2.32` installs exactly as before, indefinitely.
 
 Unattended mutation is controlled by
 `.github/autorelease-operator.json`. Set `unattendedMutation` to `paused` in a
@@ -147,11 +147,11 @@ protected `main`; feature-branch runs cannot enter its credentialed
 environment.
 
 Inspect `autorelease-events/`, generated `support-policy.json`, the reviewed
-`autorelease/policy-invariants.json`, retained workflow artifacts, the event
-issue marker, and the `autorelease-verification.json` report and
-`autorelease-verification.md` summary that `scripts/verify-autorelease-system`
-writes into its `--output` directory, to reconstruct a decision. It is
-generated per run and is not a checked-in file.
+`autorelease/policy-invariants.json`, retained workflow artifacts, and the
+event issue marker to reconstruct a decision. `scripts/verify-autorelease-system`
+writes `autorelease-verification.json` and `autorelease-verification.md` into
+its `--output` directory; both are per-run artifacts, not checked-in files.
+
 `scripts/snapshot-github-admin-state` captures settings,
 variables, and secret names without secret values. Recovery never skips
 admission or a failed gate: correct the external dependency or submit a

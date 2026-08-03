@@ -83,8 +83,8 @@ requests.
 For an ordinary stable patch, the admitted no-edit intent goes directly to
 `Autorelease publish transaction`; no implementation job or PR is created. A
 recipe change uses a sealed automation PR first. Never move an existing tag or
-replace a published asset. Use a rebuild tag such as `8.5.9-1` when the PHP
-patch is unchanged but the recipe changes the bytes.
+replace a published asset. When the PHP patch is unchanged but the recipe
+changes the bytes, the admitted plan requests a rebuild tag such as `8.5.9-1`.
 
 ### New PHP branch
 
