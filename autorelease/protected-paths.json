@@ -34,6 +34,11 @@
     "scripts/package.sh",
     "scripts/compare-modules.sh",
     "scripts/check-public-language.sh",
-    "tests/*"
+    "tests/*",
+    "scripts/lib.sh",
+    "scripts/install-spc.sh",
+    "scripts/install-build-deps.sh",
+    ".spc-version",
+    ".spc-sha256"
   ]
 }

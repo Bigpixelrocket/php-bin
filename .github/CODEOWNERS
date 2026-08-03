@@ -31,3 +31,8 @@
 /scripts/compare-modules.sh @loadinglucian
 /scripts/check-public-language.sh @loadinglucian
 /tests/ @loadinglucian
+/scripts/lib.sh @loadinglucian
+/scripts/install-spc.sh @loadinglucian
+/scripts/install-build-deps.sh @loadinglucian
+/.spc-version @loadinglucian
+/.spc-sha256 @loadinglucian

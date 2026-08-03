@@ -413,7 +413,13 @@ class AutoreleaseControlTests(unittest.TestCase):
     def test_gate_harness_paths_are_protected(self):
         for path in ("scripts/test.sh", "scripts/build.sh", "scripts/package.sh",
                      "scripts/compare-modules.sh", "scripts/check-public-language.sh",
-                     "tests/test_autorelease.py"):
+                     "tests/test_autorelease.py",
+                     # Sourced by the protected gate scripts, so agent-authored bash would
+                     # otherwise execute inside the gate run that judges the patch.
+                     "scripts/lib.sh",
+                     # Pin the compiler toolchain that produces published binaries.
+                     "scripts/install-spc.sh", "scripts/install-build-deps.sh",
+                     ".spc-version", ".spc-sha256"):
             self.assertTrue(path_is_protected(path), path)
 
     def test_codeowners_covers_every_protected_script(self):
