@@ -127,6 +127,22 @@ def sha256_file(path: pathlib.Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
+def manifest_digest(captures: Iterable[dict[str, Any]]) -> str:
+    """Digest the identity of an evidence capture set.
+
+    The writer (capture_evidence) and every reader (validate_recaptured_evidence,
+    the attestation predicate) must agree byte for byte, so the projected fields
+    and their order live here once. Only captureId, status, and digest are
+    covered: timestamps and body paths differ between runs that captured
+    identical evidence.
+    """
+    comparable = [
+        {"captureId": item["captureId"], "status": item["status"], "digest": item["digest"]}
+        for item in captures
+    ]
+    return sha256_bytes(canonical_json(comparable))
+
+
 def load_json(path: pathlib.Path) -> Any:
     try:
         return json.loads(path.read_text())
@@ -298,7 +314,6 @@ def validate_recaptured_evidence(
         captures = manifest.get("captures")
         require(isinstance(captures, list), f"{label} evidence captures must be an array")
         indexed: dict[str, dict[str, Any]] = {}
-        comparable = []
         for capture in captures:
             require(isinstance(capture, dict), f"{label} evidence capture must be an object")
             capture_id = capture.get("captureId")
@@ -308,10 +323,9 @@ def validate_recaptured_evidence(
             require(capture.get("status") == 200, f"{label} evidence capture is not healthy: {capture_id}")
             require(bool(SHA256_RE.fullmatch(digest or "")), f"{label} evidence digest is invalid: {capture_id}")
             indexed[capture_id] = capture
-            comparable.append({"captureId": capture_id, "status": capture["status"], "digest": digest})
         require(set(indexed) == EVIDENCE_CAPTURE_IDS, f"{label} evidence capture set changed")
         require(
-            manifest.get("manifestDigest") == sha256_bytes(canonical_json(comparable)),
+            manifest.get("manifestDigest") == manifest_digest(captures),
             f"{label} evidence manifest digest mismatch",
         )
         return indexed
@@ -751,7 +765,7 @@ def seal_patch(
     expected_digests = plan["agentContract"]["instructionDigests"]
     validate_completion_assessment(result, contract, expected_digests)
     require(result["goNoGo"] == "go", "implementation result is no-go")
-    require(bool(re.fullmatch(r"[0-9a-f]{40}", base or "")), "base is not an exact commit SHA")
+    require(bool(COMMIT_SHA_RE.fullmatch(base or "")), "base is not an exact commit SHA")
     require(git(repo, "rev-parse", f"{base}^{{commit}}").stdout.strip() == base, "base is not an exact commit")
     paths = changed_paths(repo, base)
     require(bool(paths), "implementation produced no patch")
@@ -845,13 +859,13 @@ def verify_merge(
     current: dict[str, str],
     readiness: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    require(bool(re.fullmatch(r"[0-9a-f]{40}", expected_head or "")), "expected head is not an exact commit SHA")
+    require(bool(COMMIT_SHA_RE.fullmatch(expected_head or "")), "expected head is not an exact commit SHA")
     actual_head = git(repo, "rev-parse", "HEAD").stdout.strip()
     require(actual_head == expected_head, "PR head does not equal validated SHA")
     require(checks and all(value == "success" for value in checks.values()), "required checks did not succeed")
     require(preconditions == current, "merge preconditions changed")
     base_sha = manifest.get("baseSha")
-    require(bool(re.fullmatch(r"[0-9a-f]{40}", base_sha or "")), "sealed manifest has no exact base SHA")
+    require(bool(COMMIT_SHA_RE.fullmatch(base_sha or "")), "sealed manifest has no exact base SHA")
     require(
         git(repo, "rev-list", "--parents", "-n", "1", expected_head).stdout.split()
         == [expected_head, base_sha],
@@ -1153,6 +1167,12 @@ def retry_decision(
     failure_fingerprint: str,
     max_attempts: int,
 ) -> dict[str, Any]:
+    """Decide whether a failed agent phase may be recalled.
+
+    No workflow calls this: the retry budget is an acceptance property, asserted
+    by autorelease/verify.py check A06, which proves an identical repeated
+    failure can never spend an unbounded number of agent runs.
+    """
     require(0 < max_attempts <= 5, "retry budget is outside the reviewed bound")
     attempts = int(event.get("attemptCount", 0))
     previous = event.get("failureFingerprint")
@@ -1168,6 +1188,13 @@ def mutation_allowed(operator_state: dict[str, Any]) -> bool:
 
 
 def audit_reconstruction(event: dict[str, Any], root: pathlib.Path) -> dict[str, Any]:
+    """Replay a completed event from its retained evidence alone.
+
+    No workflow calls this: auditability is an acceptance property, asserted by
+    autorelease/verify.py check A19, which proves a finished action can be
+    reconstructed from the record and rejects it once any cited file is missing
+    or altered.
+    """
     required = event.get("auditEvidence", [])
     require(isinstance(required, list) and bool(required), "event has no audit evidence")
     verified = []
@@ -1292,15 +1319,7 @@ def capture_evidence(
         "captures": captures,
         "manifestDigest": "",
     }
-    comparable = [
-        {
-            "captureId": item["captureId"],
-            "status": item["status"],
-            "digest": item["digest"],
-        }
-        for item in captures
-    ]
-    manifest["manifestDigest"] = sha256_bytes(canonical_json(comparable))
+    manifest["manifestDigest"] = manifest_digest(captures)
     write_json(output_dir / "evidence-manifest.json", manifest)
     return manifest
 
