@@ -304,6 +304,11 @@ jobs:
             git branch -D "$branch" || true
             exit "$status"
           }
+          # EXIT alone is deliberate. Bash runs the EXIT trap when the shell is terminated
+          # by SIGINT or SIGTERM, so a cancelled job still withdraws; adding INT and TERM
+          # here would run cleanup twice and report the cancelled step as a success.
+          # SIGKILL leaves the branch and PR behind, which no trap can prevent: both carry
+          # this run id, so they collide with nothing and wait for an operator.
           trap cleanup EXIT
           git worktree add -B "$branch" "$worktree" HEAD
           cp autorelease-plan-download/recovered-event.json "$worktree/$event"
