@@ -644,11 +644,12 @@ class AutoreleaseControlTests(unittest.TestCase):
             self.assertTrue(path_is_protected(path), path)
 
     def test_codeowners_covers_every_protected_script(self):
-        patterns = json.loads(pathlib.Path("autorelease/protected-paths.json").read_text())["patterns"]
-        codeowners = pathlib.Path(".github/CODEOWNERS").read_text()
+        root = pathlib.Path(__file__).resolve().parents[1]
+        patterns = json.loads((root / "autorelease/protected-paths.json").read_text())["patterns"]
+        codeowners = (root / ".github/CODEOWNERS").read_text()
         for pattern in patterns:
             if "*" not in pattern:
-                self.assertIn(f"/{pattern} ", codeowners, pattern)
+                self.assertRegex(codeowners, rf"(?m)^/{re.escape(pattern)}\s", pattern)
 
     def test_token_created_prs_explicitly_dispatch_required_checks(self):
         root = pathlib.Path(__file__).resolve().parents[1]
