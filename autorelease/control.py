@@ -964,9 +964,15 @@ def retained_notification_issue(prior: dict[str, Any] | None) -> dict[str, Any] 
     return None
 
 
+def event_record_filename(action_key: str) -> str:
+    """Return the single record filename an action key may occupy."""
+    return action_key.translate(str.maketrans({":": "-", "/": "-"})) + ".json"
+
+
 def unrecorded_published_release(
     releases: Iterable[dict[str, Any]],
     events: Iterable[dict[str, Any]],
+    record_files: Iterable[str] = (),
 ) -> str | None:
     """Return the action key of one published release that has no event record at all.
 
@@ -974,10 +980,13 @@ def unrecorded_published_release(
     completed-action ledger is what admission uses to tell finished work from new work.
     Recovery is fail-closed: a release is only claimed when immutability proves it came
     from the guarded publish transaction and its action key is derivable from the tag
-    alone. Any existing record, complete or not, is left to its own path. One key is
-    returned per run; a further backlog is repaired by later runs.
+    alone. Any existing record, complete or not, is left to its own path, and so is a
+    key whose record filename is already occupied by an unrelated document, because the
+    filer refuses to overwrite a file and would otherwise fail on every later run. One
+    key is returned per run; a further backlog is repaired by later runs.
     """
     recorded = {event.get("actionKey") for event in events}
+    occupied = set(record_files)
     keys = set()
     for release in releases:
         if not isinstance(release, dict):
@@ -988,7 +997,7 @@ def unrecorded_published_release(
         if tag is None:
             continue
         key = f"recipe_rebuild:{tag.group(1)}:{tag.group(2)}" if tag.group(2) else f"new_patch:{tag.group(1)}"
-        if key not in recorded:
+        if key not in recorded and event_record_filename(key) not in occupied:
             keys.add(key)
     return min(keys, default=None)
 
@@ -1001,6 +1010,7 @@ def watch_decision(
     *,
     self_evidence_update: bool = False,
     releases: Iterable[dict[str, Any]] = (),
+    record_files: Iterable[str] = (),
 ) -> dict[str, Any]:
     events = list(events)
     incomplete = sorted(
@@ -1008,15 +1018,11 @@ def watch_decision(
         for event in events
         if event.get("state") != "complete"
     )
-    # Ranked above every reconciliation and selection trigger, and below the two health
-    # triggers that decide whether the release evidence can be trusted at all.
-    unrecorded = unrecorded_published_release(releases, events)
+    unrecorded = unrecorded_published_release(releases, events, record_files)
     if not health.get("healthy", False):
         trigger = "health_failed"
     elif any(capture.get("status") != 200 for capture in manifest.get("captures", [])):
         trigger = "source_unhealthy"
-    elif unrecorded:
-        trigger = "record_missing"
     elif incomplete:
         trigger = "event_incomplete"
     elif previous.get("manifestDigest") != manifest.get("manifestDigest"):
@@ -1042,6 +1048,13 @@ def watch_decision(
         )
     else:
         trigger = "quiet"
+    # A missing record outranks every trigger that a trustworthy snapshot can raise, so
+    # it is repaired before new work starts. It never changes whether the model is
+    # called: the repair is deterministic, but suppressing the investigation would let a
+    # blocked repair starve reconciliation and selection on every later run.
+    model_call = trigger != "quiet"
+    if unrecorded and trigger not in {"health_failed", "source_unhealthy"}:
+        trigger = "record_missing"
     return {
         "schemaVersion": 1,
         "trigger": trigger,
@@ -1049,7 +1062,7 @@ def watch_decision(
         "incompleteActions": incomplete,
         "action": "record_completed_event" if trigger == "record_missing" else "none",
         "actionKey": unrecorded if trigger == "record_missing" else "",
-        "modelCall": trigger not in {"quiet", "record_missing"},
+        "modelCall": model_call,
     }
 
 

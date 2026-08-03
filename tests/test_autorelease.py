@@ -126,10 +126,23 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertEqual("record_missing", decision["trigger"])
         self.assertFalse(decision["modelCall"])
 
-        # A changed snapshot would otherwise select new work; the missing record wins.
+        # A changed snapshot would otherwise select new work; the missing record wins the
+        # trigger, but recovery never withholds the investigation those paths depend on,
+        # so a repair that stays blocked cannot starve them run after run.
         changed = {"manifestDigest": "sha256:" + "c" * 64, "captures": manifest["captures"]}
         moved = watch_decision(changed, manifest, events, {"healthy": True}, releases=releases)
         self.assertEqual("record_completed_event", moved["action"])
+        self.assertTrue(moved["modelCall"])
+        incomplete = watch_decision(
+            manifest,
+            manifest,
+            [*events, {"actionKey": "new_patch:8.5.7", "state": "released"}],
+            {"healthy": True},
+            releases=releases,
+        )
+        self.assertEqual("record_completed_event", incomplete["action"])
+        self.assertTrue(incomplete["modelCall"])
+        self.assertEqual(["new_patch:8.5.7"], incomplete["incompleteActions"])
 
         rebuild = watch_decision(
             manifest,
@@ -167,6 +180,18 @@ class AutoreleaseControlTests(unittest.TestCase):
                 releases=[published],
             )
             self.assertEqual("none", decision["action"], state)
+        # The filer refuses to overwrite an existing file, so a record filename already
+        # taken by an unrelated document must not be requested again on every run.
+        occupied = watch_decision(
+            manifest,
+            manifest,
+            [],
+            {"healthy": True},
+            releases=[published],
+            record_files=["new_patch-8.5.9.json"],
+        )
+        self.assertEqual("none", occupied["action"])
+        self.assertEqual("quiet", occupied["trigger"])
 
     def test_completion_go_is_mechanical(self):
         contract = {
@@ -535,7 +560,8 @@ class AutoreleaseControlTests(unittest.TestCase):
         watcher = (root / ".github/workflows/autorelease-watch.yml").read_text()
         release = (root / ".github/workflows/autorelease-publish.yml").read_text()
         protected = (root / ".github/workflows/protected-controls.yml").read_text()
-        recovery = watcher[watcher.index('elif [[ "$action" == "record_completed_event" ]]'):]
+        start = watcher.index("- name: Recover the event record of a published release")
+        recovery = watcher[start:watcher.index("- name: Prepare deterministic no-change evidence")]
         # The exemption only trusts this prefix from this workflow on these events.
         self.assertIn('branch="autorelease/eol-complete-${{ github.run_id }}"', recovery)
         self.assertIn("--require-protected-controls", recovery)
@@ -543,6 +569,16 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertIn('{"schedule", "workflow_dispatch"}', protected)
         self.assertIn("schedule:", watcher)
         self.assertIn("workflow_dispatch:", watcher)
+        # Assets and checksums of a hand-made release prove each other and nothing else.
+        self.assertIn('gh release verify "$version" --repo "${{ github.repository }}" --format json', recovery)
+        self.assertIn('git merge-base --is-ancestor "$release_commit" origin/main', recovery)
+        # A failing repair yields to the other paths and is only raised after them.
+        self.assertIn("continue-on-error: true", recovery)
+        self.assertLess(start, watcher.index("- name: Dispatch implementation or no-edit release"))
+        self.assertLess(
+            watcher.index("- name: Dispatch implementation or no-edit release"),
+            watcher.index("if: steps.recover.outcome == 'failure'"),
+        )
         # A published release downgrades the publish alarm from critical to warning.
         self.assertIn("release-transaction-state-${{ github.run_id }}", release)
         self.assertIn("jq -r .released release-state/transaction-state.json", release)

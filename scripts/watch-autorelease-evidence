@@ -41,8 +41,10 @@ try:
     if not args.events.is_dir():
         raise ControlError(f"supplied events directory is missing or invalid: {args.events}")
     events = []
+    record_files = []
     for path in sorted(args.events.glob("*.json")):
         events.append(load_json(path))
+        record_files.append(path.name)
     if not previous.get("manifestDigest"):
         matching = sorted({
             event.get("evidenceManifestDigest")
@@ -71,6 +73,7 @@ try:
         health,
         self_evidence_update=args.self_evidence_update,
         releases=releases,
+        record_files=record_files,
     )
     write_json(args.output, decision)
     print(json.dumps(decision))
