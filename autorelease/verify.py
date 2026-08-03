@@ -59,8 +59,10 @@ def control_package_source() -> str:
     `verify.py` is excluded because it is the harness, not a control: it names the
     forbidden markers to assert their absence and would otherwise fail on itself.
     """
+    # rglob, not glob: sub-packaging the controls is exactly the kind of move that
+    # made this scan necessary, and a nested module must not fall out of it.
     modules = sorted(
-        path for path in (PHP_ROOT / "autorelease").glob("*.py") if path.name != "verify.py"
+        path for path in (PHP_ROOT / "autorelease").rglob("*.py") if path.name != "verify.py"
     )
     assert_true(
         {"control.py", "_admission.py", "_evidence.py", "_state.py", "_validation.py"}
