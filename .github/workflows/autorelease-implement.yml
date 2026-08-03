@@ -164,19 +164,19 @@ jobs:
           test "$(./autorelease/control.py digest autorelease-run/sealed/sealed.patch)" = "$(jq -r .patchDigest autorelease-run/sealed/patch-manifest.json)"
           git apply --index autorelease-run/sealed/sealed.patch
       - name: Run authoritative checks and retain failure logs
-        id: checks
+        id: run-checks
         run: |
           set +e
           ./scripts/test.sh 2>&1 | tee autorelease-run/authoritative-checks.log
           status="${PIPESTATUS[0]}"
           set -e
           if [[ "$status" == "0" ]]; then
-            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "status=passed" >> "$GITHUB_OUTPUT"
           else
-            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "status=failed" >> "$GITHUB_OUTPUT"
           fi
       - name: Record validated SHA and tree
-        if: steps.checks.outputs.passed == 'true'
+        if: steps.run-checks.outputs.status == 'passed'
         env:
           BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
         run: |
@@ -190,7 +190,7 @@ jobs:
           jq -n --arg headSha "$(git rev-parse HEAD)" --arg tree "$(git rev-parse HEAD^{tree})" '{headSha:$headSha,tree:$tree,checks:{"Script checks":"success"}}' > autorelease-run/validation.json
           git bundle create autorelease-run/validated.bundle HEAD "^$BASE_SHA"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        if: steps.checks.outputs.passed == 'true'
+        if: steps.run-checks.outputs.status == 'passed'
         with:
           name: validated-autorelease-patch-${{ github.run_id }}
           path: autorelease-run/
@@ -198,13 +198,23 @@ jobs:
           retention-days: 90
           include-hidden-files: true
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        if: steps.checks.outputs.passed != 'true'
+        if: steps.run-checks.outputs.status != 'passed'
         with:
           name: failed-autorelease-validation-${{ github.run_id }}
           path: autorelease-run/
           if-no-files-found: error
           retention-days: 90
           include-hidden-files: true
+      # Last step on purpose: the merge job keys on this output and then downloads
+      # the validated artifact, so a failed bundle or upload must leave `passed`
+      # unset rather than advertise a patch that is missing or incomplete. An unset
+      # output reads as not-passed to both merge and repair. validate-repair needs
+      # no equivalent: merge gates on that job's own result, and its upload is
+      # already the last step.
+      - name: Record that the patch validated
+        id: checks
+        if: steps.run-checks.outputs.status == 'passed'
+        run: echo "passed=true" >> "$GITHUB_OUTPUT"
 
   repair:
     name: One bounded offline repair
