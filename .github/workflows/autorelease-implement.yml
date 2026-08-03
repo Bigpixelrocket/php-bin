@@ -68,7 +68,7 @@ jobs:
           RUN_ID: ${{ needs.preflight.outputs.run_id }}
         run: gh run download "$RUN_ID" --name "autorelease-investigation-$RUN_ID" --dir autorelease-run
       - name: Enforce operator pause
-        run: test "$(jq -r .unattendedMutation .github/autorelease-operator.json)" = "enabled"
+        run: ./autorelease/control.py operator-gate --operator-file .github/autorelease-operator.json --require-enabled
       - name: Verify exact admitted base
         env:
           BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
@@ -377,7 +377,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           action_key="$(jq -r .actionKey autorelease-run/implementation-plan.json)"
-          branch="autorelease/$(printf '%s' "$action_key" | tr ':/' '--')"
+          branch="autorelease/$(./autorelease/control.py action-filename "$action_key" --suffix '')"
           gh auth setup-git
           git push origin "HEAD:refs/heads/$branch"
           existing="$(gh pr list --head "$branch" --state open --json number --jq '.[0].number // empty')"
@@ -439,7 +439,7 @@ jobs:
           git checkout -B "autorelease/readiness-${{ github.run_id }}" origin/main
           base="$(git rev-parse HEAD)"
           action_key="$(jq -r .actionKey autorelease-run/implementation-plan.json)"
-          filename="$(printf '%s' "$action_key" | tr ':/' '--').json"
+          filename="$(./autorelease/control.py action-filename "$action_key")"
           mkdir -p autorelease-events
           jq -n \
             --arg actionKey "$action_key" \

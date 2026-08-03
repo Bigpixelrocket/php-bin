@@ -1,3 +1,4 @@
+import contextlib
 import io
 import json
 import pathlib
@@ -13,9 +14,12 @@ from autorelease.control import (
     ACTION_KEY_RE,
     COMPLETION_EVIDENCE_REF_RE,
     ControlError,
+    action_filename,
     canonical_json,
     load_plan_evidence,
+    main as control_main,
     mutation_allowed,
+    route_watch_action,
     notification_decision,
     retained_notification_issue,
     release_transition,
@@ -35,6 +39,14 @@ from autorelease.control import (
     watch_decision,
     path_is_protected,
 )
+
+
+def run_control(*argv: str) -> tuple[int, str]:
+    """Run a control CLI subcommand exactly as a workflow would, capturing its output."""
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+        status = control_main(list(argv))
+    return status, out.getvalue().strip()
 
 
 class AutoreleaseControlTests(unittest.TestCase):
@@ -489,6 +501,102 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertFalse(mutation_allowed({"unattendedMutation": "paused"}))
         self.assertTrue(mutation_allowed({"unattendedMutation": "enabled"}))
 
+    def test_action_filename(self):
+        self.assertEqual("branch_eol-8.2-2026-12-31.json", action_filename("branch_eol:8.2:2026-12-31"))
+        self.assertEqual("new_patch-8.5.9", action_filename("new_patch:8.5.9", ""))
+        with self.assertRaises(ControlError):
+            action_filename("../escape")
+
+    def test_route_watch_action_covers_every_decision(self):
+        def route(**decision):
+            return route_watch_action(decision)
+
+        # No-op routes stay green: an idle run must not fail the watcher.
+        self.assertEqual("none", route()["route"])
+        self.assertEqual("no_admitted_plan", route(action="none")["reason"])
+        self.assertEqual(
+            "eol_completion_deferred_by_recovery",
+            route(action="branch_eol", recoveryMerged=True)["reason"],
+        )
+        self.assertEqual(
+            "evidence_state_already_recorded",
+            route(action="no_change", evidenceAlreadyRecorded=True)["reason"],
+        )
+        self.assertEqual(
+            "release_published_pending_record",
+            route(action="new_patch", actionKey="new_patch:8.5.9", recordActionKey="new_patch:8.5.9")["reason"],
+        )
+        # Dispatching routes.
+        self.assertEqual("notify_blocked", route(action="blocked")["route"])
+        self.assertEqual("notify_blocked", route(action="needs_human")["route"])
+        self.assertEqual("no_change_evidence", route(action="no_change")["route"])
+        self.assertEqual("dispatch_implementation", route(action="repair", editsRequired=True)["route"])
+        self.assertEqual("dispatch_implementation", route(action="new_branch", editsRequired=True)["route"])
+        self.assertEqual("dispatch_publish", route(action="new_patch")["route"])
+        self.assertEqual("dispatch_publish", route(action="new_branch")["route"])
+        self.assertEqual("dispatch_publish", route(action="reconcile_partial")["route"])
+        self.assertEqual("complete_branch_eol", route(action="branch_eol")["route"])
+        # Recovery is an overlay: it carries its own route beside any plan route.
+        self.assertEqual("none", route(action="new_patch")["recoveryRoute"])
+        self.assertEqual(
+            "recover_record",
+            route(action="new_patch", recordActionKey="recipe_rebuild:8.5.9:2")["recoveryRoute"],
+        )
+        self.assertEqual("recover_record", route(recordActionKey="new_patch:8.5.9")["recoveryRoute"])
+        # Only the lifecycle actions notify, and blocked plans notify through their route.
+        self.assertEqual("lifecycle", route(action="new_branch")["notify"])
+        self.assertEqual("lifecycle", route(action="branch_eol")["notify"])
+        self.assertEqual("none", route(action="new_patch")["notify"])
+        self.assertEqual("none", route(action="blocked")["notify"])
+        # Unrouted combinations fail loudly instead of exiting green.
+        with self.assertRaises(ControlError):
+            route_watch_action({"action": "repair", "editsRequired": False})
+        with self.assertRaises(ControlError):
+            route_watch_action({"action": "recipe_rebuild", "editsRequired": False})
+
+    def test_operator_gate_blocks_paused_state(self):
+        self.assertTrue(mutation_allowed({"unattendedMutation": "enabled"}))
+        self.assertFalse(mutation_allowed({"unattendedMutation": "paused"}))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            enabled = root / "enabled.json"
+            enabled.write_text('{"schemaVersion":1,"unattendedMutation":"enabled"}\n')
+            paused = root / "paused.json"
+            paused.write_text('{"schemaVersion":1,"unattendedMutation":"paused"}\n')
+            unknown = root / "unknown.json"
+            unknown.write_text('{"schemaVersion":1}\n')
+            self.assertEqual((0, "enabled"), run_control("operator-gate", "--operator-file", str(enabled)))
+            self.assertEqual((0, "paused"), run_control("operator-gate", "--operator-file", str(paused)))
+            self.assertEqual(
+                (0, "enabled"),
+                run_control("operator-gate", "--operator-file", str(enabled), "--require-enabled"),
+            )
+            # A paused control and an unreadable control both refuse the hard gate.
+            self.assertEqual(
+                1, run_control("operator-gate", "--operator-file", str(paused), "--require-enabled")[0]
+            )
+            self.assertEqual(1, run_control("operator-gate", "--operator-file", str(unknown))[0])
+            self.assertEqual(1, run_control("operator-gate", "--operator-file", str(root / "absent.json"))[0])
+
+    def test_route_watch_action_cli_reports_the_route(self):
+        status, output = run_control(
+            "route-watch-action",
+            "--action", "new_patch",
+            "--action-key", "new_patch:8.5.9",
+            "--record-action-key", "new_patch:8.5.9",
+            "--edits-required", "false",
+        )
+        self.assertEqual(0, status)
+        self.assertEqual(
+            {"route": "none", "reason": "release_published_pending_record", "recoveryRoute": "recover_record"},
+            {key: json.loads(output)[key] for key in ("route", "reason", "recoveryRoute")},
+        )
+        self.assertEqual("new_patch-8.5.9.json", run_control("action-filename", "new_patch:8.5.9")[1])
+        # An unrouted combination exits non-zero rather than dispatching nothing quietly.
+        self.assertEqual(1, run_control("route-watch-action", "--action", "repair")[0])
+        # Only exact booleans reach the table.
+        self.assertEqual(1, run_control("route-watch-action", "--action", "repair", "--edits-required", "yes")[0])
+
     def test_invariants_and_durable_state_are_protected(self):
         self.assertTrue(path_is_protected(".github/codex-action-contract.json"))
         self.assertTrue(path_is_protected("autorelease/policy-invariants.json"))
@@ -579,8 +687,12 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertLess(start, watcher.index("- name: Dispatch implementation or no-edit release"))
         self.assertLess(
             watcher.index("- name: Dispatch implementation or no-edit release"),
-            watcher.index("if: always() && steps.recover.outcome == 'failure'"),
+            watcher.index("if: ${{ !cancelled() && steps.recover.outcome == 'failure' }}"),
         )
+        # The recovery overlay is routed by the same table as the dispatch, so an
+        # unrouted repair fails loudly instead of skipping the step silently.
+        self.assertIn("route-watch-action --record-action-key", recovery)
+        self.assertIn("recoveryRoute", recovery)
         # Later steps keep writing this checkout, and the EOL path files on this very
         # branch name in the same run, so recovery owns neither past its own step.
         self.assertIn('git worktree add -B "$branch" "$worktree" HEAD', recovery)

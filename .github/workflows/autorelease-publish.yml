@@ -104,11 +104,11 @@ jobs:
           test "$(jq -r .releaseIntent.version admitted-run/autorelease-plan.json)" = "$VERSION"
           test "$(jq -r .preconditions.phpBinHead admitted-run/autorelease-plan.json)" = "$EXACT_COMMIT"
           test "$(jq -r .preconditions.supportPolicyDigest admitted-run/autorelease-plan.json)" = "$(./autorelease/control.py digest support-policy.json)"
-          test "$(jq -r .unattendedMutation .github/autorelease-operator.json)" = "enabled"
+          ./autorelease/control.py operator-gate --operator-file .github/autorelease-operator.json --require-enabled
           mkdir -p release-run
           gh api "repos/${{ github.repository }}/contents/.github/autorelease-operator.json?ref=main" \
             --jq .content | base64 --decode > release-run/current-operator.json
-          test "$(jq -r .unattendedMutation release-run/current-operator.json)" = "enabled"
+          ./autorelease/control.py operator-gate --operator-file release-run/current-operator.json --require-enabled
           mise_commit="$(jq -r .sha admitted-run/evidence/raw/mise_php_state.body)"
           [[ "$mise_commit" =~ ^[0-9a-f]{40}$ ]]
           git -C mise-php fetch origin "$mise_commit"
@@ -129,7 +129,7 @@ jobs:
         run: |
           action="$(jq -r .action admitted-run/autorelease-plan.json)"
           if [[ "$action" == "new_branch" ]]; then
-            filename="$(printf '%s' "$ACTION_KEY" | tr ':/' '--').json"
+            filename="$(./autorelease/control.py action-filename "$ACTION_KEY")"
             event="autorelease-events/$filename"
             test -f "$event"
             test "$(jq -r .state "$event")" = "php_bin_ready"
@@ -182,7 +182,7 @@ jobs:
         run: |
           mkdir -p release-run
           printf '{"schemaVersion":1,"state":"requested","history":[]}\n' > release-run/transaction.json
-          filename="$(printf '%s' "$ACTION_KEY" | tr ':/' '--').json"
+          filename="$(./autorelease/control.py action-filename "$ACTION_KEY")"
           if [[ -f "autorelease-events/$filename" ]]; then
             cp "autorelease-events/$filename" release-run/event.json
             if [[ "$(jq -r .state release-run/event.json)" == "php_bin_ready" \
@@ -215,7 +215,7 @@ jobs:
         run: |
           gh api "repos/${{ github.repository }}/contents/.github/autorelease-operator.json?ref=main" \
             --jq .content | base64 --decode > release-run/current-operator.json
-          test "$(jq -r .unattendedMutation release-run/current-operator.json)" = "enabled"
+          ./autorelease/control.py operator-gate --operator-file release-run/current-operator.json --require-enabled
           for target in built draft_created draft_verified; do
             ./scripts/publish-release \
               --transaction release-run/transaction.json \
@@ -265,7 +265,7 @@ jobs:
         run: |
           gh api "repos/${{ github.repository }}/contents/.github/autorelease-operator.json?ref=main" \
             --jq .content | base64 --decode > release-run/current-operator.json
-          test "$(jq -r .unattendedMutation release-run/current-operator.json)" = "enabled"
+          ./autorelease/control.py operator-gate --operator-file release-run/current-operator.json --require-enabled
           for target in published public_verified complete; do
             ./scripts/publish-release \
               --transaction release-run/transaction.json \
@@ -352,7 +352,7 @@ jobs:
           git fetch origin main
           git checkout -B "autorelease/event-${{ github.run_id }}" origin/main
           base="$(git rev-parse HEAD)"
-          filename="$(printf '%s' "$ACTION_KEY" | tr ':/' '--').json"
+          filename="$(./autorelease/control.py action-filename "$ACTION_KEY")"
           cp release-run/event.json "autorelease-events/$filename"
           git add "autorelease-events/$filename"
           git -c user.name=autorelease -c user.email=autorelease@invalid \

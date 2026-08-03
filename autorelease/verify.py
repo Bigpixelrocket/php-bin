@@ -752,7 +752,7 @@ class Verifier:
         dispatch_steps = [step for _, _, step in watch_steps if "gh workflow run" in (step.get("run") or "")]
         assert_true(dispatch_steps, "watcher no longer dispatches downstream mutation")
         assert_true(
-            all("unattendedMutation" in step["run"] for step in dispatch_steps),
+            all("operator-gate" in step["run"] for step in dispatch_steps),
             "watcher pause does not stop downstream mutation",
         )
         release_steps = workflow_steps(load_workflow(PHP_ROOT / ".github/workflows/autorelease-publish.yml"))
@@ -765,8 +765,7 @@ class Verifier:
         assert_true(
             all(
                 job_name == "release"
-                and "current-operator.json" in step["run"]
-                and "unattendedMutation" in step["run"]
+                and "operator-gate --operator-file release-run/current-operator.json" in step["run"]
                 for job_name, step in effect_steps
             ),
             "release effects are not gated by the live operator state",

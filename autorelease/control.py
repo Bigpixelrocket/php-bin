@@ -964,9 +964,19 @@ def retained_notification_issue(prior: dict[str, Any] | None) -> dict[str, Any] 
     return None
 
 
-def event_record_filename(action_key: str) -> str:
-    """Return the single record filename an action key may occupy."""
-    return action_key.translate(str.maketrans({":": "-", "/": "-"})) + ".json"
+ACTION_FILENAME_MAP = str.maketrans({":": "-", "/": "-"})
+
+
+def action_filename(action_key: str, suffix: str = ".json") -> str:
+    """Return the single file or branch name an action key may occupy.
+
+    Every event record, readiness record, and automation branch in both repositories is
+    named from its action key by this one mapping, so the name is only ever derived here.
+    The key is model-authored and reaches shell arguments and repository paths, so its
+    alphabet is re-asserted at this boundary rather than trusted from the caller.
+    """
+    require(bool(ACTION_KEY_RE.fullmatch(action_key)), f"invalid action key: {action_key}")
+    return action_key.translate(ACTION_FILENAME_MAP) + suffix
 
 
 def unrecorded_published_release(
@@ -997,7 +1007,7 @@ def unrecorded_published_release(
         if tag is None:
             continue
         key = f"recipe_rebuild:{tag.group(1)}:{tag.group(2)}" if tag.group(2) else f"new_patch:{tag.group(1)}"
-        if key not in recorded and event_record_filename(key) not in occupied:
+        if key not in recorded and action_filename(key) not in occupied:
             keys.add(key)
     return min(keys, default=None)
 
@@ -1064,6 +1074,69 @@ def watch_decision(
         "actionKey": unrecorded if trigger == "record_missing" else "",
         "modelCall": model_call,
     }
+
+
+# Only these two admitted actions announce themselves before their route runs, and only
+# these three select a release for the publish transaction.
+WATCH_LIFECYCLE_NOTIFICATION_ACTIONS = frozenset({"new_branch", "branch_eol"})
+WATCH_PUBLISH_ACTIONS = frozenset({"new_patch", "new_branch", "reconcile_partial"})
+
+
+def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:
+    """Return the one route a coordinated watcher decision takes, or raise.
+
+    The watcher runs two independent routes in the same job: `route` dispatches the
+    admitted plan, and `recoveryRoute` repairs a published release that has no event
+    record. Recovery is an overlay rather than an exclusive branch, so it carries its own
+    field and never competes with the plan for one.
+
+    Every legal combination is enumerated, including the ones that legitimately do
+    nothing — those return `route: "none"` with the reason, so an idle run stays green.
+    Anything else raises instead of falling through to a silent success, which is what an
+    unrouted combination used to do.
+    """
+    action = str(decision.get("action") or "")
+    action_key = str(decision.get("actionKey") or "")
+    record_action_key = str(decision.get("recordActionKey") or "")
+    edits_required = bool(decision.get("editsRequired"))
+    recovery_merged = bool(decision.get("recoveryMerged"))
+    evidence_recorded = bool(decision.get("evidenceAlreadyRecorded"))
+
+    def routed(route: str, reason: str, notify: str = "none") -> dict[str, Any]:
+        return {
+            "schemaVersion": 1,
+            "route": route,
+            "reason": reason,
+            "notify": notify,
+            "action": action,
+            "actionKey": action_key,
+            "recordActionKey": record_action_key,
+            "recoveryRoute": "recover_record" if record_action_key else "none",
+        }
+
+    if action in {"", "none"}:
+        return routed("none", "no_admitted_plan")
+    if recovery_merged and action == "branch_eol":
+        # The completion asserts an untouched base, which the recovered record just moved.
+        return routed("none", "eol_completion_deferred_by_recovery")
+    if action == "no_change" and evidence_recorded:
+        return routed("none", "evidence_state_already_recorded")
+    if action in {"blocked", "needs_human"}:
+        return routed("notify_blocked", "operator_attention_required")
+    notify = "lifecycle" if action in WATCH_LIFECYCLE_NOTIFICATION_ACTIONS else "none"
+    if action == "no_change":
+        return routed("no_change_evidence", "record_reviewed_evidence", notify)
+    if edits_required:
+        return routed("dispatch_implementation", "admitted_plan_requires_edits", notify)
+    if action in WATCH_PUBLISH_ACTIONS:
+        if record_action_key and action_key == record_action_key:
+            # The ledger this plan was admitted against is the one missing this record,
+            # so the release it selects is already public.
+            return routed("none", "release_published_pending_record", notify)
+        return routed("dispatch_publish", "publish_admitted_release", notify)
+    if action == "branch_eol":
+        return routed("complete_branch_eol", "complete_admitted_eol", notify)
+    raise ControlError(f"watcher action is unrouted: {action} with editsRequired={edits_required}")
 
 
 def retry_decision(
@@ -1248,6 +1321,12 @@ def validate_archive(archive: pathlib.Path, version: str) -> None:
     require("bin/php" in names, "archive does not contain bin/php")
 
 
+def cli_flag(value: str, name: str) -> bool:
+    """Read a workflow-supplied boolean, where a skipped step legitimately supplies none."""
+    require(value in {"", "true", "false"}, f"{name} must be true, false, or empty")
+    return value == "true"
+
+
 def cli_error(error: Exception) -> int:
     print(f"autorelease control rejected input: {error}", file=sys.stderr)
     return 1
@@ -1277,6 +1356,20 @@ def main(argv: list[str] | None = None) -> int:
     event_parser.add_argument("--target", required=True)
     event_parser.add_argument("--evidence", required=True, type=pathlib.Path)
     event_parser.add_argument("--output", required=True, type=pathlib.Path)
+
+    route_parser = subparsers.add_parser("route-watch-action")
+    for name in ("--action", "--action-key", "--record-action-key"):
+        route_parser.add_argument(name, default="")
+    for name in ("--edits-required", "--recovery-merged", "--evidence-already-recorded"):
+        route_parser.add_argument(name, default="")
+
+    operator_parser = subparsers.add_parser("operator-gate")
+    operator_parser.add_argument("--operator-file", required=True, type=pathlib.Path)
+    operator_parser.add_argument("--require-enabled", action="store_true")
+
+    filename_parser = subparsers.add_parser("action-filename")
+    filename_parser.add_argument("action_key")
+    filename_parser.add_argument("--suffix", default=".json")
 
     archive_parser = subparsers.add_parser("validate-archive")
     archive_parser.add_argument("--archive", required=True, type=pathlib.Path)
@@ -1309,6 +1402,35 @@ def main(argv: list[str] | None = None) -> int:
             updated = transition_event(load_json(args.event), args.target, load_json(args.evidence))
             write_json(args.output, updated)
             print(json.dumps(updated))
+        elif args.command == "route-watch-action":
+            print(
+                json.dumps(
+                    route_watch_action(
+                        {
+                            "action": args.action,
+                            "actionKey": args.action_key,
+                            "recordActionKey": args.record_action_key,
+                            "editsRequired": cli_flag(args.edits_required, "--edits-required"),
+                            "recoveryMerged": cli_flag(args.recovery_merged, "--recovery-merged"),
+                            "evidenceAlreadyRecorded": cli_flag(
+                                args.evidence_already_recorded, "--evidence-already-recorded"
+                            ),
+                        }
+                    )
+                )
+            )
+        elif args.command == "operator-gate":
+            state = load_json(args.operator_file)
+            require(isinstance(state, dict), "operator control is not an object")
+            require(
+                state.get("unattendedMutation") in {"enabled", "paused"},
+                "operator control carries an unknown unattended mutation state",
+            )
+            allowed = mutation_allowed(state)
+            require(allowed or not args.require_enabled, "unattended mutation is paused")
+            print("enabled" if allowed else "paused")
+        elif args.command == "action-filename":
+            print(action_filename(args.action_key, args.suffix))
         elif args.command == "validate-archive":
             validate_archive(args.archive, args.version)
             print(json.dumps({"valid": True}))
