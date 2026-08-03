@@ -126,9 +126,13 @@ jobs:
               print("No protected control path changed.")
               raise SystemExit(0)
 
+          # Both trusted-automation exemptions below bind the whole diff, not just
+          # its protected subset: the watcher writes exactly one file, so any
+          # unprotected passenger riding along is proof this is not that PR.
           evidence_run = re.fullmatch(r"autorelease/evidence-(\d+)", head_ref)
           if (
-              protected == ["autorelease-state/last-evidence.json"]
+              len(files) == 1
+              and protected == ["autorelease-state/last-evidence.json"]
               and evidence_run
               and author == "github-actions[bot]"
               and head_repo.lower() == repo.lower()
@@ -228,7 +232,8 @@ jobs:
 
           event_run = re.fullmatch(r"autorelease/(event|eol-complete)-(\d+)", head_ref)
           if (
-              len(protected) == 1
+              len(files) == 1
+              and len(protected) == 1
               and re.fullmatch(r"autorelease-events/[A-Za-z0-9._-]+\.json", protected[0])
               and event_run
               and author == "github-actions[bot]"
