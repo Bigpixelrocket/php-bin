@@ -1,5 +1,6 @@
 /.github/codex/ @loadinglucian
 /.github/codex-action-contract.json @loadinglucian
+/.github/dependabot.yml @loadinglucian
 /.github/workflows/ @loadinglucian
 /.github/CODEOWNERS @loadinglucian
 /.github/autorelease-operator.json @loadinglucian

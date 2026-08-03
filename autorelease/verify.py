@@ -26,6 +26,7 @@ from autorelease.control import (
     instruction_digest,
     mutation_allowed,
     notification_decision,
+    path_is_protected,
     release_transition,
     retry_decision,
     seal_patch,
@@ -622,11 +623,37 @@ class Verifier:
             cwd=self.mise_root, check=False,
         )
         assert_true(quiet.returncode != 0, "mise-php names a record file for a quiet run")
+        # mise-php's byte-parity gate fails closed on the first step of every consumer
+        # run when a shared file drifts, and only a human can re-sync its protected copy.
+        # A shared file that either repository lets an agent rewrite is therefore a
+        # cross-repository stall, and neither repository's own tests can see it: each
+        # checks the manifest against its own pattern list alone. The verdicts come from
+        # mise-php's own admission module so a rewritten matcher still has to answer.
+        shared_paths = json.loads((self.mise_root / "autorelease/shared-files.json").read_text())["paths"]
+        assert_true(bool(shared_paths), "the shared-file manifest is empty, so it gates nothing")
+        mise_protection = json.loads(
+            run(
+                "python3", "-c",
+                "import json, sys; sys.path.insert(0, '.'); "
+                "from autorelease.admission import protected; "
+                "print(json.dumps({path: protected(path) for path in json.loads(sys.argv[1])}))",
+                json.dumps(shared_paths),
+                cwd=self.mise_root,
+            ).stdout
+        )
+        for path in shared_paths:
+            assert_true(path_is_protected(path), f"php-bin does not protect shared file {path}")
+            assert_true(mise_protection[path], f"mise-php does not protect shared file {path}")
         (directory / "coordination.json").write_bytes(canonical_json(result))
         (directory / "action-filenames.json").write_bytes(
             canonical_json({key: action_filename(key) for key in action_keys})
         )
-        return ["coordination.json", "action-filenames.json"]
+        (directory / "shared-file-protection.json").write_bytes(
+            canonical_json(
+                {path: {"php-bin": path_is_protected(path), "mise-php": mise_protection[path]} for path in shared_paths}
+            )
+        )
+        return ["coordination.json", "action-filenames.json", "shared-file-protection.json"]
 
     def a10(self, directory: pathlib.Path) -> list[str]:
         releases = (self.mise_root / "lib/releases.lua").read_text()

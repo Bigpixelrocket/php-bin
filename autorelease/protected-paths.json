@@ -3,6 +3,7 @@
   "patterns": [
     ".github/codex/autorelease/**",
     ".github/codex-action-contract.json",
+    ".github/dependabot.yml",
     ".github/autorelease-operator.json",
     ".github/autorelease-pins.json",
     ".github/workflows/**",
