@@ -4,6 +4,8 @@
 import argparse
 import json
 import pathlib
+import signal
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -66,4 +68,19 @@ class Handler(BaseHTTPRequestHandler):
         return
 
 
-ThreadingHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
+server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+
+
+def stop(signal_number: int, frame: object) -> None:
+    """Release the port on the release job's kill instead of dying mid-request.
+
+    shutdown() blocks until serve_forever() returns, and this handler runs on the
+    thread inside it, so the request must be made from another thread.
+    """
+    threading.Thread(target=server.shutdown, daemon=True).start()
+
+
+signal.signal(signal.SIGTERM, stop)
+signal.signal(signal.SIGINT, stop)
+server.serve_forever()
+server.server_close()
