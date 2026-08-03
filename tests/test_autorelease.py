@@ -720,8 +720,13 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertIn('git worktree remove --force "$worktree"', recovery)
         self.assertIn('exit "$status"', recovery)
         # Every gh call here names the repository: without it gh also deletes the local
-        # branch, which git refuses while the recovery worktree still holds it.
-        for call in re.findall(r"^\s*gh pr (?:merge|close) .*$", recovery, re.MULTILINE):
+        # branch, which git refuses while the recovery worktree still holds it. Line
+        # continuations are folded first, or a call could hide --repo's absence by
+        # wrapping its arguments onto the next line.
+        folded = re.sub(r"\\\n\s*", " ", recovery)
+        calls = re.findall(r"^\s*gh pr\s+(?:merge|close)\s.*$", folded, re.MULTILINE)
+        self.assertEqual(2, len(calls))
+        for call in calls:
             self.assertIn('--repo "${{ github.repository }}"', call)
         # A published release downgrades the publish alarm from critical to warning.
         self.assertIn("release-transaction-state-${{ github.run_id }}", release)
