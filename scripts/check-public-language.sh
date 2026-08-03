@@ -28,7 +28,7 @@ fi
 
 # xargs reports 123 when any grep batch matches nothing, so the finding is read
 # from the output rather than from the exit status.
-matches="$(cd "$PROJECT_ROOT" && xargs -0 grep -HIFni -e "$REJECTED_TERM" < "$tracked" || true)"
+matches="$(cd "$PROJECT_ROOT" && { xargs -0 grep -HIFni -e "$REJECTED_TERM" < "$tracked" || true; })"
 
 if [[ -n "$matches" ]]; then
   printf '%s\n' "$matches" >&2
