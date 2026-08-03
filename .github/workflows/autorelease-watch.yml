@@ -263,15 +263,37 @@ jobs:
           # The protected-controls exemption trusts this branch prefix from this
           # workflow; a recovered record is filed exactly like an EOL completion.
           branch="autorelease/eol-complete-${{ github.run_id }}"
-          git checkout -B "$branch"
-          cp autorelease-plan-download/recovered-event.json "$event"
-          git add "$event"
-          git -c user.name=autorelease-watcher -c user.email=autorelease@invalid \
+          # The record is committed from a separate worktree so this checkout keeps its
+          # branch and its working tree, which the later steps of this job still write.
+          worktree="$RUNNER_TEMP/record-recovery"
+          pushed=false
+          number=""
+          # The EOL dispatch path files on this same branch name in the same run, so a
+          # half-finished recovery must hand back a clean namespace or that push is
+          # rejected as a non-fast-forward. Cleanup never masks the original exit code.
+          cleanup() {
+            local status=$?
+            if [[ -n "$number" ]]; then
+              gh pr close "$number" --delete-branch || true
+            fi
+            if [[ "$pushed" == "true" ]]; then
+              git push origin --delete "$branch" || true
+            fi
+            git worktree remove --force "$worktree" || true
+            git branch -D "$branch" || true
+            exit "$status"
+          }
+          trap cleanup EXIT
+          git worktree add -B "$branch" "$worktree" HEAD
+          cp autorelease-plan-download/recovered-event.json "$worktree/$event"
+          git -C "$worktree" add "$event"
+          git -C "$worktree" -c user.name=autorelease-watcher -c user.email=autorelease@invalid \
             commit -m "chore: complete $ACTION_KEY"
-          head="$(git rev-parse HEAD)"
-          digest="sha256:$(shasum -a 256 "$event" | awk '{print $1}')"
+          head="$(git -C "$worktree" rev-parse HEAD)"
+          digest="sha256:$(shasum -a 256 "$worktree/$event" | awk '{print $1}')"
           gh auth setup-git
-          git push origin HEAD
+          git -C "$worktree" push origin HEAD
+          pushed=true
           url="$(gh pr create --base main --head "$branch" --title "chore: complete $ACTION_KEY" \
             --body "Recovered durable event record for an immutable published release.")"
           number="${url##*/}"
@@ -287,10 +309,13 @@ jobs:
           test "$(git diff --name-only "$base" "$head")" = "$event"
           test "sha256:$(git show "$head:$event" | shasum -a 256 | awk '{print $1}')" = "$digest"
           gh pr merge "$number" --squash --delete-branch
+          # The merge already retired both, so cleanup has nothing left to withdraw.
+          number=""
+          pushed=false
           echo "merged=true" >> "$GITHUB_OUTPUT"
           jq --arg version "$version" \
             '.severity="info" | .summary="The event record for the published PHP \($version) release was recovered by the watcher." | .finalResult="passed"' \
-            "$event" > autorelease-plan-download/recovery-notification.json
+            "$worktree/$event" > autorelease-plan-download/recovery-notification.json
           ./scripts/notify-autorelease \
             --event autorelease-plan-download/recovery-notification.json \
             --state autorelease-plan-download/recovery-notification-state.json \
@@ -298,8 +323,14 @@ jobs:
             --backend github --repo "${{ github.repository }}" --owner "${{ vars.AUTORELEASE_OWNER }}"
       - name: Prepare deterministic no-change evidence
         id: evidence
-        if: needs.investigate.outputs.action == 'no_change' && steps.operator.outputs.enabled == 'true' && steps.recover.outputs.merged != 'true'
+        if: needs.investigate.outputs.action == 'no_change' && steps.operator.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          # A recovered record may have just moved main, and the evidence commit asserts
+          # an untouched base, so the branch is always cut from the current origin/main.
+          gh auth setup-git
+          git fetch origin main
           git checkout -B "autorelease/evidence-${{ github.run_id }}" origin/main
           mkdir -p autorelease-state
           jq -n \
@@ -338,19 +369,14 @@ jobs:
             echo "Unattended mutation is paused; retained investigation remains read-only."
             exit 0
           fi
-          if [[ -n "$RECORD_ACTION_KEY" ]]; then
-            # A recovery attempt can leave the checkout on its own branch, and every
-            # path below measures its write against main.
-            git checkout -f main
-          fi
           action="${{ needs.investigate.outputs.action }}"
           if [[ -z "$action" || "$action" == "none" ]]; then
             echo "The run carries no admitted plan to dispatch."
             exit 0
           fi
-          if [[ "$RECOVERY_MERGED" == "true" && ( "$action" == "no_change" || "$action" == "branch_eol" ) ]]; then
-            # Both writes assert an untouched base, and the recovered record has just
-            # moved it; the next run replays this one against the new main.
+          if [[ "$RECOVERY_MERGED" == "true" && "$action" == "branch_eol" ]]; then
+            # The completion is written into this checkout and asserts an untouched
+            # base, which the recovered record has just moved; the next run replays it.
             echo "A recovered event record landed on main this run, so the $action write waits for the next run."
             exit 0
           fi
@@ -522,8 +548,9 @@ jobs:
           fi
       - name: Report an unrecovered event record
         # Raised last so the failure reaches the owner without having blocked the
-        # reconciliation, lifecycle, and selection paths of the same run.
-        if: steps.recover.outcome == 'failure'
+        # reconciliation, lifecycle, and selection paths of the same run, and with
+        # always() so a later failing step cannot hide which repair went wrong.
+        if: always() && steps.recover.outcome == 'failure'
         run: |
           echo "Recovering the event record for ${{ needs.investigate.outputs.record_action_key }} failed." >&2
           exit 1

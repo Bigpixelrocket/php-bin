@@ -572,13 +572,21 @@ class AutoreleaseControlTests(unittest.TestCase):
         # Assets and checksums of a hand-made release prove each other and nothing else.
         self.assertIn('gh release verify "$version" --repo "${{ github.repository }}" --format json', recovery)
         self.assertIn('git merge-base --is-ancestor "$release_commit" origin/main', recovery)
-        # A failing repair yields to the other paths and is only raised after them.
+        # A failing repair yields to the other paths, is raised only after them, and
+        # says so even when one of those paths failed too.
         self.assertIn("continue-on-error: true", recovery)
         self.assertLess(start, watcher.index("- name: Dispatch implementation or no-edit release"))
         self.assertLess(
             watcher.index("- name: Dispatch implementation or no-edit release"),
-            watcher.index("if: steps.recover.outcome == 'failure'"),
+            watcher.index("if: always() && steps.recover.outcome == 'failure'"),
         )
+        # Later steps keep writing this checkout, and the EOL path files on this very
+        # branch name in the same run, so recovery owns neither past its own step.
+        self.assertIn('git worktree add -B "$branch" "$worktree" HEAD', recovery)
+        self.assertNotIn("git checkout", recovery)
+        self.assertIn('git push origin --delete "$branch"', recovery)
+        self.assertIn('git worktree remove --force "$worktree"', recovery)
+        self.assertIn('exit "$status"', recovery)
         # A published release downgrades the publish alarm from critical to warning.
         self.assertIn("release-transaction-state-${{ github.run_id }}", release)
         self.assertIn("jq -r .released release-state/transaction-state.json", release)
