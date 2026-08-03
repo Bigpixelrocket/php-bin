@@ -294,6 +294,13 @@ jobs:
           # rejected as a non-fast-forward. Cleanup never masks the original exit code.
           cleanup() {
             local status=$?
+            # A cancelled job is signalled twice: SIGINT, then SIGTERM after the grace
+            # window. Only EXIT is trapped, so the second signal keeps its default
+            # disposition and kills the withdraw partway through, which is how an open
+            # bot PR and a live remote branch are left behind. Ignoring both here buys
+            # the withdraw the rest of the grace window. Bash re-raises the signal once
+            # the trap returns, so the cancelled exit code still survives.
+            trap '' INT TERM
             if [[ -n "$number" ]]; then
               gh pr close "$number" --repo "${{ github.repository }}" --delete-branch || true
             fi
@@ -304,11 +311,12 @@ jobs:
             git branch -D "$branch" || true
             exit "$status"
           }
-          # EXIT alone is deliberate. Bash runs the EXIT trap when the shell is terminated
-          # by SIGINT or SIGTERM, so a cancelled job still withdraws; adding INT and TERM
-          # here would run cleanup twice and report the cancelled step as a success.
-          # SIGKILL leaves the branch and PR behind, which no trap can prevent: both carry
-          # this run id, so they collide with nothing and wait for an operator.
+          # EXIT alone: bash runs it when the shell is terminated by SIGINT or SIGTERM
+          # too, so one trap covers both a failure and a cancellation, and cleanup cannot
+          # run twice. It shields itself from the escalation, so the withdraw finishes
+          # unless the grace window runs out and SIGKILL arrives. That last case no trap
+          # can cover: the branch and PR carry this run id, so they collide with nothing
+          # and wait for an operator.
           trap cleanup EXIT
           git worktree add -B "$branch" "$worktree" HEAD
           cp autorelease-plan-download/recovered-event.json "$worktree/$event"
