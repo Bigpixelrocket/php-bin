@@ -221,7 +221,6 @@ def watch_decision(
         for event in events
         if event.get("state") != "complete"
     )
-    unrecorded = unrecorded_published_release(releases, events, record_files)
     if not health.get("healthy", False):
         trigger = "health_failed"
     elif any(capture.get("status") != 200 for capture in manifest.get("captures", [])):
@@ -256,7 +255,14 @@ def watch_decision(
     # called: the repair is deterministic, but suppressing the investigation would let a
     # blocked repair starve reconciliation and selection on every later run.
     model_call = trigger != "quiet"
-    if unrecorded and trigger not in {"health_failed", "source_unhealthy"}:
+    # An untrustworthy snapshot cannot be read for a missing record either, so the
+    # repair is only looked for once the health guards above have passed.
+    unrecorded = (
+        None
+        if trigger in {"health_failed", "source_unhealthy"}
+        else unrecorded_published_release(releases, events, record_files)
+    )
+    if unrecorded:
         trigger = "record_missing"
     return {
         "schemaVersion": 1,
