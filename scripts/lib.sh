@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# shellcheck disable=SC2034
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Read by the scripts that source this file, not by this file.
+# shellcheck disable=SC2034
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 require_macos_arm64() {
