@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Asserts dispatch-pr-checks output shows every required admission check
-# passing. --require-protected-controls is used by flows whose PRs must not
-# touch protected paths; sealed-patch flows omit it because sealed patches
-# may edit support-policy.json under seal verification instead.
+# Re-asserts that the dispatch-pr-checks output records every required
+# admission check as passing. The authoritative gate runs inside
+# dispatch-pr-checks itself; this script is a belt-and-braces check that
+# the file consumed by merge steps still shows the expected verdicts.
+# --require-protected-controls marks flows whose pull requests must never
+# touch protected paths; sealed-patch flows omit it.
 set -euo pipefail
 require_protected="false"
 check_name="Script checks"

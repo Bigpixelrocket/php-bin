@@ -484,6 +484,15 @@ class AutoreleaseControlTests(unittest.TestCase):
                                      "--require-protected-controls"], capture_output=True)
             self.assertNotEqual(result.returncode, 0)
 
+            # mise-php merge gates only ever assert this renamed bucket.
+            path.write_text(json.dumps([{"name": "Plugin contract", "bucket": "pass"}]))
+            subprocess.run([script, "--checks", str(path),
+                            "--check-name", "Plugin contract"], check=True)
+            path.write_text(json.dumps(missing_protected))
+            result = subprocess.run([script, "--checks", str(path),
+                                     "--check-name", "Plugin contract"], capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+
     def test_malformed_contract_shapes_fail_closed(self):
         contract = self._contract()
         contract["allowedAuthority"] = [[]]
