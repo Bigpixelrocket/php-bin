@@ -84,6 +84,30 @@ def workflow_steps(document: dict[str, Any]) -> list[tuple[str, int, dict[str, A
     ]
 
 
+def credential_sites(node: Any, path: str) -> list[str]:
+    """Return every path in a parsed workflow whose keys or values name the OpenAI credential.
+
+    Both spellings reach an agent: `openai-api-key` as an action input and
+    `OPENAI_API_KEY` as an environment name. Either can be attached at the
+    workflow, job, or step level, or interpolated straight into a command, so
+    the whole parsed document is walked rather than one level of it.
+    """
+    if isinstance(node, dict):
+        return [
+            site
+            for key, value in node.items()
+            for site in ([f"{path}.{key}"] if names_credential(str(key)) else [])
+            + credential_sites(value, f"{path}.{key}")
+        ]
+    if isinstance(node, list):
+        return [site for index, item in enumerate(node) for site in credential_sites(item, f"{path}[{index}]")]
+    return [path] if names_credential(str(node)) else []
+
+
+def names_credential(text: str) -> bool:
+    return "openai-api-key" in text.lower() or "openai_api_key" in text.lower()
+
+
 def exact_head(repo: pathlib.Path) -> str:
     return run("git", "rev-parse", "HEAD", cwd=repo).stdout.strip()
 
@@ -647,17 +671,19 @@ class Verifier:
             and investigate_permissions.get("contents") == "read",
             "runtime investigation does not have resolved read-only contents permission",
         )
-        credentialed_release_steps = [
-            f"{job_name}:step-{index + 1}"
-            for job_name, index, step in workflow_steps(
-                load_workflow(PHP_ROOT / ".github/workflows/autorelease-publish.yml")
+        # The release transaction runs no agent, so no part of it may carry the
+        # credential: not a workflow, job, or step environment, not an input,
+        # and not an interpolation inside a command body.
+        release_credential_sites = sorted(
+            set(
+                credential_sites(
+                    load_workflow(PHP_ROOT / ".github/workflows/autorelease-publish.yml"), "autorelease-publish"
+                )
             )
-            if "openai-api-key" in (step.get("with") or {})
-            or any("OPENAI_API_KEY" in str(value) for value in (step.get("env") or {}).values())
-        ]
+        )
         assert_true(
-            not credentialed_release_steps,
-            f"release transaction steps can read the OpenAI credential: {credentialed_release_steps}",
+            not release_credential_sites,
+            f"the release transaction can read the OpenAI credential: {release_credential_sites}",
         )
         admin = PHP_ROOT / "docs/autorelease-admin-evidence.json"
         assert_true(admin.is_file(), "redacted administrator evidence is missing")
