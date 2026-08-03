@@ -58,7 +58,10 @@ phase-scoped action key in the event contract. It must use one of the reviewed
 forms enforced by the output schema: `no_change`, `new_patch`, `new_branch`,
 `branch_eol`, `recipe_rebuild`, `repair`, `source_unhealthy`, `health_failed`,
 `policy_failure`, or `auth_failure` with the required version, date, attempt,
-or lowercase hexadecimal evidence suffix.
+or lowercase hexadecimal evidence suffix. When `autorelease-events/` already
+holds an incomplete record for the same branch, reuse that record's `actionKey`
+verbatim instead of re-deriving its date, attempt, or evidence suffix, so the
+run that completes the action names the file the earlier run opened.
 
 Every `completionAssessment.criteria[].evidence` entry is a machine-resolved
 reference, never explanatory prose. Use only `evidence[N]` for an item in the
