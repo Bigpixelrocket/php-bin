@@ -22,6 +22,10 @@ permissions:
   contents: read
   actions: read
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   # Dispatch inputs reach actions/checkout and several run scripts. They are
   # validated once here, ahead of every other job, and republished as outputs so
@@ -145,9 +149,6 @@ jobs:
       passed: ${{ steps.checks.outputs.passed }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    permissions:
-      contents: read
-      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -211,9 +212,6 @@ jobs:
     if: needs.validate.outputs.passed != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    permissions:
-      contents: read
-      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -299,9 +297,6 @@ jobs:
     needs: [preflight, repair]
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    permissions:
-      contents: read
-      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

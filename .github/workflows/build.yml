@@ -37,6 +37,10 @@ concurrency:
   group: php-spike-${{ github.ref }}-${{ inputs.php_version || '8.4' }}-${{ inputs.stage || 's4' }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   build:
     name: PHP ${{ inputs.php_version || '8.4' }} ${{ inputs.stage || 's4' }}

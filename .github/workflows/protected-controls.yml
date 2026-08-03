@@ -17,6 +17,10 @@ permissions:
   contents: read
   pull-requests: read
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   protected-controls:
     name: Protected controls

@@ -12,6 +12,10 @@ concurrency:
   group: php-autorelease-watcher
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   investigate:
     name: Capture and investigate

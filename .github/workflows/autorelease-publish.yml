@@ -32,6 +32,10 @@ concurrency:
   group: autorelease-publish-${{ inputs.version }}
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   # Dispatch inputs reach actions/checkout and many run scripts. They are shaped
   # once here, ahead of every other job, and republished as outputs so no raw
@@ -40,6 +44,8 @@ jobs:
     name: Validate dispatch inputs
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
     outputs:
       version: ${{ steps.validated.outputs.version }}
       exact_commit: ${{ steps.validated.outputs.exact_commit }}
