@@ -67,6 +67,14 @@ Failures use one deduplicated issue per action key, assigned to the username in
 action, or final-result change adds a comment. Critical failures stop mutation.
 GitHub Actions failure email is an independent fallback.
 
+`Autorelease email digest` additionally sends one fixed-template TL;DR email
+after every completed watcher or publish run, including quiet healthy days, so
+silence stops being ambiguous between "no change" and "the schedule stopped".
+The template is selected by `email-digest` in `autorelease/control.py` from
+retained run state alone and delivered through Resend; no model-authored prose
+reaches the outbound channel, and the workflow skips quietly until the
+`RESEND_API_KEY` secret and the email variables exist.
+
 ```mermaid
 flowchart TD
   job["Any autorelease phase"] --> result{"Result"}

@@ -15,6 +15,7 @@ from typing import Any, Iterable
 from ._validation import (
     ACTION_KEY_RE,
     SHA256_RE,
+    STABLE_VERSION_RE,
     ControlError,
     canonical_json,
     contained_path,
@@ -155,6 +156,167 @@ def retained_notification_issue(prior: dict[str, Any] | None) -> dict[str, Any] 
     if not isinstance(number, bool) and isinstance(number, int) and number > 0:
         return issue
     return None
+
+
+EMAIL_SUBJECT_PREFIX = "[php-bin autorelease]"
+# Repository slugs reach the digest from `github.repository`, never from run state.
+EMAIL_REPOSITORY_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+
+
+def _email(template: str, subject: str, *paragraphs: str, run_url: str) -> dict[str, Any]:
+    return {
+        "template": template,
+        "subject": f"{EMAIL_SUBJECT_PREFIX} {subject}",
+        "body": "\n\n".join([*paragraphs, f"Run: {run_url}"]),
+    }
+
+
+def email_digest(report: dict[str, Any]) -> dict[str, Any]:
+    """Select and fill the one fixed email template for a completed pipeline run.
+
+    Every value interpolated into a subject or body is validated against the
+    same shape rules admission enforces, so model-authored prose never reaches
+    the outbound channel — a plan only ever picks which fixed sentence is sent.
+    An outcome with no template is rejected instead of guessed at.
+    """
+    workflow = report.get("workflow")
+    require(workflow in {"watcher", "publish"}, "email digest workflow is unknown")
+    conclusion = report.get("conclusion")
+    require(isinstance(conclusion, str) and bool(conclusion), "email digest conclusion is missing")
+    run_url = report.get("runUrl", "")
+    require(run_url.startswith("https://github.com/"), "email digest run url is invalid")
+    repository = report.get("repository", "")
+    require(bool(EMAIL_REPOSITORY_RE.fullmatch(repository)), "email digest repository is invalid")
+
+    if workflow == "publish":
+        transaction = report.get("transaction")
+        version = ""
+        released = False
+        if transaction is not None:
+            require(isinstance(transaction, dict), "release transaction state must be an object")
+            version = transaction.get("version", "")
+            require(bool(STABLE_VERSION_RE.fullmatch(version)), "release transaction version is invalid")
+            released = transaction.get("released") is True
+        if released and conclusion == "success":
+            return _email(
+                "release_published",
+                f"PHP {version} published",
+                f"The immutable PHP {version} release for macOS arm64 is live and fresh public "
+                f"installs of it were verified: https://github.com/{repository}/releases/tag/{version}.",
+                run_url=run_url,
+            )
+        if released:
+            return _email(
+                "release_record_pending",
+                f"PHP {version} published; record recovery pending",
+                f"The PHP {version} release went live, but the publish run failed after publication, "
+                "so its durable event record is missing. Tomorrow's watcher recovers the record "
+                "automatically; nothing needs doing unless that recovery also fails.",
+                run_url=run_url,
+            )
+        return _email(
+            "publish_failed",
+            f"Publish failed{f' for PHP {version}' if version else ''}",
+            "The publish transaction stopped before any release went live, so nothing was "
+            "published and nothing needs rolling back. A critical GitHub issue has been filed "
+            "with the failing run; after the cause is fixed, the release re-runs through the "
+            "normal admitted path.",
+            run_url=run_url,
+        )
+
+    if conclusion != "success":
+        return _email(
+            "watcher_failed",
+            f"Watcher run failed ({conclusion})",
+            f"The daily autorelease watcher finished with conclusion '{conclusion}'. If the "
+            "failure was actionable, a critical GitHub issue has been filed and assigned. The "
+            "watcher is idempotent, so re-dispatching it after the cause is fixed is safe.",
+            run_url=run_url,
+        )
+    decision = report.get("decision")
+    require(isinstance(decision, dict), "a successful watcher run must supply its watch decision")
+    digest = decision.get("manifestDigest", "")
+    require(bool(SHA256_RE.fullmatch(digest)), "watch decision manifest digest is invalid")
+    if not decision.get("modelCall"):
+        return _email(
+            "quiet_day",
+            "Watcher: no upstream changes",
+            "The watcher captured fresh upstream evidence and it matches the last reviewed "
+            "capture, so no model call was made and nothing was changed.",
+            f"Evidence manifest: {digest}",
+            run_url=run_url,
+        )
+    plan = report.get("plan")
+    require(isinstance(plan, dict), "a successful watcher model call must supply its admitted plan")
+    action = plan.get("action")
+    action_key = plan.get("actionKey", "")
+    require(bool(ACTION_KEY_RE.fullmatch(action_key)), "admitted plan action key is invalid")
+    version = action_key.split(":")[1] if ":" in action_key else ""
+    if action == "no_change":
+        return _email(
+            "no_change_reviewed",
+            "Watcher: evidence changed, no release needed",
+            f"Upstream evidence changed and the investigation classified it as requiring no "
+            f"release work ({action_key}). The reviewed evidence snapshot was recorded on main, "
+            "so tomorrow's run compares against today's state.",
+            f"Evidence manifest: {digest}",
+            run_url=run_url,
+        )
+    if action == "new_patch":
+        return _email(
+            "new_patch_started",
+            f"Watcher: PHP {version} release started",
+            f"Upstream published PHP {version} and the watcher admitted a release plan for it "
+            f"({action_key}). The implementation and publish phases were dispatched; a separate "
+            "email confirms publication or reports the failure.",
+            run_url=run_url,
+        )
+    if action == "new_branch":
+        return _email(
+            "new_branch_detected",
+            f"Watcher: new PHP branch {version} detected",
+            f"A new PHP branch was detected and admitted as {action_key}. Its first publication "
+            "proceeds automatically once mise-php records matching exact-commit readiness; until "
+            "then the watcher re-checks daily and mutates nothing.",
+            run_url=run_url,
+        )
+    if action == "branch_eol":
+        return _email(
+            "branch_eol_started",
+            f"Watcher: PHP {version} reached end of life",
+            f"The support policy retired PHP {version} ({action_key}). Support cleanup completes "
+            "automatically once mise-php records matching EOL readiness; published releases for "
+            "the branch stay immutable and installable.",
+            run_url=run_url,
+        )
+    if action == "repair":
+        return _email(
+            "repair_started",
+            f"Watcher: repair started for PHP {version}",
+            f"The investigation admitted a bounded repair plan ({action_key}) and dispatched it. "
+            "The exact evidence and allowed paths are retained with the run's admitted plan "
+            "artifact.",
+            run_url=run_url,
+        )
+    if action == "reconcile_partial":
+        return _email(
+            "reconcile_started",
+            "Watcher: reconciling a partial prior run",
+            f"An earlier run left {action_key} incomplete and the watcher admitted a "
+            "reconciliation for it. The event record resumes from its last legal state; no work "
+            "is repeated and nothing is overwritten.",
+            run_url=run_url,
+        )
+    if action in {"blocked", "needs_human"}:
+        return _email(
+            "watcher_attention",
+            f"Watcher needs attention ({action})",
+            f"The investigation stopped at '{action}' for {action_key} and mutated nothing. A "
+            "GitHub issue has been filed or updated with the exact evidence and the required "
+            "next step.",
+            run_url=run_url,
+        )
+    raise ControlError(f"no email template exists for action: {action}")
 
 
 ACTION_FILENAME_MAP = str.maketrans({":": "-", "/": "-"})
