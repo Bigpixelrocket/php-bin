@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "manifestDigest": "sha256:3a90f17866c918ae0cb3d78968e3305842d00f583b61dec3b5f6352ad0aeb649",
-  "planDigest": "sha256:e96d8cc6f02b53e2315c28ec31049efa62cbde4d5fdc918f09a4d62eef48bf10",
+  "manifestDigest": "sha256:b5beb175e45ed48f8f65024460a2c87ee69d4b40c4c232c963c145ee1b10534b",
+  "planDigest": "sha256:ffc0c443c52a3b9faeb924be1ceaf85d355b03ddc17948c7966fa0e65f96a456",
   "captures": [
     {
       "captureId": "php_supported_versions",
@@ -20,12 +20,12 @@
     },
     {
       "captureId": "php_bin_releases",
-      "digest": "sha256:2e3226edaedd43ab52a725f863ab27eee5ab083b4419e734979483d84adf4f26",
+      "digest": "sha256:dc863ea4907618d8dda45a51a54fca7f59c7429421a5321ee7b36d1b2d63e03c",
       "status": 200
     },
     {
       "captureId": "php_bin_state",
-      "digest": "sha256:2366abc54e468b539f0bde0dd0fd28a14df29c6aa017bc688e29024e6b7d768b",
+      "digest": "sha256:e3909eaf659b9278b900c9070abae6388350648217eb365a965792d2baf91e32",
       "status": 200
     },
     {
