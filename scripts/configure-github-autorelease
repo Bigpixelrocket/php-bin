@@ -149,37 +149,73 @@ try:
             raise RuntimeError(
                 f"GitHub did not disable administrator environment bypass for {environment_name}"
             )
-    protection = {
-        "required_status_checks": {
-            "strict": True,
-            "checks": [
-                {"context": args.required_check, "app_id": 15368},
-                {"context": "Protected controls", "app_id": 15368},
-            ],
-        },
-        "enforce_admins": True,
-        "required_pull_request_reviews": {
-            "dismiss_stale_reviews": True,
-            "require_code_owner_reviews": True,
-            "required_approving_review_count": 0,
-            "require_last_push_approval": False,
-        },
-        "restrictions": None,
-        "required_linear_history": True,
-        "allow_force_pushes": False,
-        "allow_deletions": False,
-        "block_creations": False,
-        "required_conversation_resolution": True,
-        "lock_branch": False,
-        "allow_fork_syncing": True,
+    ruleset = {
+        "name": "protect_main",
+        "target": "branch",
+        "enforcement": "active",
+        "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+        # Repository administrators may merge a pull request past a failing
+        # rule (a solo owner cannot approve their own protected-path PR, so
+        # that red check always ended in an administrative bypass anyway) but
+        # can never push, force-push, or delete main directly.
+        "bypass_actors": [
+            {"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request"}
+        ],
+        "rules": [
+            {"type": "deletion"},
+            {"type": "non_fast_forward"},
+            {"type": "required_linear_history"},
+            {
+                "type": "pull_request",
+                "parameters": {
+                    "required_approving_review_count": 0,
+                    "dismiss_stale_reviews_on_push": True,
+                    "require_code_owner_review": True,
+                    "require_last_push_approval": False,
+                    "required_review_thread_resolution": True,
+                    "allowed_merge_methods": ["squash"],
+                },
+            },
+            {
+                "type": "required_status_checks",
+                "parameters": {
+                    "strict_required_status_checks_policy": True,
+                    "do_not_enforce_on_create": False,
+                    "required_status_checks": [
+                        {"context": args.required_check, "integration_id": 15368},
+                        {"context": "Protected controls", "integration_id": 15368},
+                    ],
+                },
+            },
+        ],
     }
-    gh(
-        "api",
-        f"repos/{args.repo}/branches/main/protection",
-        "--method",
-        "PUT",
-        input_value=protection,
+    existing = json.loads(gh("api", f"repos/{args.repo}/rulesets") or "[]")
+    matched = [item for item in existing if item.get("name") == ruleset["name"]]
+    if len(matched) > 1:
+        raise RuntimeError("multiple protect_main rulesets exist; resolve by hand")
+    if matched:
+        gh(
+            "api",
+            f"repos/{args.repo}/rulesets/{matched[0]['id']}",
+            "--method",
+            "PUT",
+            input_value=ruleset,
+        )
+    else:
+        gh("api", f"repos/{args.repo}/rulesets", "--method", "POST", input_value=ruleset)
+    # Classic branch protection is superseded by the ruleset. Removing it also
+    # retires the enforce_admins toggle the old merge procedure depended on.
+    classic = subprocess.run(
+        ["gh", "api", f"repos/{args.repo}/branches/main/protection"],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
+    if classic.returncode == 0:
+        gh("api", f"repos/{args.repo}/branches/main/protection", "--method", "DELETE")
+    elif "Branch not protected" not in classic.stderr:
+        raise RuntimeError(f"classic branch protection state is unreadable: {classic.stderr.strip()}")
     print(
         json.dumps(
             {

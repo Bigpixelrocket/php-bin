@@ -7,11 +7,21 @@ secret values.
 
 Required repository state:
 
-- Require a pull request before merging.
+- Protect `main` with the `protect_main` repository ruleset: require a pull
+  request (squash merges only, CODEOWNER review, review-thread resolution),
+  require the status checks below on an up-to-date branch, require linear
+  history, and block force pushes and branch deletion. Repository
+  administrators are bypass actors in `pull_request` mode only: the solo
+  owner can merge a pull request past a failing rule but can never push,
+  force-push, or delete `main` directly. Classic branch protection (and its
+  `enforce_admins` toggle) is retired; the configure script removes it.
 - Require the `Script checks` status check.
 - Require the base-controlled `Protected controls` status check. It passes
-  automatically for unprotected generated paths and requires an exact-head
-  `loadinglucian` approval for paths in `autorelease/protected-paths.json`.
+  automatically for unprotected generated paths and for owner-authored pull
+  requests (a solo owner cannot approve their own PR, so an owner review
+  requirement was unsatisfiable there); any other author touching a path in
+  `autorelease/protected-paths.json` requires an exact-head `loadinglucian`
+  approval.
   The sole deterministic exception is `autorelease-state/last-evidence.json`:
   a same-repository `github-actions[bot]` PR may pass only when it is a direct
   child of the current base, is tied to the still-running protected watcher,
@@ -20,12 +30,8 @@ Required repository state:
   the protected watcher workflow, bound to its source commit and run-specific
   predicate. Runtime Codex cannot mint that identity, invoke this exception,
   or edit that state.
-- Bind the required check to the GitHub Actions app, preventing another app
+- Bind the required checks to the GitHub Actions app, preventing another app
   from satisfying the same context name.
-- Require conversation resolution.
-- Require linear history; block force pushes and branch deletion.
-- Enforce protection for administrators and require CODEOWNER approval for
-  protected control paths.
 - Enable squash merge, auto-merge, update branch, and automatic head-branch
   deletion; disable merge commits and rebase merge.
 - Keep the default Actions token read-only while enabling automation PR

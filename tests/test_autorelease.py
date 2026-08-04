@@ -871,6 +871,16 @@ class AutoreleaseControlTests(unittest.TestCase):
             release.index("Notify owner of completed release"),
         )
 
+    def test_protected_controls_pass_owner_authored_changes_before_bot_exemptions(self):
+        # The owner short-circuit must sit after the no-protected-path exit and
+        # before the automation exemptions, so it can never widen what a bot
+        # identity is allowed to merge.
+        root = pathlib.Path(__file__).resolve().parents[1]
+        protected = (root / ".github/workflows/protected-controls.yml").read_text()
+        owner_pass = protected.index("if author.lower() == reviewer:")
+        self.assertLess(protected.index("No protected control path changed."), owner_pass)
+        self.assertLess(owner_pass, protected.index('re.fullmatch(r"autorelease/evidence-'))
+
     def test_recovered_event_records_use_the_trusted_watcher_branch_prefix(self):
         root = pathlib.Path(__file__).resolve().parents[1]
         watcher = (root / ".github/workflows/autorelease-watch.yml").read_text()

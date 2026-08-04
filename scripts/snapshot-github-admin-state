@@ -111,7 +111,15 @@ try:
             "branch protection",
             allow_missing=True,
         ),
-        "rulesets": paginated_items(gh_api(f"repos/{args.repo}/rulesets")),
+        # The list endpoint returns metadata only; each ruleset is re-fetched so
+        # the snapshot captures the enforced conditions, rules, and bypass
+        # actors and drift in any of them is visible in review.
+        "rulesets": [
+            single_document(
+                gh_api(f"repos/{args.repo}/rulesets/{item['id']}"), "ruleset"
+            )
+            for item in paginated_items(gh_api(f"repos/{args.repo}/rulesets"))
+        ],
         "environments": single_document(
             gh_api(f"repos/{args.repo}/environments"), "environments"
         ),
