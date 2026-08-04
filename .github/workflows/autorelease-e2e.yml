@@ -106,7 +106,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Install pinned mise
-        uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4
+        uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4
         with:
           version: 2026.7.13
           sha256: ef747f4bd944d7cb4efe1832ec6cd29dfdbc217389122fa37c20d116d90c1eb6
@@ -256,7 +256,7 @@ jobs:
           repository: bigpixelrocket/mise-php
           ref: ${{ needs.preflight.outputs.mise_php_sha }}
           persist-credentials: false
-      - uses: jdx/mise-action@9e7f7633ff6f6d6048a9418a68d48f288f50eb14 # v4
+      - uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4
       - name: Verify exact and branch-shorthand public installs
         env:
           LIVE_VERSION: ${{ needs.preflight.outputs.live_version }}
