@@ -545,10 +545,29 @@ class AutoreleaseControlTests(unittest.TestCase):
             {**base, "repository": "php-bin"},
             base,
             {**base, "decision": {"modelCall": False, "manifestDigest": "sha256:short"}},
+            {**base, "decision": {"modelCall": False, "manifestDigest": None}},
+            {**base, "decision": {"manifestDigest": "sha256:" + "a" * 64}},
+            {**base, "decision": {"modelCall": 1, "manifestDigest": "sha256:" + "a" * 64}},
             {**base, "decision": changed},
             {**base, "decision": changed, "plan": {"action": "new_patch", "actionKey": "new_patch:8.5.9; rm -rf"}},
+            {**base, "decision": changed, "plan": {"action": "new_patch", "actionKey": None}},
+            {**base, "decision": changed, "plan": {"action": "new_patch", "actionKey": "repair:8.5.9:deadbeef"}},
             {**base, "decision": changed, "plan": {"action": "publish", "actionKey": "new_patch:8.5.9"}},
             {**base, "workflow": "publish", "transaction": {"released": True, "version": "main"}},
+            {**base, "workflow": "publish"},
+            {**base, "workflow": "publish", "transaction": {"released": False, "version": "8.5.9"}},
+            {
+                **base,
+                "workflow": "publish",
+                "conclusion": "failure",
+                "transaction": {"released": "true", "version": "8.5.9"},
+            },
+            {
+                **base,
+                "workflow": "publish",
+                "conclusion": "failure",
+                "transaction": {"released": True, "version": None},
+            },
         )
         for report in rejected:
             with self.subTest(report=report):

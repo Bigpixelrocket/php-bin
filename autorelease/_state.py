@@ -161,6 +161,16 @@ def retained_notification_issue(prior: dict[str, Any] | None) -> dict[str, Any] 
 EMAIL_SUBJECT_PREFIX = "[php-bin autorelease]"
 # Repository slugs reach the digest from `github.repository`, never from run state.
 EMAIL_REPOSITORY_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+# ACTION_KEY_RE fixes key syntax only, so each version-deriving action also pins
+# the key family it may carry. reconcile_partial reuses the incomplete action's
+# key and blocked/needs_human carry whatever key failed, so they accept any.
+EMAIL_ACTION_KEY_PREFIXES = {
+    "no_change": {"no_change"},
+    "new_patch": {"new_patch"},
+    "new_branch": {"new_branch"},
+    "branch_eol": {"branch_eol"},
+    "repair": {"repair"},
+}
 
 
 def _email(template: str, subject: str, *paragraphs: str, run_url: str) -> dict[str, Any]:
@@ -194,9 +204,19 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
         released = False
         if transaction is not None:
             require(isinstance(transaction, dict), "release transaction state must be an object")
-            version = transaction.get("version", "")
-            require(bool(STABLE_VERSION_RE.fullmatch(version)), "release transaction version is invalid")
-            released = transaction.get("released") is True
+            version = transaction.get("version")
+            require(
+                isinstance(version, str) and bool(STABLE_VERSION_RE.fullmatch(version)),
+                "release transaction version is invalid",
+            )
+            released = transaction.get("released")
+            require(isinstance(released, bool), "release transaction released flag is invalid")
+        # A publish job only succeeds after recording a released transaction, so a
+        # green run without one is inconsistent state, not a failed release.
+        require(
+            conclusion != "success" or released is True,
+            "a successful publish run must retain released transaction state",
+        )
         if released and conclusion == "success":
             return _email(
                 "release_published",
@@ -235,9 +255,14 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
         )
     decision = report.get("decision")
     require(isinstance(decision, dict), "a successful watcher run must supply its watch decision")
-    digest = decision.get("manifestDigest", "")
-    require(bool(SHA256_RE.fullmatch(digest)), "watch decision manifest digest is invalid")
-    if not decision.get("modelCall"):
+    digest = decision.get("manifestDigest")
+    require(
+        isinstance(digest, str) and bool(SHA256_RE.fullmatch(digest)),
+        "watch decision manifest digest is invalid",
+    )
+    model_call = decision.get("modelCall")
+    require(isinstance(model_call, bool), "watch decision model call flag is invalid")
+    if not model_call:
         return _email(
             "quiet_day",
             "Watcher: no upstream changes",
@@ -249,8 +274,16 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
     plan = report.get("plan")
     require(isinstance(plan, dict), "a successful watcher model call must supply its admitted plan")
     action = plan.get("action")
-    action_key = plan.get("actionKey", "")
-    require(bool(ACTION_KEY_RE.fullmatch(action_key)), "admitted plan action key is invalid")
+    action_key = plan.get("actionKey")
+    require(
+        isinstance(action_key, str) and bool(ACTION_KEY_RE.fullmatch(action_key)),
+        "admitted plan action key is invalid",
+    )
+    allowed_prefixes = EMAIL_ACTION_KEY_PREFIXES.get(action)
+    require(
+        allowed_prefixes is None or action_key.split(":")[0] in allowed_prefixes,
+        "admitted plan action key does not match its action",
+    )
     version = action_key.split(":")[1] if ":" in action_key else ""
     if action == "no_change":
         return _email(
