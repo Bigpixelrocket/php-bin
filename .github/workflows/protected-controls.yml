@@ -126,6 +126,16 @@ jobs:
               print("No protected control path changed.")
               raise SystemExit(0)
 
+          # A solo owner cannot approve their own pull request, so demanding an
+          # exact-head owner review of owner-authored changes was unsatisfiable
+          # and every such merge ended in an administrative bypass regardless.
+          # The gate's value is against non-owner authors: automation identities
+          # and admitted agent work. Owner-authored protected changes pass here
+          # and still owe the functional required check before merging.
+          if author.lower() == reviewer:
+              print(f"Protected paths changed by the configured owner {author}.")
+              raise SystemExit(0)
+
           # Both trusted-automation exemptions below bind the whole diff, not just
           # its protected subset: the watcher writes exactly one file, so any
           # unprotected passenger riding along is proof this is not that PR.
