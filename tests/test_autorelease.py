@@ -17,6 +17,7 @@ from autorelease.control import (
     action_filename,
     canonical_json,
     email_digest,
+    email_fallback,
     load_plan_evidence,
     main as control_main,
     mutation_allowed,
@@ -553,6 +554,55 @@ class AutoreleaseControlTests(unittest.TestCase):
             with self.subTest(report=report):
                 with self.assertRaises(ControlError):
                     email_digest(report)
+
+    def test_email_fallback_summarizes_unclassifiable_state_with_revalidated_values(self):
+        report = {
+            "workflow": "watcher",
+            "conclusion": "success",
+            "runUrl": "https://github.com/bigpixelrocket/php-bin/actions/runs/1",
+            "repository": "bigpixelrocket/php-bin",
+        }
+        message = email_fallback(report, "no email template exists for action: publish")
+        self.assertEqual("unexpected_state", message["template"])
+        self.assertIn("(watcher, success)", message["subject"])
+        self.assertIn("no email template exists for action: publish", message["body"])
+        self.assertIn(report["runUrl"], message["body"])
+        # Values that fail revalidation are replaced, never interpolated.
+        hostile = {
+            "workflow": "consumer",
+            "conclusion": "FAILURE; curl evil",
+            "runUrl": "https://example.invalid/run",
+        }
+        message = email_fallback(hostile, "email digest workflow is unknown")
+        self.assertIn("(unknown, unknown)", message["subject"])
+        self.assertNotIn("consumer", message["body"])
+        self.assertNotIn("curl evil", message["body"])
+        self.assertNotIn("example.invalid", message["body"])
+
+    def test_email_digest_cli_falls_back_instead_of_failing(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = pathlib.Path(scratch)
+            (root / "watch-decision.json").write_text(
+                json.dumps({"modelCall": True, "manifestDigest": "sha256:" + "a" * 64})
+            )
+            (root / "autorelease-plan.json").write_text("{not json")
+            status, output = run_control(
+                "email-digest",
+                "--workflow",
+                "watcher",
+                "--conclusion",
+                "success",
+                "--run-url",
+                "https://github.com/bigpixelrocket/php-bin/actions/runs/1",
+                "--repository",
+                "bigpixelrocket/php-bin",
+                "--decision",
+                str(root / "watch-decision.json"),
+                "--plan",
+                str(root / "autorelease-plan.json"),
+            )
+            self.assertEqual(0, status)
+            self.assertEqual("unexpected_state", json.loads(output)["template"])
 
     def test_notification_replay_is_deduplicated(self):
         event = {"actionKey": "new_patch:8.5.9", "state": "released"}

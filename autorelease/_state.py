@@ -319,6 +319,35 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
     raise ControlError(f"no email template exists for action: {action}")
 
 
+def email_fallback(report: dict[str, Any], reason: str) -> dict[str, Any]:
+    """Render the last-resort digest for run state no template accepts.
+
+    The daily email must not go silent exactly when the pipeline does something
+    novel, so rejection by `email_digest` still produces a message. Only values
+    that revalidate here are interpolated; everything else is replaced with
+    'unknown', and the stated reason is this module's own rejection text.
+    """
+    workflow = report.get("workflow")
+    if workflow not in {"watcher", "publish"}:
+        workflow = "unknown"
+    conclusion = report.get("conclusion")
+    if not isinstance(conclusion, str) or not re.fullmatch(r"[a-z_]{1,32}", conclusion):
+        conclusion = "unknown"
+    run_url = report.get("runUrl", "")
+    if not isinstance(run_url, str) or not run_url.startswith("https://github.com/"):
+        run_url = "unknown (see the Actions history)"
+    return _email(
+        "unexpected_state",
+        f"Pipeline outcome needs a look ({workflow}, {conclusion})",
+        f"A {workflow} run finished with conclusion '{conclusion}', but its retained state "
+        "matched no known outcome, so this summary is a fallback rather than a classification. "
+        f"The digest was rejected because: {reason}",
+        "Check the run and its retained artifacts directly. If this recurs for a legitimate "
+        "outcome, the digest template table needs a new case.",
+        run_url=run_url,
+    )
+
+
 ACTION_FILENAME_MAP = str.maketrans({":": "-", "/": "-"})
 
 

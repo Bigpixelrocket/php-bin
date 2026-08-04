@@ -73,7 +73,10 @@ silence stops being ambiguous between "no change" and "the schedule stopped".
 The template is selected by `email-digest` in `autorelease/control.py` from
 retained run state alone and delivered through Resend; no model-authored prose
 reaches the outbound channel, and the workflow skips quietly until the
-`RESEND_API_KEY` secret and the email variables exist.
+`RESEND_API_KEY` secret and the email variables exist. Run state that matches
+no template — including a corrupt retained artifact — still sends a fallback
+summary naming the exact rejection reason, so the channel cannot go silent on
+precisely the runs that need a look.
 
 ```mermaid
 flowchart TD
