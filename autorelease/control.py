@@ -72,6 +72,8 @@ from autorelease._state import (  # noqa: E402
     WATCH_RECOVERY_ACTION,
     action_filename,
     audit_reconstruction,
+    email_digest,
+    email_fallback,
     mutation_allowed,
     notification_decision,
     release_transition,
@@ -180,6 +182,17 @@ def main(argv: list[str] | None = None) -> int:
     archive_parser.add_argument("--archive", required=True, type=pathlib.Path)
     archive_parser.add_argument("--version", required=True)
 
+    email_parser = subparsers.add_parser("email-digest")
+    email_parser.add_argument("--workflow", required=True)
+    email_parser.add_argument("--conclusion", required=True)
+    email_parser.add_argument("--run-url", required=True)
+    email_parser.add_argument("--repository", required=True)
+    # A run that crashed before retaining its state legitimately has none of these
+    # files; email_digest decides per conclusion whether that absence is acceptable.
+    email_parser.add_argument("--decision", type=pathlib.Path)
+    email_parser.add_argument("--plan", type=pathlib.Path)
+    email_parser.add_argument("--transaction", type=pathlib.Path)
+
     subparsers.add_parser("validate-policy")
 
     args = parser.parse_args(argv)
@@ -245,6 +258,30 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "validate-archive":
             validate_archive(args.archive, args.version)
             print(json.dumps({"valid": True}))
+        elif args.command == "email-digest":
+            report = {
+                "workflow": args.workflow,
+                "conclusion": args.conclusion,
+                "runUrl": args.run_url,
+                "repository": args.repository,
+            }
+            # A corrupt artifact or an unclassifiable outcome must still email a
+            # summary rather than go silent, so rejection selects the fallback
+            # template instead of failing the digest run.
+            try:
+                message = email_digest(
+                    {
+                        **report,
+                        "decision": load_json(args.decision) if args.decision and args.decision.exists() else None,
+                        "plan": load_json(args.plan) if args.plan and args.plan.exists() else None,
+                        "transaction": load_json(args.transaction)
+                        if args.transaction and args.transaction.exists()
+                        else None,
+                    }
+                )
+            except ControlError as error:
+                message = email_fallback(report, str(error))
+            print(json.dumps(message))
         elif args.command == "validate-policy":
             print(json.dumps(validate_support_policy(ROOT)))
         return 0

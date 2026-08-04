@@ -1,0 +1,109 @@
+name: Autorelease email digest
+
+# One deterministic TL;DR email per completed pipeline run. The digest is
+# rendered by `./autorelease/control.py email-digest` from retained run state
+# only, so a template is selected — never written — at runtime, and no
+# model-authored prose can reach the outbound channel.
+on:
+  workflow_run:
+    workflows:
+      - PHP autorelease watcher
+      - Autorelease publish transaction
+    types:
+      - completed
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: autorelease-email-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  digest:
+    name: Send run digest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      EMAIL_FROM: ${{ vars.AUTORELEASE_EMAIL_FROM }}
+      EMAIL_TO: ${{ vars.AUTORELEASE_EMAIL_TO }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+      RUN_NAME: ${{ github.event.workflow_run.name }}
+      RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Decide whether delivery is configured
+        id: gate
+        # An unconfigured repository skips quietly instead of failing, so the
+        # digest can merge ahead of the Resend secret and variables existing.
+        run: |
+          if [[ -n "$RESEND_API_KEY" && -n "$EMAIL_FROM" && -n "$EMAIL_TO" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "RESEND_API_KEY, AUTORELEASE_EMAIL_FROM, or AUTORELEASE_EMAIL_TO is unset; no digest is sent."
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: steps.gate.outputs.configured == 'true'
+        with:
+          persist-credentials: false
+      - name: Download the retained run state
+        id: state
+        if: steps.gate.outputs.configured == 'true'
+        run: |
+          mkdir -p email-run/state
+          case "$RUN_NAME" in
+            "PHP autorelease watcher")
+              echo "workflow=watcher" >> "$GITHUB_OUTPUT"
+              artifact="autorelease-investigation-$RUN_ID"
+              ;;
+            "Autorelease publish transaction")
+              echo "workflow=publish" >> "$GITHUB_OUTPUT"
+              artifact="release-transaction-state-$RUN_ID"
+              ;;
+            *)
+              echo "unrouted triggering workflow: $RUN_NAME" >&2
+              exit 1
+              ;;
+          esac
+          # A run that crashed before retaining its state has no artifact; the
+          # renderer then only accepts that absence for the failure templates.
+          if ! gh run download "$RUN_ID" --repo "${{ github.repository }}" \
+            --name "$artifact" --dir email-run/state; then
+            echo "No retained state artifact exists for $artifact."
+          fi
+      - name: Render the deterministic digest
+        if: steps.gate.outputs.configured == 'true'
+        run: |
+          ./autorelease/control.py email-digest \
+            --workflow "${{ steps.state.outputs.workflow }}" \
+            --conclusion "$RUN_CONCLUSION" \
+            --run-url "$RUN_URL" \
+            --repository "${{ github.repository }}" \
+            --decision email-run/state/watch-decision.json \
+            --plan email-run/state/autorelease-plan.json \
+            --transaction email-run/state/transaction-state.json \
+            > email-run/digest.json
+          echo "template=$(jq -r .template email-run/digest.json)"
+      - name: Send the digest through Resend
+        if: steps.gate.outputs.configured == 'true'
+        # The secret reaches exactly one place: the Authorization header.
+        run: |
+          jq \
+            --arg from "$EMAIL_FROM" \
+            --arg to "$EMAIL_TO" \
+            '{from: $from, to: [$to], subject: .subject, text: .body}' \
+            email-run/digest.json > email-run/payload.json
+          curl --fail-with-body --silent --show-error \
+            --connect-timeout 10 --max-time 30 \
+            --request POST https://api.resend.com/emails \
+            --header "Authorization: Bearer $RESEND_API_KEY" \
+            --header "Content-Type: application/json" \
+            --data @email-run/payload.json

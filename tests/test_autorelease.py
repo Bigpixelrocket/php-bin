@@ -16,6 +16,8 @@ from autorelease.control import (
     ControlError,
     action_filename,
     canonical_json,
+    email_digest,
+    email_fallback,
     load_plan_evidence,
     main as control_main,
     mutation_allowed,
@@ -441,6 +443,185 @@ class AutoreleaseControlTests(unittest.TestCase):
             }
             with self.assertRaises(ControlError):
                 release_transition(transaction, "published", root, digests)
+
+    def test_email_digest_selects_one_fixed_template_per_outcome(self):
+        digest = "sha256:" + "a" * 64
+        base = {
+            "workflow": "watcher",
+            "conclusion": "success",
+            "runUrl": "https://github.com/bigpixelrocket/php-bin/actions/runs/1",
+            "repository": "bigpixelrocket/php-bin",
+        }
+        changed = {"modelCall": True, "manifestDigest": digest}
+        cases = (
+            ({**base, "conclusion": "failure"}, "watcher_failed", "conclusion 'failure'"),
+            (
+                {**base, "decision": {"modelCall": False, "manifestDigest": digest}},
+                "quiet_day",
+                "no model call was made",
+            ),
+            (
+                {**base, "decision": changed, "plan": {"action": "no_change", "actionKey": "no_change:" + "0" * 16}},
+                "no_change_reviewed",
+                digest,
+            ),
+            (
+                {**base, "decision": changed, "plan": {"action": "new_patch", "actionKey": "new_patch:8.5.9"}},
+                "new_patch_started",
+                "PHP 8.5.9 release started",
+            ),
+            (
+                {**base, "decision": changed, "plan": {"action": "new_branch", "actionKey": "new_branch:8.6"}},
+                "new_branch_detected",
+                "mise-php records matching exact-commit readiness",
+            ),
+            (
+                {**base, "decision": changed, "plan": {"action": "branch_eol", "actionKey": "branch_eol:8.1:2026-12-31"}},
+                "branch_eol_started",
+                "PHP 8.1 reached end of life",
+            ),
+            (
+                {**base, "decision": changed, "plan": {"action": "repair", "actionKey": "repair:8.5.9:deadbeef"}},
+                "repair_started",
+                "repair:8.5.9:deadbeef",
+            ),
+            (
+                {**base, "decision": changed, "plan": {"action": "reconcile_partial", "actionKey": "new_patch:8.5.9"}},
+                "reconcile_started",
+                "last legal state",
+            ),
+            (
+                {**base, "decision": changed, "plan": {"action": "needs_human", "actionKey": "auth_failure:" + "b" * 8}},
+                "watcher_attention",
+                "needs_human",
+            ),
+            (
+                {**base, "workflow": "publish", "transaction": {"released": True, "version": "8.5.9"}},
+                "release_published",
+                "releases/tag/8.5.9",
+            ),
+            (
+                {
+                    **base,
+                    "workflow": "publish",
+                    "conclusion": "failure",
+                    "transaction": {"released": True, "version": "8.5.9"},
+                },
+                "release_record_pending",
+                "recovers the record",
+            ),
+            (
+                {
+                    **base,
+                    "workflow": "publish",
+                    "conclusion": "failure",
+                    "transaction": {"released": False, "version": "8.5.9"},
+                },
+                "publish_failed",
+                "Publish failed for PHP 8.5.9",
+            ),
+            ({**base, "workflow": "publish", "conclusion": "failure"}, "publish_failed", "Publish failed"),
+        )
+        for report, template, needle in cases:
+            with self.subTest(template=template):
+                message = email_digest(report)
+                self.assertEqual(template, message["template"])
+                self.assertTrue(message["subject"].startswith("[php-bin autorelease] "))
+                self.assertIn(needle, message["subject"] + "\n" + message["body"])
+                self.assertIn(base["runUrl"], message["body"])
+
+    def test_email_digest_rejects_unroutable_or_unvalidated_run_state(self):
+        digest = "sha256:" + "a" * 64
+        base = {
+            "workflow": "watcher",
+            "conclusion": "success",
+            "runUrl": "https://github.com/bigpixelrocket/php-bin/actions/runs/1",
+            "repository": "bigpixelrocket/php-bin",
+        }
+        changed = {"modelCall": True, "manifestDigest": digest}
+        rejected = (
+            {**base, "workflow": "consumer"},
+            {**base, "runUrl": "https://example.invalid/run"},
+            {**base, "repository": "php-bin"},
+            base,
+            {**base, "decision": {"modelCall": False, "manifestDigest": "sha256:short"}},
+            {**base, "decision": {"modelCall": False, "manifestDigest": None}},
+            {**base, "decision": {"manifestDigest": "sha256:" + "a" * 64}},
+            {**base, "decision": {"modelCall": 1, "manifestDigest": "sha256:" + "a" * 64}},
+            {**base, "decision": changed},
+            {**base, "decision": changed, "plan": {"action": "new_patch", "actionKey": "new_patch:8.5.9; rm -rf"}},
+            {**base, "decision": changed, "plan": {"action": "new_patch", "actionKey": None}},
+            {**base, "decision": changed, "plan": {"action": "new_patch", "actionKey": "repair:8.5.9:deadbeef"}},
+            {**base, "decision": changed, "plan": {"action": "publish", "actionKey": "new_patch:8.5.9"}},
+            {**base, "workflow": "publish", "transaction": {"released": True, "version": "main"}},
+            {**base, "workflow": "publish"},
+            {**base, "workflow": "publish", "transaction": {"released": False, "version": "8.5.9"}},
+            {
+                **base,
+                "workflow": "publish",
+                "conclusion": "failure",
+                "transaction": {"released": "true", "version": "8.5.9"},
+            },
+            {
+                **base,
+                "workflow": "publish",
+                "conclusion": "failure",
+                "transaction": {"released": True, "version": None},
+            },
+        )
+        for report in rejected:
+            with self.subTest(report=report):
+                with self.assertRaises(ControlError):
+                    email_digest(report)
+
+    def test_email_fallback_summarizes_unclassifiable_state_with_revalidated_values(self):
+        report = {
+            "workflow": "watcher",
+            "conclusion": "success",
+            "runUrl": "https://github.com/bigpixelrocket/php-bin/actions/runs/1",
+            "repository": "bigpixelrocket/php-bin",
+        }
+        message = email_fallback(report, "no email template exists for action: publish")
+        self.assertEqual("unexpected_state", message["template"])
+        self.assertIn("(watcher, success)", message["subject"])
+        self.assertIn("no email template exists for action: publish", message["body"])
+        self.assertIn(report["runUrl"], message["body"])
+        # Values that fail revalidation are replaced, never interpolated.
+        hostile = {
+            "workflow": "consumer",
+            "conclusion": "FAILURE; curl evil",
+            "runUrl": "https://example.invalid/run",
+        }
+        message = email_fallback(hostile, "email digest workflow is unknown")
+        self.assertIn("(unknown, unknown)", message["subject"])
+        self.assertNotIn("consumer", message["body"])
+        self.assertNotIn("curl evil", message["body"])
+        self.assertNotIn("example.invalid", message["body"])
+
+    def test_email_digest_cli_falls_back_instead_of_failing(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = pathlib.Path(scratch)
+            (root / "watch-decision.json").write_text(
+                json.dumps({"modelCall": True, "manifestDigest": "sha256:" + "a" * 64})
+            )
+            (root / "autorelease-plan.json").write_text("{not json")
+            status, output = run_control(
+                "email-digest",
+                "--workflow",
+                "watcher",
+                "--conclusion",
+                "success",
+                "--run-url",
+                "https://github.com/bigpixelrocket/php-bin/actions/runs/1",
+                "--repository",
+                "bigpixelrocket/php-bin",
+                "--decision",
+                str(root / "watch-decision.json"),
+                "--plan",
+                str(root / "autorelease-plan.json"),
+            )
+            self.assertEqual(0, status)
+            self.assertEqual("unexpected_state", json.loads(output)["template"])
 
     def test_notification_replay_is_deduplicated(self):
         event = {"actionKey": "new_patch:8.5.9", "state": "released"}

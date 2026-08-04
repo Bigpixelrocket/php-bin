@@ -55,6 +55,11 @@ Required repository state:
   be moved, replaced, or deleted.
 - Set `AUTORELEASE_OWNER=loadinglucian`.
 - Keep distinct repository-scoped `OPENAI_API_KEY` secrets.
+- For the email digest, keep the repository-scoped `RESEND_API_KEY` secret
+  (a Resend sending-only key) plus the `AUTORELEASE_EMAIL_FROM` and
+  `AUTORELEASE_EMAIL_TO` repository variables. The sender address must belong
+  to a domain verified in Resend. While any of the three is unset, the digest
+  workflow skips without failing.
 - Keep the `autorelease` and `attention-required` labels.
 
 CODEOWNERS covers prompts, contracts, workflows, policy invariants, authority
