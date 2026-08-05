@@ -14,7 +14,7 @@
     "url": "https://api.github.com/repos/Bigpixelrocket/php-bin/subscription"
   },
   "branchProtection": null,
-  "capturedAt": "2026-08-04T12:48:50Z",
+  "capturedAt": "2026-08-05T08:15:54Z",
   "environments": {
     "environments": [
       {
@@ -208,14 +208,14 @@
     ],
     "verified_allowed": false
   },
-  "snapshotDigest": "sha256:7cc0280415bc135c1d262e01a429c18c6116dc770d8c8bfcf94d83187ccfc53a",
+  "snapshotDigest": "sha256:3486213a008395f750d5d8c4bc33380704ac687fcf41dfd7adf84d104a2ca770",
   "variables": [
     "AUTORELEASE_EMAIL_FROM",
     "AUTORELEASE_EMAIL_TO",
     "AUTORELEASE_OWNER"
   ],
   "workflowPermissions": {
-    "can_approve_pull_request_reviews": false,
+    "can_approve_pull_request_reviews": true,
     "default_workflow_permissions": "read"
   }
 }

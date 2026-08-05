@@ -120,7 +120,12 @@ try:
         "PUT",
         input_value={
             "default_workflow_permissions": "read",
-            "can_approve_pull_request_reviews": False,
+            # Despite its name, this flag governs the single "create and
+            # approve pull requests" permission. The watcher and consumer
+            # open deterministic PRs with GITHUB_TOKEN daily, so it must stay
+            # enabled; approvals remain owner-only through the ruleset and
+            # protected controls.
+            "can_approve_pull_request_reviews": True,
         },
     )
     gh("api", f"repos/{args.repo}/immutable-releases", "--method", "PUT")
