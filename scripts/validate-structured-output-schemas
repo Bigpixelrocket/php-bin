@@ -12,7 +12,22 @@ from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 OUTPUT_SCHEMA_RE = re.compile(r'--output-schema","([^"]+\.json)"')
-UNSUPPORTED_KEYWORDS = {"uniqueItems"}
+# OpenAI Structured Outputs rejects schema-level conditionals and most composition,
+# so a cross-field rule (for example "a no_change plan must not require edits") can
+# never live in these schemas; it belongs to deterministic admission and the phase
+# prompts. Naming the keywords here fails such a schema at review time instead of
+# failing every model call at runtime.
+UNSUPPORTED_KEYWORDS = {
+    "uniqueItems",
+    "allOf",
+    "oneOf",
+    "not",
+    "if",
+    "then",
+    "else",
+    "dependentRequired",
+    "dependentSchemas",
+}
 
 sys.path.insert(0, str(ROOT))
 from autorelease.control import (  # noqa: E402
