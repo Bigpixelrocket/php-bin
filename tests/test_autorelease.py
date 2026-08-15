@@ -179,13 +179,18 @@ class AutoreleaseControlTests(unittest.TestCase):
             self.assertEqual(sha256_bytes(stored), capture["digest"])
             self.assertNotIn(b"download_count", stored)
             self.assertEqual(body, (output / "raw/php_bin_releases.body.raw").read_bytes())
+            response.read.return_value = stored
+            with mock.patch("autorelease._evidence.urllib.request.build_opener", return_value=opener):
+                capture_evidence(output, [source])
+            self.assertFalse((output / "raw/php_bin_releases.body.raw").exists())
 
-    def test_no_change_plan_cannot_authorize_edits(self):
+    def test_no_change_plan_cannot_authorize_edits_paths_or_releases(self):
         plan = {
             "schemaVersion": 1,
             "action": "no_change",
             "actionKey": "no_change:" + "c" * 16,
             "editsRequired": True,
+            "allowedPaths": {"php-bin": ["autorelease-state/last-evidence.json"], "mise-php": []},
             "releaseIntent": None,
         }
         with tempfile.TemporaryDirectory() as tmp:
@@ -194,6 +199,13 @@ class AutoreleaseControlTests(unittest.TestCase):
             with self.assertRaisesRegex(ControlError, "no-change plan cannot require edits"):
                 _validate_plan_shape(plan, manifest_path, set())
             plan["editsRequired"] = False
+            with self.assertRaisesRegex(ControlError, "no-change plan cannot allow paths"):
+                _validate_plan_shape(plan, manifest_path, set())
+            plan["allowedPaths"] = {"php-bin": [], "mise-php": []}
+            plan["releaseIntent"] = {"version": "8.5.9", "sourceIdentifier": "php_release_feed"}
+            with self.assertRaisesRegex(ControlError, "no-change plan cannot request a release"):
+                _validate_plan_shape(plan, manifest_path, set())
+            plan["releaseIntent"] = None
             self.assertEqual("no_change:" + "c" * 16, _validate_plan_shape(plan, manifest_path, set()))
 
     @staticmethod

@@ -247,11 +247,16 @@ def capture_evidence(
                     destination = output_dir / body_path
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     destination.write_bytes(stored)
+                    raw_path = destination.parent / f"{source.capture_id}.body.raw"
                     if stored != body:
                         # The projection is what admission and recapture verify, so
                         # the digest covers the stored body; the unprojected bytes
                         # stay retrievable for audit but carry no identity.
-                        (destination.parent / f"{source.capture_id}.body.raw").write_bytes(body)
+                        raw_path.write_bytes(body)
+                    else:
+                        # A reused output directory must not retain a raw artifact
+                        # from an earlier capture the manifest no longer describes.
+                        raw_path.unlink(missing_ok=True)
                     captures.append(
                         {
                             "captureId": source.capture_id,
@@ -281,6 +286,7 @@ def capture_evidence(
             destination = output_dir / body_path
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(b"")
+            (destination.parent / f"{source.capture_id}.body.raw").unlink(missing_ok=True)
             captures.append(
                 {
                     "captureId": source.capture_id,
