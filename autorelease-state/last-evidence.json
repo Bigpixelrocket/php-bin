@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "manifestDigest": "sha256:1ae0f9cb7744af44d064cc22956a1099294c7db72eada1640a0ffc57585ee520",
-  "planDigest": "sha256:277e937ff5cb5904363b303ddd672feff81398ed110b8833c979d8f928ed1124",
+  "manifestDigest": "sha256:3144096ed25eb2f89f6666b28fbab98aef7ccbb169c4b2fef29262fea8202b19",
+  "planDigest": "sha256:845aa224c26dda60273fad1552f40f2fa839b1479ad424c4d463abb22c8238e2",
   "captures": [
     {
       "captureId": "php_supported_versions",
-      "digest": "sha256:c955d44a9f6e93f6ecc3576b2821e5912e3815dbbe7cac1550d96d42fcfaa3e8",
+      "digest": "sha256:8f9116d1901b20c4fa9b765fbb09da55e890a06e8c5db51ccb87a1e54f550ff7",
       "status": 200
     },
     {
@@ -20,17 +20,17 @@
     },
     {
       "captureId": "php_bin_releases",
-      "digest": "sha256:9098b91dc8056849eac5905725d4aa78e5176f3f896c8892bbdac106e7d68235",
+      "digest": "sha256:7b7a5da1fc3f11c229f12ddeae58a8f889bafd19b3924669f59d7176baac5406",
       "status": 200
     },
     {
       "captureId": "php_bin_state",
-      "digest": "sha256:9dd46fa131982a71b1dd45ef052282c729eb725072950ff3b560553cd4e36418",
+      "digest": "sha256:91776a12b204d974fec09ba2cd487e42d744123c598a4d696570cb0803aab0c3",
       "status": 200
     },
     {
       "captureId": "mise_php_releases",
-      "digest": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "digest": "sha256:37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
       "status": 200
     },
     {
