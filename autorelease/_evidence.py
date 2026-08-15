@@ -2,7 +2,11 @@
 
 Captured bodies are opaque bytes: this module fetches them, digests them, and
 proves a cited capture still resolves to the same bytes. It deliberately does
-not interpret a body, so no source-format parser belongs here.
+not interpret a body, so no source-format parser belongs here. A source may
+carry a reviewed identity projection supplied by the registry in `control`;
+this module applies it blindly before digesting and retains the unprojected
+bytes beside the digested body, so which fields count toward evidence identity
+stays a reviewed decision rather than a client detail.
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from ._validation import (
     ACTION_KEY_RE,
@@ -199,6 +203,10 @@ class EvidenceSource:
     capture_id: str
     url: str
     max_bytes: int
+    # A reviewed identity projection: the digested body is normalize(raw bytes),
+    # so volatile fields with no autorelease consequence stay out of evidence
+    # identity. None digests the raw bytes unchanged.
+    normalize: Callable[[bytes], bytes] | None = None
 
 
 def capture_evidence(
@@ -234,10 +242,16 @@ def capture_evidence(
                 with opener.open(request, timeout=30) as response:
                     body = response.read(source.max_bytes + 1)
                     require(len(body) <= source.max_bytes, f"capture too large: {source.capture_id}")
+                    stored = source.normalize(body) if source.normalize else body
                     body_path = pathlib.Path("raw") / f"{source.capture_id}.body"
                     destination = output_dir / body_path
                     destination.parent.mkdir(parents=True, exist_ok=True)
-                    destination.write_bytes(body)
+                    destination.write_bytes(stored)
+                    if stored != body:
+                        # The projection is what admission and recapture verify, so
+                        # the digest covers the stored body; the unprojected bytes
+                        # stay retrievable for audit but carry no identity.
+                        (destination.parent / f"{source.capture_id}.body.raw").write_bytes(body)
                     captures.append(
                         {
                             "captureId": source.capture_id,
@@ -247,7 +261,7 @@ def capture_evidence(
                             "contentType": response.headers.get("Content-Type"),
                             "etag": response.headers.get("ETag"),
                             "lastModified": response.headers.get("Last-Modified"),
-                            "digest": sha256_bytes(body),
+                            "digest": sha256_bytes(stored),
                             "bodyPath": body_path.as_posix(),
                         }
                     )

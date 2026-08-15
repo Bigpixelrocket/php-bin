@@ -13,9 +13,13 @@ from unittest import mock
 from autorelease.control import (
     ACTION_KEY_RE,
     COMPLETION_EVIDENCE_REF_RE,
+    EVIDENCE_SOURCES,
     ControlError,
+    EvidenceSource,
+    _validate_plan_shape,
     action_filename,
     canonical_json,
+    capture_evidence,
     email_digest,
     email_fallback,
     load_plan_evidence,
@@ -29,6 +33,7 @@ from autorelease.control import (
     seal_patch,
     sha256_bytes,
     sha256_file,
+    strip_release_download_counts,
     transition_event,
     validate_archive,
     validate_completion_assessment,
@@ -120,6 +125,76 @@ class AutoreleaseControlTests(unittest.TestCase):
             self_evidence_update=True,
         )
         self.assertEqual("evidence_changed", external_change["trigger"])
+
+    def test_release_download_counter_churn_does_not_change_capture_identity(self):
+        def releases(binary_count, checksum_count):
+            return json.dumps(
+                [
+                    {
+                        "tag_name": "8.5.9",
+                        "immutable": True,
+                        "assets": [
+                            {"name": "php-8.5.9-cli-macos-aarch64.tar.gz", "download_count": binary_count},
+                            {"name": "SHA256SUMS", "download_count": checksum_count},
+                        ],
+                    }
+                ]
+            ).encode()
+
+        self.assertEqual(
+            strip_release_download_counts(releases(20, 9)),
+            strip_release_download_counts(releases(21, 10)),
+        )
+        self.assertNotEqual(
+            strip_release_download_counts(releases(20, 9)),
+            strip_release_download_counts(releases(20, 9).replace(b"8.5.9", b"8.5.10")),
+        )
+        for body in (b"<html>service unavailable</html>", b'{"message": "API rate limit exceeded"}'):
+            self.assertEqual(body, strip_release_download_counts(body))
+
+    def test_github_release_sources_carry_the_download_counter_projection(self):
+        projected = {source.capture_id for source in EVIDENCE_SOURCES if source.normalize is not None}
+        self.assertEqual({"php_bin_releases", "mise_php_releases"}, projected)
+
+    def test_capture_digests_the_projected_body_and_retains_unprojected_bytes(self):
+        body = json.dumps(
+            [{"tag_name": "8.5.9", "assets": [{"name": "a.tar.gz", "download_count": 20}]}]
+        ).encode()
+        response = mock.Mock(status=200, headers={})
+        response.read.return_value = body
+        opener = mock.MagicMock()
+        opener.open.return_value.__enter__.return_value = response
+        source = EvidenceSource(
+            "php_bin_releases",
+            "https://api.github.com/repos/bigpixelrocket/php-bin/releases?per_page=100",
+            1_000_000,
+            normalize=strip_release_download_counts,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            output = pathlib.Path(tmp)
+            with mock.patch("autorelease._evidence.urllib.request.build_opener", return_value=opener):
+                manifest = capture_evidence(output, [source])
+            capture = manifest["captures"][0]
+            stored = (output / capture["bodyPath"]).read_bytes()
+            self.assertEqual(sha256_bytes(stored), capture["digest"])
+            self.assertNotIn(b"download_count", stored)
+            self.assertEqual(body, (output / "raw/php_bin_releases.body.raw").read_bytes())
+
+    def test_no_change_plan_cannot_authorize_edits(self):
+        plan = {
+            "schemaVersion": 1,
+            "action": "no_change",
+            "actionKey": "no_change:" + "c" * 16,
+            "editsRequired": True,
+            "releaseIntent": None,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = pathlib.Path(tmp) / "evidence-manifest.json"
+            manifest_path.write_bytes(canonical_json({"manifestDigest": "sha256:" + "c" * 64}))
+            with self.assertRaisesRegex(ControlError, "no-change plan cannot require edits"):
+                _validate_plan_shape(plan, manifest_path, set())
+            plan["editsRequired"] = False
+            self.assertEqual("no_change:" + "c" * 16, _validate_plan_shape(plan, manifest_path, set()))
 
     @staticmethod
     def _releases_manifest(status=200):

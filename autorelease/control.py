@@ -38,6 +38,7 @@ if __package__ in {None, ""}:
 from autorelease._admission import (  # noqa: E402
     PROHIBITED_AGENT_AUTHORITY,
     REQUIRED_PLAN_CHECKS,
+    _validate_plan_shape,
     _validate_support_policy_document,
     changed_paths,
     git,
@@ -113,17 +114,50 @@ from autorelease._validation import (  # noqa: E402
 )
 
 
+def strip_release_download_counts(body: bytes) -> bytes:
+    """Project a GitHub releases capture to its release identity.
+
+    Per-asset download counters move whenever anyone fetches a published
+    artifact, so a digest that covers them wakes the watcher — and can break a
+    mid-transaction recapture — with no release consequence. The projection
+    drops only `assets[].download_count`; every other field stays covered by
+    the digest, and the capture client retains the unprojected bytes beside
+    the digested body. A body that is not a GitHub releases array is returned
+    unchanged so an unexpected source format still registers as changed
+    evidence. This projects identity only: classifying lifecycle state from a
+    body remains forbidden (verify.py check A11).
+    """
+    try:
+        releases = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return body
+    if not isinstance(releases, list):
+        return body
+    for release in releases:
+        if not isinstance(release, dict):
+            continue
+        assets = release.get("assets")
+        if not isinstance(assets, list):
+            continue
+        for asset in assets:
+            if isinstance(asset, dict):
+                asset.pop("download_count", None)
+    return canonical_json(releases)
+
+
 # Which sources are authoritative is a reviewed decision rather than a client detail, so
 # the registry stays in this surface and is handed to the capture client. autorelease/
 # verify.py check A11 reads this file to prove the raw sources are still fetched as
-# opaque bytes and never parsed into lifecycle state.
+# opaque bytes and never classified into lifecycle state. The GitHub releases sources
+# carry the one reviewed identity projection: their digests must not cover per-asset
+# download counters, which change without any release consequence.
 EVIDENCE_SOURCES = (
     EvidenceSource("php_supported_versions", "https://www.php.net/supported-versions.php", 2_000_000),
     EvidenceSource("php_release_feed", "https://www.php.net/releases/index.php?json", 5_000_000),
     EvidenceSource("php_source_tags", "https://api.github.com/repos/php/php-src/tags?per_page=100", 5_000_000),
-    EvidenceSource("php_bin_releases", "https://api.github.com/repos/bigpixelrocket/php-bin/releases?per_page=100", 10_000_000),
+    EvidenceSource("php_bin_releases", "https://api.github.com/repos/bigpixelrocket/php-bin/releases?per_page=100", 10_000_000, normalize=strip_release_download_counts),
     EvidenceSource("php_bin_state", "https://api.github.com/repos/bigpixelrocket/php-bin/commits/main", 2_000_000),
-    EvidenceSource("mise_php_releases", "https://api.github.com/repos/bigpixelrocket/mise-php/releases?per_page=100", 10_000_000),
+    EvidenceSource("mise_php_releases", "https://api.github.com/repos/bigpixelrocket/mise-php/releases?per_page=100", 10_000_000, normalize=strip_release_download_counts),
     EvidenceSource("mise_php_state", "https://api.github.com/repos/bigpixelrocket/mise-php/commits/main", 2_000_000),
 )
 
