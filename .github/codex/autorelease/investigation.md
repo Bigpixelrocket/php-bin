@@ -16,7 +16,10 @@ manifest or the two deterministic runtime inputs `evidence_manifest` and
 `watch_decision`. Those runtime IDs resolve only to
 `autorelease-run/evidence/evidence-manifest.json` and
 `autorelease-run/watch-decision.json`; no other runtime or repository file is
-admissible as plan evidence.
+admissible as plan evidence. Every plan evidence `digest` is the SHA-256 of
+the cited file's bytes: for `evidence_manifest`, hash the manifest file
+itself rather than copying its embedded `manifestDigest` field, which covers
+only the capture identities and never matches the file's own hash.
 
 The required runtime inputs are generated before this phase and are available
 at these exact paths:

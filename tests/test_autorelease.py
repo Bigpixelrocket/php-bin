@@ -34,6 +34,7 @@ from autorelease.control import (
     sha256_bytes,
     sha256_file,
     strip_release_download_counts,
+    strip_supported_versions_date_presentation,
     transition_event,
     validate_archive,
     validate_completion_assessment,
@@ -54,6 +55,29 @@ def run_control(*argv: str) -> tuple[int, str]:
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
         status = control_main(list(argv))
     return status, out.getvalue().strip()
+
+
+def supported_versions_page(today_x: str, today_label: str, ages: tuple[str, ...]) -> bytes:
+    """Render the volatile shape of php.net/supported-versions.php for a capture date."""
+    rows = "".join(
+        f'\t\t\t\t\t<td>31 Dec 2025</td>\n'
+        f'\t\t\t\t\t<td class="collapse-phone"><em>{age}</em></td>\n'
+        for age in ages
+    )
+    return (
+        "<table>\n"
+        "\t\t\t\t\t<td>PHP 8.4</td>\n"
+        f"{rows}"
+        "</table>\n"
+        "<svg>\n"
+        "\t<!-- Today -->\n"
+        '\t<g class="today">\n'
+        f'\t\t\t\t<line x1="{today_x}" y1="24" x2="{today_x}" y2="204" />\n'
+        f'\t\t<text x="{today_x}" y="223.2">\n'
+        f"\t\t\tToday: {today_label}\t\t</text>\n"
+        "\t</g>\n"
+        "</svg>\n"
+    ).encode()
 
 
 class AutoreleaseControlTests(unittest.TestCase):
@@ -152,9 +176,58 @@ class AutoreleaseControlTests(unittest.TestCase):
         for body in (b"<html>service unavailable</html>", b'{"message": "API rate limit exceeded"}'):
             self.assertEqual(body, strip_release_download_counts(body))
 
-    def test_github_release_sources_carry_the_download_counter_projection(self):
+    def test_only_reviewed_sources_carry_identity_projections(self):
         projected = {source.capture_id for source in EVIDENCE_SOURCES if source.normalize is not None}
-        self.assertEqual({"php_bin_releases", "mise_php_releases"}, projected)
+        self.assertEqual(
+            {"php_bin_releases", "mise_php_releases", "php_supported_versions"}, projected
+        )
+
+    def test_supported_versions_date_churn_does_not_change_capture_identity(self):
+        adjacent = (
+            supported_versions_page("514.34454057606", "15 Aug 2026", ("7 months ago",)),
+            supported_versions_page("515.33019384514", "18 Aug 2026", ("7 months, 3 days ago",)),
+        )
+        self.assertEqual(
+            strip_supported_versions_date_presentation(adjacent[0]),
+            strip_supported_versions_date_presentation(adjacent[1]),
+        )
+        self.assertNotEqual(
+            strip_supported_versions_date_presentation(adjacent[0]),
+            strip_supported_versions_date_presentation(
+                adjacent[0].replace(b"31 Dec 2025", b"31 Dec 2026")
+            ),
+        )
+        self.assertNotEqual(
+            strip_supported_versions_date_presentation(adjacent[0]),
+            strip_supported_versions_date_presentation(
+                adjacent[0].replace(b"PHP 8.4", b"PHP 8.5")
+            ),
+        )
+        for body in (b"<html>service unavailable</html>", b'{"message": "API rate limit exceeded"}'):
+            self.assertEqual(body, strip_supported_versions_date_presentation(body))
+
+    def test_adjacent_date_captures_keep_the_watcher_quiet(self):
+        def capture(body):
+            response = mock.Mock(status=200, headers={})
+            response.read.return_value = body
+            opener = mock.MagicMock()
+            opener.open.return_value.__enter__.return_value = response
+            source = EvidenceSource(
+                "php_supported_versions",
+                "https://www.php.net/supported-versions.php",
+                1_000_000,
+                normalize=strip_supported_versions_date_presentation,
+            )
+            with tempfile.TemporaryDirectory() as tmp:
+                with mock.patch("autorelease._evidence.urllib.request.build_opener", return_value=opener):
+                    return capture_evidence(pathlib.Path(tmp), [source])
+
+        yesterday = capture(supported_versions_page("514.34454057606", "15 Aug 2026", ("7 months ago",)))
+        today = capture(supported_versions_page("515.33019384514", "18 Aug 2026", ("7 months, 3 days ago",)))
+        self.assertEqual(yesterday["manifestDigest"], today["manifestDigest"])
+        decision = watch_decision(today, yesterday, [], {"healthy": True})
+        self.assertEqual("quiet", decision["trigger"])
+        self.assertFalse(decision["modelCall"])
 
     def test_capture_digests_the_projected_body_and_retains_unprojected_bytes(self):
         body = json.dumps(
