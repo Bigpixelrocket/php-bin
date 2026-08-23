@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -145,14 +146,35 @@ def strip_release_download_counts(body: bytes) -> bytes:
     return canonical_json(releases)
 
 
+def strip_supported_versions_date_presentation(body: bytes) -> bytes:
+    """Project the supported-versions page to its lifecycle identity.
+
+    The page renders the capture date into every response: an SVG "today"
+    marker whose coordinates and label move daily, and relative-age table
+    cells that restate the adjacent absolute dates as time since or until
+    now. A digest covering them wakes the watcher every day with no
+    lifecycle consequence, forcing a model call and an evidence-state PR on
+    otherwise quiet days. The projection empties only those two renderings;
+    branch rows and their absolute support dates stay covered, and the
+    capture client retains the unprojected bytes beside the digested body.
+    A body without the markers is returned unchanged so an unexpected page
+    format still registers as changed evidence. This projects identity
+    only: classifying lifecycle state from a body remains forbidden
+    (verify.py check A11).
+    """
+    body = re.sub(rb'<g class="today">.*?</g>', b'<g class="today"></g>', body, flags=re.DOTALL)
+    return re.sub(rb'(<td class="collapse-phone">)<em>[^<]*</em>(</td>)', rb"\1\2", body)
+
+
 # Which sources are authoritative is a reviewed decision rather than a client detail, so
 # the registry stays in this surface and is handed to the capture client. autorelease/
 # verify.py check A11 reads this file to prove the raw sources are still fetched as
-# opaque bytes and never classified into lifecycle state. The GitHub releases sources
-# carry the one reviewed identity projection: their digests must not cover per-asset
-# download counters, which change without any release consequence.
+# opaque bytes and never classified into lifecycle state. Two reviewed identity
+# projections exist: the GitHub releases digests must not cover per-asset download
+# counters, and the supported-versions digest must not cover the page's renderings of
+# the capture date. Both change without any release consequence.
 EVIDENCE_SOURCES = (
-    EvidenceSource("php_supported_versions", "https://www.php.net/supported-versions.php", 2_000_000),
+    EvidenceSource("php_supported_versions", "https://www.php.net/supported-versions.php", 2_000_000, normalize=strip_supported_versions_date_presentation),
     EvidenceSource("php_release_feed", "https://www.php.net/releases/index.php?json", 5_000_000),
     EvidenceSource("php_source_tags", "https://api.github.com/repos/php/php-src/tags?per_page=100", 5_000_000),
     EvidenceSource("php_bin_releases", "https://api.github.com/repos/bigpixelrocket/php-bin/releases?per_page=100", 10_000_000, normalize=strip_release_download_counts),
