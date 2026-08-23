@@ -281,6 +281,11 @@ def _validate_plan_shape(
             "no-change action key is not bound to the evidence manifest",
         )
         require(plan.get("editsRequired") is False, "no-change plan cannot require edits")
+        allowed_paths = plan.get("allowedPaths")
+        require(
+            isinstance(allowed_paths, dict) and not any(allowed_paths.values()),
+            "no-change plan cannot allow paths",
+        )
         require(not plan.get("releaseIntent"), "no-change plan cannot request a release")
     elif plan.get("action") not in {"blocked", "needs_human"}:
         require(plan.get("editsRequired") in {True, False}, "plan must declare whether edits are required")

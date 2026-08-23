@@ -7,9 +7,12 @@ verified macOS 26 arm64 CLI binaries without a human in the loop.
 `PHP autorelease watcher` runs daily and can also be dispatched manually. It
 captures the raw PHP lifecycle page, release feed, php-src tags, and public
 state of both repositories, including response metadata and SHA-256 digests.
-The watcher compares only opaque digests and incomplete-event state. An
-unchanged healthy day is quiet: it makes no model call and causes no issue,
-repository, tag, asset, or release mutation.
+The GitHub releases captures digest a projected body with per-asset download
+counters removed, so public downloads never register as changed evidence; the
+unprojected bytes are retained beside the digested body. The watcher compares
+only opaque digests and incomplete-event state. An unchanged healthy day is
+quiet: it makes no model call and causes no issue, repository, tag, asset, or
+release mutation.
 
 When evidence changes, the pinned official Codex Action investigates from a
 read-only checkout. Web search is limited to `php.net`, `github.com`, and

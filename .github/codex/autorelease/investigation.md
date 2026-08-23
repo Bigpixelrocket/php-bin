@@ -47,6 +47,13 @@ If changed evidence has no autorelease consequence, use action `no_change` and
 the key `no_change:<first 16 hexadecimal characters of the evidence manifest
 digest>` so the reviewed snapshot remains uniquely auditable.
 
+A `no_change` plan authorizes no work: set `editsRequired` to false, leave
+both `allowedPaths` arrays empty, set `releaseIntent` to null, and list no
+repository edit in `agentOperations`. Recording the reviewed snapshot in
+`autorelease-state/last-evidence.json` is deterministic downstream work that
+needs no plan authority; deterministic admission rejects any no-change plan
+that requests edit authority.
+
 A php-src tag can appear before an official stable release is published. A tag
 alone is never sufficient evidence for `new_patch` or `new_branch`. For either
 action, include a `php_release_feed` JSON-pointer evidence item whose resolved
