@@ -1829,7 +1829,8 @@ class AutoreleaseControlTests(unittest.TestCase):
         release = jobs["release"]
         self.assertEqual({"preflight", "build"}, set(release["needs"]))
         self.assertEqual("php-autorelease-publish", release["environment"])
-        self.assertNotIn("if", release)
+        # A failed build must not stop the reconciliation of an existing release.
+        self.assertEqual("${{ !cancelled() && needs.preflight.result == 'success' }}", release["if"])
         names = [step.get("name") for step in release["steps"]]
         download = release["steps"][names.index("Download the isolated build")]
         self.assertEqual(
@@ -1856,7 +1857,10 @@ class AutoreleaseControlTests(unittest.TestCase):
             names.index("Verify the staged bytes the build reported"),
             names.index("Initialize release transaction and event"),
         )
-        self.assertIn("needs.build.result == 'failure'", jobs["notify-failure"]["if"])
+        self.assertEqual(
+            "always() && needs.preflight.result == 'success' && needs.release.result == 'failure'",
+            jobs["notify-failure"]["if"],
+        )
 
         # The release job still runs the built binary to verify installs, so
         # those steps and mise itself may hold no token, and mise may not

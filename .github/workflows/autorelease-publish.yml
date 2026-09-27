@@ -131,10 +131,12 @@ jobs:
 
   # Only this job may see draft releases, so it alone decides whether an
   # existing release is reconciled; that path reuses the release's own assets
-  # and discards the build. A failed build stops both paths before any effect,
-  # and the watcher still recovers the record of an already published release.
+  # and never needs the build. The job therefore runs even when the build
+  # failed, so a draft left by an earlier run can still be completed, and a
+  # fresh release stops at "Require the isolated build" before any effect.
   release:
     needs: [preflight, build]
+    if: ${{ !cancelled() && needs.preflight.result == 'success' }}
     runs-on: macos-26
     timeout-minutes: 150
     environment: php-autorelease-publish
@@ -526,14 +528,13 @@ jobs:
 
   notify-failure:
     name: Notify actionable release failure
-    needs: [preflight, build, release]
+    needs: [preflight, release]
     # A skipped release already keeps this job quiet when preflight rejects the
     # dispatch, but the preflight result is asserted anyway so the gate survives
-    # a later change to the release job's own condition. A failed build skips the
-    # release job, so it counts as a release failure with nothing published.
-    if: >-
-      always() && needs.preflight.result == 'success'
-      && (needs.build.result == 'failure' || needs.release.result == 'failure')
+    # a later change to the release job's own condition. A failed build reaches
+    # this job through the release job, which fails before any effect unless it
+    # completes an existing release.
+    if: always() && needs.preflight.result == 'success' && needs.release.result == 'failure'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
