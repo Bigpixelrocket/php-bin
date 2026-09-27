@@ -1832,6 +1832,12 @@ class AutoreleaseControlTests(unittest.TestCase):
         # A failed build must not stop the reconciliation of an existing release.
         self.assertEqual("${{ !cancelled() && needs.preflight.result == 'success' }}", release["if"])
         names = [step.get("name") for step in release["steps"]]
+        # The release job runs after a failed build, so this gate alone keeps a
+        # fresh release from using an artifact the build did not finish.
+        require = release["steps"][names.index("Require the isolated build")]
+        self.assertEqual("steps.existing.outputs.reuse != 'true'", require["if"])
+        self.assertEqual("${{ needs.build.result }}", require["env"]["BUILD_RESULT"])
+        self.assertTrue(require["run"].startswith('test "$BUILD_RESULT" = success\n'))
         download = release["steps"][names.index("Download the isolated build")]
         self.assertEqual(
             {
