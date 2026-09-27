@@ -52,14 +52,17 @@ from autorelease._admission import (  # noqa: E402
     verify_merge,
 )
 from autorelease._evidence import (  # noqa: E402
+    BRANCH_FEED_CAPTURE_RE,
     EVIDENCE_CAPTURE_IDS,
     RUNTIME_PLAN_EVIDENCE_IDS,
     EvidenceSource,
     RestrictedRedirect,
+    branch_feed_capture_id,
     capture_evidence,
     load_capture,
     load_plan_evidence,
     manifest_digest,
+    validate_capture_id_set,
     validate_evidence_attestation_predicate,
     validate_evidence_state_record,
     validate_recaptured_evidence,
@@ -172,7 +175,8 @@ def strip_supported_versions_date_presentation(body: bytes) -> bytes:
 # opaque bytes and never classified into lifecycle state. Two reviewed identity
 # projections exist: the GitHub releases digests must not cover per-asset download
 # counters, and the supported-versions digest must not cover the page's renderings of
-# the capture date. Both change without any release consequence.
+# the capture date. Both change without any release consequence. These are the fixed
+# sources; `evidence_sources` adds the per-branch release feeds the policy selects.
 EVIDENCE_SOURCES = (
     EvidenceSource("php_supported_versions", "https://www.php.net/supported-versions.php", 2_000_000, normalize=strip_supported_versions_date_presentation),
     EvidenceSource("php_release_feed", "https://www.php.net/releases/index.php?json", 5_000_000),
@@ -182,6 +186,29 @@ EVIDENCE_SOURCES = (
     EvidenceSource("mise_php_releases", "https://api.github.com/repos/bigpixelrocket/mise-php/releases?per_page=100", 10_000_000, normalize=strip_release_download_counts),
     EvidenceSource("mise_php_state", "https://api.github.com/repos/bigpixelrocket/mise-php/commits/main", 2_000_000),
 )
+
+
+def evidence_sources(maintained_branches: list[str]) -> tuple[EvidenceSource, ...]:
+    """Return the fixed sources plus one release feed per maintained branch.
+
+    The aggregate feed keeps only the newest release of each major, so a patch on an
+    older branch would otherwise never have official evidence. The branch list comes
+    from the accepted support policy, so adding or retiring a branch changes what is
+    captured without a code change. Branch feeds follow the aggregate feed in policy
+    order, which keeps the manifest, and therefore its digest, deterministic.
+    """
+    branch_feeds = tuple(
+        EvidenceSource(
+            branch_feed_capture_id(branch),
+            f"https://www.php.net/releases/index.php?json&version={branch}",
+            5_000_000,
+        )
+        for branch in maintained_branches
+    )
+    position = next(
+        index for index, source in enumerate(EVIDENCE_SOURCES) if source.capture_id == "php_release_feed"
+    )
+    return EVIDENCE_SOURCES[: position + 1] + branch_feeds + EVIDENCE_SOURCES[position + 1 :]
 
 
 def cli_flag(value: str, name: str) -> bool:
@@ -264,7 +291,9 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 json.dumps(
                     capture_evidence(
-                        args.output, EVIDENCE_SOURCES, token=os.environ.get("GITHUB_TOKEN")
+                        args.output,
+                        evidence_sources(validate_support_policy(ROOT)["maintainedBranches"]),
+                        token=os.environ.get("GITHUB_TOKEN"),
                     )
                 )
             )
