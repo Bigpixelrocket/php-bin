@@ -1,4 +1,5 @@
 import contextlib
+import http.client
 import io
 import json
 import pathlib
@@ -13,6 +14,8 @@ from unittest import mock
 from autorelease.control import (
     ACTION_KEY_RE,
     COMPLETION_EVIDENCE_REF_RE,
+    EDGE_CACHE_BYPASS_PARAMETER,
+    EVIDENCE_CAPTURE_IDS,
     EVIDENCE_SOURCES,
     RECIPE_INPUT_PATHS,
     ROOT,
@@ -32,8 +35,10 @@ from autorelease.control import (
     email_digest,
     email_fallback,
     evidence_sources,
+    fetch_url,
     load_plan_evidence,
     main as control_main,
+    manifest_digest,
     mutation_allowed,
     route_watch_action,
     notification_decision,
@@ -52,6 +57,7 @@ from autorelease.control import (
     validate_evidence_attestation_predicate,
     validate_evidence_state_record,
     validate_recaptured_evidence,
+    validate_release_is_newest_patch,
     validate_stable_release_evidence,
     verify_merge,
     watch_decision,
@@ -65,6 +71,18 @@ def run_control(*argv: str) -> tuple[int, str]:
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
         status = control_main(list(argv))
     return status, out.getvalue().strip()
+
+
+def evidence_manifest(digests: dict[str, str]) -> dict:
+    """Build a healthy evidence manifest whose identity covers the given capture digests."""
+    captures = [
+        {"captureId": capture_id, "status": 200, "digest": digest} for capture_id, digest in digests.items()
+    ]
+    return {
+        "schemaVersion": 1,
+        "captures": captures,
+        "manifestDigest": sha256_bytes(canonical_json(captures)),
+    }
 
 
 def supported_versions_page(today_x: str, today_label: str, ages: tuple[str, ...]) -> bytes:
@@ -247,6 +265,85 @@ class AutoreleaseControlTests(unittest.TestCase):
             self.assertEqual(0, run_control("capture-evidence", "--output", tmp)[0])
         captured = [source.capture_id for source in capture.call_args.args[1]]
         self.assertEqual([f"php_release_feed_{branch}" for branch in branches], captured[2 : 2 + len(branches)])
+
+    def test_every_php_net_source_bypasses_the_edge_cache(self):
+        # php.net's CDN served a feed weeks stale to one runner and fresh to another,
+        # so the watcher and the publish recapture disagreed about the same URL.
+        for source in evidence_sources(["8.2", "8.3", "8.4", "8.5"]):
+            php_net = source.url.startswith("https://www.php.net/")
+            self.assertEqual(php_net, source.bypass_edge_cache, source.capture_id)
+            fetched = [fetch_url(source) for _ in range(2)]
+            if not php_net:
+                self.assertEqual([source.url, source.url], fetched)
+                continue
+            separator = "&" if "?" in source.url else "?"
+            for url in fetched:
+                self.assertRegex(
+                    url,
+                    "^" + re.escape(f"{source.url}{separator}{EDGE_CACHE_BYPASS_PARAMETER}=") + "[0-9a-f]{32}$",
+                )
+            # A fixed value would become one more cached key, so every fetch differs.
+            self.assertNotEqual(fetched[0], fetched[1])
+
+    def test_capture_bypasses_the_cache_per_attempt_and_records_the_canonical_url(self):
+        body = b'{"version": "8.3.35"}'
+        response = mock.Mock(status=200, headers={})
+        response.read.return_value = body
+        opener = mock.MagicMock()
+        opener.open.return_value.__enter__.return_value = response
+        opener.open.side_effect = [
+            OSError("edge reset"),
+            opener.open.return_value,
+            opener.open.return_value,
+        ]
+        canonical = "https://www.php.net/releases/index.php?json&version=8.3"
+        bypassing = EvidenceSource("php_release_feed_8.3", canonical, 1_000_000, bypass_edge_cache=True)
+        plain = EvidenceSource("php_release_feed_8.3", canonical, 1_000_000)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "autorelease._evidence.urllib.request.build_opener", return_value=opener
+        ), mock.patch("autorelease._evidence.time.sleep"):
+            bypassed = capture_evidence(pathlib.Path(tmp) / "a", [bypassing])
+            direct = capture_evidence(pathlib.Path(tmp) / "b", [plain])
+        requested = [call.args[0].full_url for call in opener.open.call_args_list]
+        self.assertEqual(3, len(requested))
+        # The retry is a new cache key too, and only the fetch carries the parameter.
+        self.assertEqual(2, len(set(requested[:2])))
+        self.assertTrue(all(url.startswith(canonical + f"&{EDGE_CACHE_BYPASS_PARAMETER}=") for url in requested[:2]))
+        self.assertEqual(canonical, requested[2])
+        self.assertEqual(canonical, bypassed["captures"][0]["url"])
+        # Evidence identity covers the body alone, so the fetch address never moves it.
+        self.assertEqual(direct["manifestDigest"], bypassed["manifestDigest"])
+
+    def test_capture_fails_when_the_edge_serves_a_bypassing_fetch_from_cache(self):
+        # A unique key cannot be a genuine hit, so a HIT means the CDN now ignores the
+        # parameter; the capture must fail loudly rather than go stale silently.
+        def capture(source, cache_status):
+            headers = http.client.HTTPMessage()
+            if cache_status is not None:
+                headers["cdn-cache"] = cache_status
+            response = mock.Mock(status=200, headers=headers)
+            response.read.return_value = b'{"version": "8.3.35"}'
+            opener = mock.MagicMock()
+            opener.open.return_value.__enter__.return_value = response
+            with tempfile.TemporaryDirectory() as tmp, mock.patch(
+                "autorelease._evidence.urllib.request.build_opener", return_value=opener
+            ), mock.patch("autorelease._evidence.time.sleep"):
+                manifest = capture_evidence(pathlib.Path(tmp), [source])
+            return manifest["captures"][0], opener.open.call_count
+
+        canonical = "https://www.php.net/releases/index.php?json&version=8.3"
+        bypassing = EvidenceSource("php_release_feed_8.3", canonical, 1_000_000, bypass_edge_cache=True)
+        plain = EvidenceSource("php_release_feed_8.3", canonical, 1_000_000)
+        failed, attempts = capture(bypassing, "HIT")
+        self.assertEqual((0, "EdgeCacheHit", sha256_bytes(b"")), (failed["status"], failed["error"], failed["digest"]))
+        # A HIT on a fresh key is configuration, not a transient failure: no retry.
+        self.assertEqual(1, attempts)
+        for source, cache_status in ((bypassing, "MISS"), (bypassing, None), (plain, "HIT")):
+            healthy, _attempts = capture(source, cache_status)
+            self.assertEqual(200, healthy["status"], (source.bypass_edge_cache, cache_status))
+            self.assertNotIn("error", healthy)
+            # The cache result is kept for diagnosis but never enters evidence identity.
+            self.assertEqual(cache_status, healthy["edgeCache"])
 
     def test_supported_versions_date_churn_does_not_change_capture_identity(self):
         adjacent = (
@@ -876,6 +973,59 @@ class AutoreleaseControlTests(unittest.TestCase):
             [{"captureId": "php_release_feed", "value": "8.6.0"}],
         )
 
+    def test_superseded_intermediate_patch_is_rejected(self):
+        # A stale feed snapshot named 8.2.33 as newest and admission accepted it, so a
+        # capture showing any later patch on the branch must stop the plan.
+        def admit(version, feeds, action="new_patch", status=200):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = pathlib.Path(tmp)
+                (root / "raw").mkdir()
+                captures = []
+                for capture_id, body in feeds.items():
+                    (root / "raw" / f"{capture_id}.body").write_bytes(body)
+                    captures.append(
+                        {
+                            "captureId": capture_id,
+                            "status": status,
+                            "digest": sha256_bytes(body),
+                            "bodyPath": f"raw/{capture_id}.body",
+                        }
+                    )
+                manifest_path = root / "evidence-manifest.json"
+                manifest_path.write_bytes(canonical_json({"schemaVersion": 1, "captures": captures}))
+                validate_release_is_newest_patch(action, {"version": version}, manifest_path)
+
+        def feed(version):
+            return canonical_json({"version": version})
+
+        aggregate = canonical_json({"8": {"version": "8.5.11"}, "7": {"version": "7.4.33"}})
+        with self.assertRaisesRegex(ControlError, "8.2.33 is superseded by 8.2.34 in php_release_feed_8.2"):
+            admit("8.2.33", {"php_release_feed": aggregate, "php_release_feed_8.2": feed("8.2.34")})
+        admit("8.2.34", {"php_release_feed": aggregate, "php_release_feed_8.2": feed("8.2.34")})
+        # Patches compare as numbers, not strings.
+        admit("8.2.10", {"php_release_feed_8.2": feed("8.2.9")})
+        with self.assertRaisesRegex(ControlError, "superseded by 8.2.10"):
+            admit("8.2.9", {"php_release_feed_8.2": feed("8.2.10")})
+        # The aggregate feed supersedes too, even when the branch feed is stale.
+        with self.assertRaisesRegex(ControlError, "superseded by 8.5.11 in php_release_feed$"):
+            admit("8.5.10", {"php_release_feed": aggregate, "php_release_feed_8.5": feed("8.5.10")})
+        with self.assertRaisesRegex(ControlError, "8.6.0 is superseded by 8.6.1"):
+            admit("8.6.0", {"php_release_feed": canonical_json({"8": {"version": "8.6.1"}})}, "new_branch")
+        # Another branch's newer release, a php-src tag, or an unreadable or unhealthy
+        # feed is not evidence that this branch moved on.
+        admit("8.4.26", {"php_release_feed": aggregate, "php_release_feed_8.4": feed("8.4.26")})
+        admit(
+            "8.2.34",
+            {
+                "php_release_feed_8.2": feed("8.2.34"),
+                "php_release_feed_8.3": feed("8.2.99"),
+                "php_source_tags": canonical_json([{"name": "php-8.2.35"}]),
+            },
+        )
+        admit("8.2.33", {"php_release_feed_8.2": b"<html>busy</html>"})
+        admit("8.2.33", {"php_release_feed_8.2": feed("8.2.34")}, status=503)
+        admit("8.2.33", {"php_release_feed_8.2": feed("8.2.34")}, action="recipe_rebuild")
+
     def test_release_recapture_ignores_runtime_evidence_and_verifies_sources(self):
         capture_ids = sorted(
             {
@@ -957,6 +1107,167 @@ class AutoreleaseControlTests(unittest.TestCase):
         with self.assertRaisesRegex(ControlError, "unknown"):
             bad = with_captures([{**branch_feed, "captureId": "php_release_feed_latest"}])
             validate_recaptured_evidence(plan, bad, bad)
+
+    def test_stable_release_recapture_binds_only_the_feeds_that_prove_its_version(self):
+        # The model cited every branch feed, so a stale edge on 8.4 stopped an 8.2
+        # release. Only a change to what proves the released version may stop it.
+        ids = [
+            "php_supported_versions",
+            "php_release_feed",
+            "php_release_feed_8.2",
+            "php_release_feed_8.3",
+            "php_release_feed_8.4",
+            "php_release_feed_8.5",
+            "php_source_tags",
+            "php_bin_releases",
+            "php_bin_state",
+            "mise_php_releases",
+            "mise_php_state",
+        ]
+        digests = {capture_id: "sha256:" + f"{index:064x}" for index, capture_id in enumerate(ids, start=1)}
+        admitted = evidence_manifest(digests)
+
+        def changed(*capture_ids):
+            return evidence_manifest({**digests, **{item: "sha256:" + "f" * 64 for item in capture_ids}})
+
+        def plan(version, *cited, action="new_patch"):
+            return {
+                "action": action,
+                "releaseIntent": {"version": version},
+                "evidence": [{"captureId": item, "digest": digests[item]} for item in cited]
+                + [{"captureId": "watch_decision", "digest": "sha256:" + "a" * 64}],
+            }
+
+        everything = plan("8.2.34", *ids)
+        unrelated = changed(
+            "php_release_feed",
+            "php_release_feed_8.3",
+            "php_release_feed_8.4",
+            "php_bin_releases",
+            "php_bin_state",
+            "php_supported_versions",
+        )
+        self.assertEqual(
+            ["php_release_feed_8.2"],
+            validate_recaptured_evidence(plan("8.2.34", "php_release_feed_8.2"), admitted, unrelated)[
+                "verifiedCaptureIds"
+            ],
+        )
+        # Other branches' feeds, and the aggregate feed beside the cited branch feed,
+        # are released; every other cited capture, repository state included, binds.
+        other_branches = changed("php_release_feed", "php_release_feed_8.3", "php_release_feed_8.4", "php_release_feed_8.5")
+        self.assertEqual(
+            [
+                "mise_php_releases",
+                "mise_php_state",
+                "php_bin_releases",
+                "php_bin_state",
+                "php_release_feed_8.2",
+                "php_source_tags",
+                "php_supported_versions",
+            ],
+            validate_recaptured_evidence(everything, admitted, other_branches)["verifiedCaptureIds"],
+        )
+        for moved in ("php_bin_state", "mise_php_state", "php_bin_releases", "php_supported_versions", "php_source_tags"):
+            with self.assertRaisesRegex(ControlError, f"recaptured evidence changed: {moved}$"):
+                validate_recaptured_evidence(everything, admitted, changed(moved))
+        # A changed feed for the released version still stops publication, cited or not.
+        with self.assertRaisesRegex(ControlError, "recaptured evidence changed: php_release_feed_8.2"):
+            validate_recaptured_evidence(plan("8.2.34", "php_release_feed_8.2"), admitted, changed("php_release_feed_8.2"))
+        with self.assertRaisesRegex(ControlError, "recaptured evidence changed: php_release_feed_8.2"):
+            validate_recaptured_evidence(everything, admitted, changed("php_release_feed_8.2"))
+        # An aggregate-only proof binds the aggregate feed and the own branch feed.
+        aggregate_proof = plan("8.5.11", "php_release_feed")
+        self.assertEqual(
+            ["php_release_feed", "php_release_feed_8.5"],
+            validate_recaptured_evidence(aggregate_proof, admitted, changed("php_release_feed_8.4"))["verifiedCaptureIds"],
+        )
+        with self.assertRaisesRegex(ControlError, "recaptured evidence changed: php_release_feed$"):
+            validate_recaptured_evidence(aggregate_proof, admitted, changed("php_release_feed"))
+        with self.assertRaisesRegex(ControlError, "recaptured evidence changed: php_release_feed_8.5"):
+            validate_recaptured_evidence(aggregate_proof, admitted, changed("php_release_feed_8.5"))
+        # A first branch release has no branch feed yet, so the aggregate proof binds.
+        first_release = plan("8.6.0", "php_release_feed", "php_supported_versions", action="new_branch")
+        self.assertEqual(
+            ["php_release_feed", "php_supported_versions"],
+            validate_recaptured_evidence(first_release, admitted, changed("php_release_feed_8.5"))["verifiedCaptureIds"],
+        )
+        with self.assertRaisesRegex(ControlError, "recaptured evidence changed: php_release_feed$"):
+            validate_recaptured_evidence(first_release, admitted, changed("php_release_feed"))
+        with self.assertRaisesRegex(ControlError, "cites no release feed that proves its version"):
+            validate_recaptured_evidence(plan("8.6.0", "php_bin_releases", action="new_branch"), admitted, admitted)
+        # Every cited capture must still be the one admission saw.
+        tampered = plan("8.2.34", "php_release_feed_8.2", "php_release_feed_8.4")
+        tampered["evidence"][1]["digest"] = "sha256:" + "e" * 64
+        with self.assertRaisesRegex(ControlError, "admitted evidence digest mismatch: php_release_feed_8.4"):
+            validate_recaptured_evidence(tampered, admitted, admitted)
+        # Other releases keep binding everything they cite.
+        rebuild = plan("8.5.11-1", "php_bin_releases", "php_bin_state", action="recipe_rebuild")
+        with self.assertRaisesRegex(ControlError, "recaptured evidence changed: php_bin_state"):
+            validate_recaptured_evidence(rebuild, admitted, changed("php_bin_state"))
+
+    def test_publish_recapture_rechecks_supersession_in_exempt_feeds(self):
+        # The aggregate feed is exempt from the digest comparison beside a cited branch
+        # feed, but a later patch it names on the same branch must still stop publication.
+        def write_manifest(root, bodies):
+            (root / "raw").mkdir(parents=True)
+            captures = []
+            for capture_id in sorted(EVIDENCE_CAPTURE_IDS | set(bodies)):
+                body = bodies.get(capture_id, capture_id.encode())
+                (root / "raw" / f"{capture_id}.body").write_bytes(body)
+                captures.append(
+                    {
+                        "captureId": capture_id,
+                        "status": 200,
+                        "digest": sha256_bytes(body),
+                        "bodyPath": f"raw/{capture_id}.body",
+                    }
+                )
+            manifest = {"schemaVersion": 1, "captures": captures, "manifestDigest": manifest_digest(captures)}
+            (root / "evidence-manifest.json").write_bytes(canonical_json(manifest))
+            return root / "evidence-manifest.json", {item["captureId"]: item["digest"] for item in captures}
+
+        def aggregate(version):
+            return canonical_json({"8": {"version": version}})
+
+        branch = canonical_json({"version": "8.5.10"})
+        admitted_bodies = {
+            "php_release_feed": aggregate("8.5.10"),
+            "php_release_feed_8.4": canonical_json({"version": "8.4.26"}),
+            "php_release_feed_8.5": branch,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            admitted, digests = write_manifest(root / "admitted", admitted_bodies)
+            plan = {
+                "action": "new_patch",
+                "releaseIntent": {"version": "8.5.10"},
+                "evidence": [
+                    {"captureId": capture_id, "digest": digests[capture_id]}
+                    for capture_id in ("php_release_feed", "php_release_feed_8.5", "php_bin_state")
+                ],
+            }
+            (root / "plan.json").write_bytes(canonical_json(plan))
+
+            def recapture(label, bodies):
+                current, _digests = write_manifest(root / label, {**admitted_bodies, **bodies})
+                return run_control(
+                    "validate-recaptured-evidence",
+                    "--plan", str(root / "plan.json"),
+                    "--admitted-manifest", str(admitted),
+                    "--current-manifest", str(current),
+                )
+
+            status, out = recapture("other-branch", {"php_release_feed_8.4": canonical_json({"version": "8.4.27"})})
+            self.assertEqual(0, status)
+            self.assertEqual(["php_bin_state", "php_release_feed_8.5"], json.loads(out)["verifiedCaptureIds"])
+            # A newer major moves the aggregate without superseding this branch.
+            self.assertEqual(0, recapture("next-major", {"php_release_feed": canonical_json({"8": {"version": "8.5.10"}, "9": {"version": "9.0.0"}})})[0])
+            self.assertEqual(1, recapture("superseded", {"php_release_feed": aggregate("8.5.11")})[0])
+            with self.assertRaisesRegex(ControlError, "8.5.10 is superseded by 8.5.11 in php_release_feed$"):
+                validate_release_is_newest_patch(
+                    "new_patch", plan["releaseIntent"], root / "superseded" / "evidence-manifest.json"
+                )
 
     def test_runtime_plan_evidence_is_exact_and_allowlisted(self):
         with tempfile.TemporaryDirectory() as temporary:

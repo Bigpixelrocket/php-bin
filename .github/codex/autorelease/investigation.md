@@ -81,7 +81,19 @@ an older maintained branch appears only in its branch feed. Check every
 `php_release_feed_<major>.<minor>` capture: when the version it names has no
 matching `tag_name` in `php_bin_releases`, that branch needs
 `new_patch:<version>`. When several branches need one, propose the oldest
-branch first; later runs publish the rest.
+branch first; later runs publish the rest. Always propose the version the
+branch feed names, never an older patch on that branch: admission rejects a
+stable release when the branch feed or the aggregate feed names a later patch
+on the same branch.
+
+Reading every branch feed is how you classify, not what the plan cites. A
+`new_patch` or `new_branch` plan cites exactly one release feed item: the
+pointer that proves `releaseIntent.version`, in that version's own branch feed
+when it is captured and otherwise in the aggregate feed. Do not cite other
+branches' feeds, or the aggregate feed alongside the branch feed, as context.
+The publish job ignores other branches' feeds, and the aggregate feed once the
+branch feed is cited, so citing them adds no proof; it stops when the version's
+own branch feed or any other cited capture has changed.
 
 The plan `actionKey` identifies the classified autorelease action, not the
 phase-scoped action key in the event contract. It must use one of the reviewed

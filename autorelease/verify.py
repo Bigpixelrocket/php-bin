@@ -420,6 +420,17 @@ class Verifier:
         inputs2 = fixture_admission_inputs(altered_dir)
         (altered_dir / "raw/release.body").write_text("altered")
         assert_reject(lambda: admit_fixture(inputs2), "digest mismatch")
+        # Evidence that proves the version exists but also names a later patch on the
+        # same branch is stale: publishing it would ship an intermediate release.
+        superseded_dir = directory / "superseded"
+        superseded_dir.mkdir()
+        inputs3 = fixture_admission_inputs(superseded_dir)
+        body = canonical_json({"release": {"version": "8.5.9", "stable": True}, "8": {"version": "8.5.10"}})
+        (superseded_dir / "raw/release.body").write_bytes(body)
+        inputs3["manifest"]["captures"][0]["digest"] = sha256_bytes(body)
+        inputs3["manifestPath"].write_bytes(canonical_json(inputs3["manifest"]))
+        inputs3["plan"]["evidence"][0]["digest"] = sha256_bytes(body)
+        assert_reject(lambda: admit_fixture(inputs3), "superseded")
         fingerprint = sha256_bytes(b"bad-evidence-rejection")
         (directory / "fingerprint.txt").write_text(fingerprint + "\n")
         return ["fingerprint.txt"]
