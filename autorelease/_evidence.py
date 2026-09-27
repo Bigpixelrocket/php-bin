@@ -144,7 +144,9 @@ def validate_recaptured_evidence(
     publication. The own branch feed is bound whenever it was captured, cited or
     not, because admission reads it to prove no newer patch on the branch
     supersedes the version. Every other cited capture, repository state included,
-    stays bound for every action. Runtime-only evidence is never recaptured.
+    stays bound for every action. Runtime-only evidence is never recaptured. The
+    publish command also reruns the supersession check on the recaptured feeds, so
+    an exempt feed that names a later patch on the branch still stops the release.
     """
 
     def indexed_captures(manifest: dict[str, Any], label: str) -> dict[str, dict[str, Any]]:
@@ -335,8 +337,8 @@ def require_edge_cache_miss(source: EvidenceSource, headers: Any) -> None:
 
     The capture then fails like any unreachable source (status 0): the watcher
     raises `source_unhealthy` and the publish recapture refuses it, instead of
-    evidence silently going stale again. A response without the header is accepted: only a
-    positive hit proves the bypass failed.
+    evidence silently going stale again. A response without the header is
+    accepted: only a positive hit proves the bypass failed.
     """
     if not source.bypass_edge_cache:
         return
@@ -402,6 +404,9 @@ def capture_evidence(
                             "contentType": response.headers.get("Content-Type"),
                             "etag": response.headers.get("ETag"),
                             "lastModified": response.headers.get("Last-Modified"),
+                            # Diagnostic only, outside evidence identity: shows which
+                            # edge answered when a feed later looks stale.
+                            "edgeCache": response.headers.get(EDGE_CACHE_STATUS_HEADER),
                             "digest": sha256_bytes(stored),
                             "bodyPath": body_path.as_posix(),
                         }
@@ -432,6 +437,7 @@ def capture_evidence(
                     "contentType": None,
                     "etag": None,
                     "lastModified": None,
+                    "edgeCache": None,
                     "digest": sha256_bytes(b""),
                     "bodyPath": body_path.as_posix(),
                     "error": type(last_error).__name__,

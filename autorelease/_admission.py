@@ -204,8 +204,9 @@ def validate_release_is_newest_patch(
     The version's branch feed names the newest release of that branch and the
     aggregate feed the newest of its major, so either naming a later patch on the
     same branch makes the proposed version an intermediate one that would publish
-    after its successor. Both feeds are read from the watcher's capture whether or
-    not the plan cites them, so a plan cannot skip the check by citing less. Only
+    after its successor. Both feeds are read from the capture whether or not the
+    plan cites them, so a plan cannot skip the check by citing less: the watcher's
+    capture at admission, and the publish recapture again before building. Only
     official feeds count: a php-src tag can exist before its release and never
     supersedes one. The check rejects only on contrary evidence; a feed that is
     missing, unhealthy, unreadable, or names another branch leaves the decision to

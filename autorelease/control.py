@@ -361,15 +361,17 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "validate-recaptured-evidence":
-            print(
-                json.dumps(
-                    validate_recaptured_evidence(
-                        load_json(args.plan),
-                        load_json(args.admitted_manifest),
-                        load_json(args.current_manifest),
-                    )
-                )
+            plan = load_json(args.plan)
+            result = validate_recaptured_evidence(
+                plan,
+                load_json(args.admitted_manifest),
+                load_json(args.current_manifest),
             )
+            # Recapture exempts feeds that cannot prove the version, so supersession is
+            # rechecked on the fresh captures: a later patch on the branch in any feed
+            # still stops the release, even one the digest comparison released.
+            validate_release_is_newest_patch(plan.get("action", ""), plan.get("releaseIntent"), args.current_manifest)
+            print(json.dumps(result))
         elif args.command == "transition-event":
             updated = transition_event(load_json(args.event), args.target, load_json(args.evidence))
             write_json(args.output, updated)

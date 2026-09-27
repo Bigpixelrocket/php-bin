@@ -30,7 +30,8 @@ ignores release feeds that say nothing about its version, meaning other
 branches' feeds and, once the plan cites the version's own branch feed, the
 aggregate feed. That branch feed is bound even when uncited, so a release on
 another branch never stops this one, while any change to this branch's feed,
-the repository state, or other cited context still does.
+the repository state, or other cited context still does. The publish job also
+reruns the supersession check on the recaptured feeds.
 The GitHub releases captures digest a projected body with per-asset download
 counters and draft releases removed, so public downloads never register as
 changed evidence, and the read-only watcher and the publish job's write token
