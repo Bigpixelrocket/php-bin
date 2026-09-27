@@ -39,8 +39,41 @@ SHA256SUMS
 The archive layout is stable:
 
 ```text
-bin/php
+bin/php                          static CLI binary
+bin/phpize, bin/php-config       build kit for PIE and phpize
+include/php/, lib/php/build/     PHP headers and build files
+lib/php/extensions/<name>.so     shared extensions
+share/php-bin/manifest.json      release, PHP version, and shared extensions
+LICENSE, NOTICE
 ```
+
+Most modules are compiled into `bin/php`. The extensions listed in
+[`stages/s4-shared.txt`](stages/s4-shared.txt) ship as shared `.so` files
+instead, so each install can turn them on or off. The manifest records, for
+each one, its name, whether it loads with `zend_extension`, whether it is on by
+default, and which other shared extensions it requires:
+
+```json
+{
+  "schemaVersion": 1,
+  "release": "8.5.11-1",
+  "phpVersion": "8.5.11",
+  "extensions": [
+    {"name": "redis", "zend": false, "default": true, "requires": ["igbinary"]},
+    {"name": "xdebug", "zend": true, "default": false, "requires": []}
+  ]
+}
+```
+
+The archive ships no `php.ini`. `mise-php` writes one per install at
+`bin/php.ini`, where PHP always looks first; the binary's compiled-in
+configuration path cannot exist and it has no scan directory, so no system
+`php.ini` is ever read. `bin/php-config` and `bin/phpize` hold the placeholder
+`@PHP_BIN_PREFIX@` where the install folder belongs, and `mise-php` replaces it
+at install time.
+
+Releases published before shared extensions contain only `bin/php`, `LICENSE`,
+and `NOTICE`, with every module compiled in.
 
 ## Build locally
 
@@ -54,18 +87,20 @@ scripts/build.sh 8.4 s0
 scripts/compare-modules.sh .build/8.4/s0/buildroot/bin/php stages/s0.txt subset
 ```
 
-Advance through `s1`, `s2`, `s3`, and `s4`. Stage `s4` runs the exact comparison
-against `expected-modules/8.4.txt`:
+Advance through `s1`, `s2`, `s3`, and `s4`. Stage `s4` also builds the shared
+extensions in `stages/s4-shared.txt` and runs the module gate:
 
 ```bash
 scripts/build.sh 8.4 s4
-scripts/compare-modules.sh \
-  .build/8.4/s4/buildroot/bin/php \
-  expected-modules/8.4.txt exact
 ```
 
-When the exact check is green, package the binary with its full PHP patch
-version:
+The gate requires `php -n -m` to equal the static set, the static set plus every
+default-on extension to equal `expected-modules/8.4.txt` exactly, every shared
+extension to load cleanly with only its declared requirements, every
+off-by-default extension to report a stable version, and every `.so` to link
+only system libraries and target macOS 26.0.
+
+When the gate is green, package the build with its full PHP patch version:
 
 ```bash
 scripts/package.sh .build/8.4/s4/buildroot/bin/php 8.4.5

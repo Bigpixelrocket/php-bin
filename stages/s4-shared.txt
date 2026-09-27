@@ -1,0 +1,47 @@
+# Shared extensions built beside the static s4 binary, one per line:
+#
+#   <extension> <on|off> [zend] [requires=<ext>[,<ext>...]] [pin=<source>:<url>]
+#
+# on        loaded by default through each install's bin/php.ini; the static
+#           binary plus every "on" extension must equal expected-modules exactly
+# off       shipped as lib/php/extensions/<extension>.so, commented out in php.ini
+# zend      load with zend_extension= instead of extension=
+# requires  other shared extensions that must load first
+# pin       StaticPHP source name and the exact stable release archive to build,
+#           so an upstream prerelease can never slip into a published build
+#
+# Deliberately absent: msgpack (building it compiles redis against it, so the
+# default-on redis would stop loading without it), grpc (build time), swoole
+# and swow (they replace the runtime model), parallel (needs a thread-safe
+# build), and inotify (Linux only).
+
+# Default on: the modules every release has always loaded.
+igbinary        on
+redis           on   requires=igbinary
+imagick         on
+mongodb         on
+sqlsrv          on
+pdo_sqlsrv      on
+
+# Off by default: enable per install in bin/php.ini.
+xdebug          off  zend  pin=xdebug:https://pecl.php.net/get/xdebug-3.5.3.tgz
+pcov            off        pin=pcov:https://pecl.php.net/get/pcov-1.0.12.tgz
+excimer         off        pin=ext-excimer:https://pecl.php.net/get/excimer-1.2.6.tgz
+spx             off        pin=spx:https://github.com/NoiseByNorthwest/php-spx/archive/refs/tags/v0.4.22.tar.gz
+xhprof          off        pin=xhprof:https://pecl.php.net/get/xhprof-2.3.10.tgz
+apcu            off        pin=apcu:https://pecl.php.net/get/apcu-5.1.28.tgz
+memcached       off  requires=igbinary  pin=memcached:https://pecl.php.net/get/memcached-3.4.0.tgz
+yaml            off        pin=yaml:https://pecl.php.net/get/yaml-2.3.0.tgz
+ds              off        pin=ext-ds:https://pecl.php.net/get/ds-2.0.0.tgz
+decimal         off        pin=ext-decimal:https://pecl.php.net/get/decimal-2.0.1.tgz
+uuid            off        pin=ext-uuid:https://pecl.php.net/get/uuid-1.3.0.tgz
+maxminddb       off        pin=ext-maxminddb:https://pecl.php.net/get/maxminddb-1.14.0.tgz
+zstd            off        pin=ext-zstd:https://pecl.php.net/get/zstd-0.18.0.tgz
+brotli          off        pin=ext-brotli:https://pecl.php.net/get/brotli-0.21.0.tgz
+ssh2            off        pin=ext-ssh2:https://pecl.php.net/get/ssh2-1.5.0.tgz
+amqp            off        pin=amqp:https://pecl.php.net/get/amqp-2.2.0.tgz
+rdkafka         off        pin=ext-rdkafka:https://pecl.php.net/get/rdkafka-6.0.5.tgz
+event           off        pin=ext-event:https://pecl.php.net/get/event-3.1.6.tgz
+protobuf        off        pin=protobuf:https://pecl.php.net/get/protobuf-5.36.2.tgz
+opentelemetry   off        pin=opentelemetry:https://pecl.php.net/get/opentelemetry-1.4.2.tgz
+simdjson        off        pin=ext-simdjson:https://pecl.php.net/get/simdjson-4.0.0.tgz
