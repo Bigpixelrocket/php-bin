@@ -1792,6 +1792,113 @@ class AutoreleaseControlTests(unittest.TestCase):
             release.index("Notify owner of completed release"),
         )
 
+    def test_release_build_runs_apart_from_the_write_token(self):
+        # StaticPHP runs third-party build scripts, so it may only run in a job
+        # whose token reads contents, and the write-scoped release job may only
+        # consume that job's artifact after checking what the build reported.
+        from autorelease.verify import load_workflow, workflow_steps
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        document = load_workflow(root / ".github/workflows/autorelease-publish.yml")
+        jobs = document["jobs"]
+        steps = workflow_steps(document)
+        static_php_jobs = {
+            job
+            for job, _, step in steps
+            if re.search(r"scripts/(build|install-spc|install-build-deps|package)\.sh", step.get("run") or "")
+        }
+        self.assertEqual({"build"}, static_php_jobs)
+
+        build = jobs["build"]
+        self.assertEqual({"contents": "read"}, build["permissions"])
+        self.assertNotIn("environment", build)
+        self.assertEqual("preflight", build["needs"])
+        token_steps = []
+        for _, _, step in (entry for entry in steps if entry[0] == "build"):
+            self.assertFalse(str(step.get("uses") or "").startswith("jdx/mise-action@"))
+            if "github.token" in json.dumps(step):
+                token_steps.append(step)
+        self.assertNotIn("github.token", json.dumps(build.get("env") or {}))
+        self.assertEqual([{"GITHUB_TOKEN": "${{ github.token }}"}], [step.get("env") for step in token_steps])
+        self.assertIn("./scripts/build.sh", token_steps[0]["run"])
+
+        for job, _, step in steps:
+            if str(step.get("uses") or "").startswith("actions/checkout@"):
+                self.assertIs(False, step["with"]["persist-credentials"], job)
+
+        release = jobs["release"]
+        self.assertEqual({"preflight", "build"}, set(release["needs"]))
+        self.assertEqual("php-autorelease-publish", release["environment"])
+        # A failed build must not stop the reconciliation of an existing release.
+        self.assertEqual("${{ !cancelled() && needs.preflight.result == 'success' }}", release["if"])
+        names = [step.get("name") for step in release["steps"]]
+        # The release job runs after a failed build, so this gate alone keeps a
+        # fresh release from using an artifact the build did not finish.
+        require = release["steps"][names.index("Require the isolated build")]
+        self.assertEqual("steps.existing.outputs.reuse != 'true'", require["if"])
+        self.assertEqual("${{ needs.build.result }}", require["env"]["BUILD_RESULT"])
+        self.assertTrue(require["run"].startswith('test "$BUILD_RESULT" = success\n'))
+        download = release["steps"][names.index("Download the isolated build")]
+        self.assertEqual(
+            {
+                "artifact-ids": "${{ needs.build.outputs.artifact_id }}",
+                "path": ".artifacts",
+                "digest-mismatch": "error",
+            },
+            download["with"],
+        )
+        verify = release["steps"][names.index("Verify the staged bytes the build reported")]
+        self.assertEqual("${{ needs.build.outputs.archive_digest }}", verify["env"]["ARCHIVE_DIGEST"])
+        self.assertEqual("${{ needs.build.outputs.checksums_digest }}", verify["env"]["CHECKSUMS_DIGEST"])
+        self.assertIn(
+            'test "$(find .artifacts -mindepth 1 -print | LC_ALL=C sort | paste -sd \' \' -)" \\\n'
+            '  = ".artifacts/SHA256SUMS .artifacts/$archive"',
+            verify["run"],
+        )
+        self.assertIn('test "sha256:$archive_hex" = "$ARCHIVE_DIGEST"', verify["run"])
+        self.assertIn(
+            'test "sha256:$(shasum -a 256 .artifacts/SHA256SUMS | awk \'{print $1}\')" = "$CHECKSUMS_DIGEST"',
+            verify["run"],
+        )
+        self.assertIn('grep -Fx "$archive_hex  $archive" .artifacts/SHA256SUMS', verify["run"])
+        self.assertIn("validate-autorelease-archive", verify["run"])
+        self.assertLess(
+            names.index("Reconcile existing immutable release assets"),
+            names.index("Require the isolated build"),
+        )
+        self.assertLess(
+            names.index("Require the isolated build"),
+            names.index("Download the isolated build"),
+        )
+        self.assertLess(
+            names.index("Verify the staged bytes the build reported"),
+            names.index("Initialize release transaction and event"),
+        )
+        self.assertEqual(
+            "always() && needs.preflight.result == 'success' && needs.release.result == 'failure'",
+            jobs["notify-failure"]["if"],
+        )
+
+        # The release job still runs the built binary to verify installs, so
+        # those steps and mise itself may hold no token, and mise may not
+        # restore a cached binary another job could have saved.
+        mise = [step for step in release["steps"] if str(step.get("uses") or "").startswith("jdx/mise-action@")]
+        self.assertEqual([{"github_token": "", "cache": False}], [step.get("with") for step in mise])
+        mise_index = release["steps"].index(mise[0])
+        self.assertEqual(
+            'test -z "${MISE_GITHUB_TOKEN:-}"',
+            release["steps"][mise_index + 1]["run"],
+        )
+        self.assertNotIn("github.token", json.dumps(release.get("env") or {}))
+        binary_steps = [step for step in release["steps"] if "mise exec" in (step.get("run") or "")]
+        self.assertEqual(2, len(binary_steps))
+        for step in binary_steps:
+            self.assertNotIn("github.token", json.dumps(step))
+            self.assertTrue(
+                step["run"].startswith('test -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}${MISE_GITHUB_TOKEN:-}"\n'),
+                step["name"],
+            )
+
     def test_protected_controls_pass_owner_authored_changes_before_bot_exemptions(self):
         # The owner short-circuit must sit after the no-protected-path exit and
         # before the automation exemptions, so it can never widen what a bot

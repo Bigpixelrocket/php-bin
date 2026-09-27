@@ -71,8 +71,72 @@ jobs:
             echo "investigation_run_id=$INVESTIGATION_RUN_ID"
           } >> "$GITHUB_OUTPUT"
 
-  release:
+  # StaticPHP resolves most sources through the GitHub API, which rate limits
+  # anonymous calls from shared macOS runners, and it runs third-party build
+  # scripts. The build therefore runs here, on its own runner with a read-only
+  # token, so the release job's write token never shares a process, an
+  # environment, or a disk with it. The release job accepts only this job's
+  # artifact, by ID, service digest, and the file digests reported below.
+  build:
+    name: Build exact patch
     needs: preflight
+    runs-on: macos-26
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      EXACT_COMMIT: ${{ needs.preflight.outputs.exact_commit }}
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      archive_digest: ${{ steps.staged.outputs.archive_digest }}
+      checksums_digest: ${{ steps.staged.outputs.checksums_digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.preflight.outputs.exact_commit }}
+          persist-credentials: false
+      - name: Verify exact commit and runner architecture
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXACT_COMMIT"
+          test "$(uname -s)" = Darwin && test "$(uname -m)" = arm64
+      - name: Install build dependencies
+        run: ./scripts/install-build-deps.sh
+      - name: Install pinned StaticPHP
+        run: ./scripts/install-spc.sh
+      - name: Build exact patch
+        env:
+          # StaticPHP authenticates GitHub API calls only through this variable.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./scripts/build.sh "$VERSION" s4
+      - name: Package and validate staged bytes
+        id: staged
+        run: |
+          archive=".artifacts/php-$VERSION-cli-macos-aarch64.tar.gz"
+          ./scripts/package.sh ".build/$VERSION/s4/buildroot/bin/php" "$VERSION"
+          ./scripts/validate-autorelease-archive --archive "$archive" --version "$VERSION"
+          {
+            echo "archive_digest=sha256:$(shasum -a 256 "$archive" | awk '{print $1}')"
+            echo "checksums_digest=sha256:$(shasum -a 256 .artifacts/SHA256SUMS | awk '{print $1}')"
+          } >> "$GITHUB_OUTPUT"
+      - name: Hand the staged bytes to the release job
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-build-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/
+          if-no-files-found: error
+          retention-days: 90
+          include-hidden-files: true
+
+  # Only this job may see draft releases, so it alone decides whether an
+  # existing release is reconciled; that path reuses the release's own assets
+  # and never needs the build. The job therefore runs even when the build
+  # failed, so a draft left by an earlier run can still be completed, and a
+  # fresh release stops at "Require the isolated build" before any effect.
+  release:
+    needs: [preflight, build]
+    if: ${{ !cancelled() && needs.preflight.result == 'success' }}
     runs-on: macos-26
     timeout-minutes: 150
     environment: php-autorelease-publish
@@ -92,7 +156,15 @@ jobs:
           repository: bigpixelrocket/mise-php
           path: mise-php
           persist-credentials: false
+      # mise installs no tools here, so it needs no token. Without one it also
+      # exports none into the steps that run the built binary, and without the
+      # cache it never runs a mise binary another job could have saved.
       - uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4
+        with:
+          github_token: ""
+          cache: false
+      - name: Confirm mise holds no token
+        run: test -z "${MISE_GITHUB_TOKEN:-}"
       - name: Download admitted plan and retained evidence
         env:
           GH_TOKEN: ${{ github.token }}
@@ -168,22 +240,40 @@ jobs:
           else
             echo "reuse=false" >> "$GITHUB_OUTPUT"
           fi
-      - name: Install build dependencies
+      - name: Require the isolated build
         if: steps.existing.outputs.reuse != 'true'
-        run: ./scripts/install-build-deps.sh
-      - name: Install pinned StaticPHP
-        if: steps.existing.outputs.reuse != 'true'
-        run: ./scripts/install-spc.sh
-      - name: Build exact patch
-        if: steps.existing.outputs.reuse != 'true'
-        run: ./scripts/build.sh "$VERSION" s4
-      - name: Package and validate staged bytes
-        if: steps.existing.outputs.reuse != 'true'
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+          ARCHIVE_DIGEST: ${{ needs.build.outputs.archive_digest }}
+          CHECKSUMS_DIGEST: ${{ needs.build.outputs.checksums_digest }}
         run: |
-          ./scripts/package.sh ".build/$VERSION/s4/buildroot/bin/php" "$VERSION"
-          ./scripts/validate-autorelease-archive \
-            --archive ".artifacts/php-$VERSION-cli-macos-aarch64.tar.gz" \
-            --version "$VERSION"
+          test "$BUILD_RESULT" = success
+          # An empty ID would make the download below fetch every artifact of the run.
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$ARCHIVE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$CHECKSUMS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+      - name: Download the isolated build
+        if: steps.existing.outputs.reuse != 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: .artifacts
+          digest-mismatch: error
+      - name: Verify the staged bytes the build reported
+        if: steps.existing.outputs.reuse != 'true'
+        env:
+          ARCHIVE_DIGEST: ${{ needs.build.outputs.archive_digest }}
+          CHECKSUMS_DIGEST: ${{ needs.build.outputs.checksums_digest }}
+        run: |
+          archive="php-$VERSION-cli-macos-aarch64.tar.gz"
+          test "$(find .artifacts -mindepth 1 -print | LC_ALL=C sort | paste -sd ' ' -)" \
+            = ".artifacts/SHA256SUMS .artifacts/$archive"
+          archive_hex="$(shasum -a 256 ".artifacts/$archive" | awk '{print $1}')"
+          test "sha256:$archive_hex" = "$ARCHIVE_DIGEST"
+          test "sha256:$(shasum -a 256 .artifacts/SHA256SUMS | awk '{print $1}')" = "$CHECKSUMS_DIGEST"
+          grep -Fx "$archive_hex  $archive" .artifacts/SHA256SUMS
+          ./scripts/validate-autorelease-archive --archive ".artifacts/$archive" --version "$VERSION"
       - name: Initialize release transaction and event
         run: |
           mkdir -p release-run
@@ -234,12 +324,18 @@ jobs:
               --output release-run/next.json
             mv release-run/next.json release-run/transaction.json
           done
-      - name: Verify draft installation through temporary artifact path
+      # Only the write token can read a draft, so the download is its own step
+      # and the steps that run the built binary hold no token.
+      - name: Download the draft assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          temporary="$(mktemp -d)"
-          gh release download "$VERSION" --repo "${{ github.repository }}" --dir "$temporary"
+          mkdir "$RUNNER_TEMP/draft-assets"
+          gh release download "$VERSION" --repo "${{ github.repository }}" --dir "$RUNNER_TEMP/draft-assets"
+      - name: Verify draft installation through temporary artifact path
+        run: |
+          test -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}${MISE_GITHUB_TOKEN:-}"
+          temporary="$RUNNER_TEMP/draft-assets"
           port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
           ./scripts/serve-autorelease-artifact --port "$port" --assets "$temporary" --version "$VERSION" &
           server_pid="$!"
@@ -317,6 +413,7 @@ jobs:
           retention-days: 90
       - name: Verify fresh public exact-version and branch-shorthand installs
         run: |
+          test -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}${MISE_GITHUB_TOKEN:-}"
           unset MISE_PHP_API_BASE_URL
           temporary="$(mktemp -d)"
           export MISE_DATA_DIR="$temporary/data"
@@ -434,7 +531,9 @@ jobs:
     needs: [preflight, release]
     # A skipped release already keeps this job quiet when preflight rejects the
     # dispatch, but the preflight result is asserted anyway so the gate survives
-    # a later change to the release job's own condition.
+    # a later change to the release job's own condition. A failed build reaches
+    # this job through the release job, which fails before any effect unless it
+    # completes an existing release.
     if: always() && needs.preflight.result == 'success' && needs.release.result == 'failure'
     runs-on: ubuntu-latest
     timeout-minutes: 5

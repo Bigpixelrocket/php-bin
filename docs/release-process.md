@@ -14,13 +14,16 @@ full contract.
 2. For an ordinary stable patch the plan requires no edit and goes straight to
    the publish transaction. A recipe change is implemented offline, sealed,
    validated in a clean checkout, and merged through exact-SHA admission first.
-3. The publish transaction rebuilds on macOS 26 arm64, verifies the exact
-   module baseline and deployment target, packages the archive, writes
-   `SHA256SUMS`, creates the annotated tag and draft, verifies the draft bytes
-   through a temporary install, then publishes the unchanged bytes and verifies
-   the public install through `mise-php`.
-4. It advances one legal state at a time, never rebuilds under an existing tag,
-   and never overwrites, deletes, or retags a published release.
+3. The publish transaction rebuilds on macOS 26 arm64 in a separate job with a
+   read-only token, verifies the exact module baseline and deployment target,
+   packages the archive, and writes `SHA256SUMS`. The write-scoped release job
+   checks those bytes against the digests the build reported, creates the
+   annotated tag and draft, verifies the draft bytes through a temporary
+   install, then publishes the unchanged bytes and verifies the public install
+   through `mise-php`.
+4. It advances one legal state at a time, reuses an existing release's assets
+   instead of the fresh build, and never overwrites, deletes, or retags a
+   published release.
 
 A first release on a new PHP branch additionally waits for exact-commit
 `php_bin_ready` and `mise_ready` records.
