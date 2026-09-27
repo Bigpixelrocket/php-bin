@@ -7,6 +7,12 @@ verified macOS 26 arm64 CLI binaries without a human in the loop.
 `PHP autorelease watcher` runs daily and can also be dispatched manually. It
 captures the raw PHP lifecycle page, release feed, php-src tags, and public
 state of both repositories, including response metadata and SHA-256 digests.
+The aggregate release feed names only the newest release of each major, so the
+watcher also captures one feed per branch in `support-policy.json`
+(`php_release_feed_<major>.<minor>`), and a new patch on any maintained branch
+is admitted from its own branch feed. The branch set follows the accepted
+policy, so a new or retired branch changes what is captured with no code
+change.
 The GitHub releases captures digest a projected body with per-asset download
 counters removed, so public downloads never register as changed evidence; the
 unprojected bytes are retained beside the digested body. The watcher compares

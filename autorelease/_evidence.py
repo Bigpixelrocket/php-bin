@@ -45,6 +45,33 @@ EVIDENCE_CAPTURE_IDS = {
     "mise_php_state",
 }
 RUNTIME_PLAN_EVIDENCE_IDS = {"evidence_manifest", "watch_decision"}
+# The aggregate release feed names only the newest release of each major, so every
+# maintained branch also has its own feed capture. The set follows the accepted
+# support policy, so it is validated by shape rather than listed.
+BRANCH_FEED_CAPTURE_PREFIX = "php_release_feed_"
+BRANCH_FEED_CAPTURE_RE = re.compile(r"^php_release_feed_(\d+\.\d+)$")
+
+
+def branch_feed_capture_id(branch: str) -> str:
+    """Return the capture ID of one maintained branch's release feed."""
+    capture_id = f"{BRANCH_FEED_CAPTURE_PREFIX}{branch}"
+    require(bool(BRANCH_FEED_CAPTURE_RE.fullmatch(capture_id)), f"invalid release branch: {branch}")
+    return capture_id
+
+
+def validate_capture_id_set(capture_ids: Iterable[Any], label: str) -> None:
+    """Require exactly the fixed sources plus any number of per-branch feeds.
+
+    Which branches are captured is decided by the support policy at capture time, so
+    a stored record written before a branch was added or retired stays valid; only
+    an unknown ID, a duplicate, or a missing fixed source is rejected.
+    """
+    capture_ids = list(capture_ids)
+    require(len(capture_ids) == len(set(capture_ids)), f"duplicate {label}evidence capture")
+    branch_feeds = {
+        item for item in capture_ids if isinstance(item, str) and BRANCH_FEED_CAPTURE_RE.fullmatch(item)
+    }
+    require(set(capture_ids) - branch_feeds == EVIDENCE_CAPTURE_IDS, f"{label}evidence capture set changed")
 
 
 def manifest_digest(captures: Iterable[dict[str, Any]]) -> str:
@@ -80,12 +107,16 @@ def validate_recaptured_evidence(
             require(isinstance(capture, dict), f"{label} evidence capture must be an object")
             capture_id = capture.get("captureId")
             digest = capture.get("digest")
-            require(capture_id in EVIDENCE_CAPTURE_IDS, f"{label} evidence capture is unknown")
+            require(
+                capture_id in EVIDENCE_CAPTURE_IDS
+                or (isinstance(capture_id, str) and bool(BRANCH_FEED_CAPTURE_RE.fullmatch(capture_id))),
+                f"{label} evidence capture is unknown",
+            )
             require(capture_id not in indexed, f"{label} evidence capture is duplicated: {capture_id}")
             require(capture.get("status") == 200, f"{label} evidence capture is not healthy: {capture_id}")
             require(bool(SHA256_RE.fullmatch(digest or "")), f"{label} evidence digest is invalid: {capture_id}")
             indexed[capture_id] = capture
-        require(set(indexed) == EVIDENCE_CAPTURE_IDS, f"{label} evidence capture set changed")
+        validate_capture_id_set(indexed, f"{label} ")
         require(
             manifest.get("manifestDigest") == manifest_digest(captures),
             f"{label} evidence manifest digest mismatch",
@@ -94,6 +125,9 @@ def validate_recaptured_evidence(
 
     admitted = indexed_captures(admitted_manifest, "admitted")
     current = indexed_captures(current_manifest, "current")
+    # Both captures run against the same accepted support policy, so a differing
+    # branch-feed set means the policy moved under the admitted plan.
+    require(set(admitted) == set(current), "recaptured evidence capture set changed")
     evidence = plan.get("evidence")
     require(isinstance(evidence, list) and bool(evidence), "autorelease plan has no evidence")
     verified = []
@@ -130,8 +164,7 @@ def validate_evidence_state_record(record: dict[str, Any]) -> None:
         capture_ids.append(capture.get("captureId"))
         require(bool(SHA256_RE.fullmatch(capture.get("digest", ""))), "invalid evidence capture digest")
         require(capture.get("status") == 200, "evidence capture status is not healthy")
-    require(len(capture_ids) == len(set(capture_ids)), "duplicate evidence capture")
-    require(set(capture_ids) == EVIDENCE_CAPTURE_IDS, "evidence capture set changed")
+    validate_capture_id_set(capture_ids, "")
 
 
 def validate_evidence_attestation_predicate(

@@ -19,7 +19,9 @@ manifest or the two deterministic runtime inputs `evidence_manifest` and
 admissible as plan evidence. Every plan evidence `digest` is the SHA-256 of
 the cited file's bytes: for `evidence_manifest`, hash the manifest file
 itself rather than copying its embedded `manifestDigest` field, which covers
-only the capture identities and never matches the file's own hash.
+only the capture identities and never matches the file's own hash. The
+`no_change` action key is the one place that uses the embedded field instead;
+see below.
 
 The required runtime inputs are generated before this phase and are available
 at these exact paths:
@@ -46,9 +48,17 @@ advisory checks. Declare them in the plan, but do not run them in this read-only
 phase or treat their not-yet-run status as unresolved; writable deterministic
 jobs execute them before merge.
 
-If changed evidence has no autorelease consequence, use action `no_change` and
-the key `no_change:<first 16 hexadecimal characters of the evidence manifest
-digest>` so the reviewed snapshot remains uniquely auditable.
+If changed evidence has no autorelease consequence, use action `no_change`. Its
+key is `no_change:` followed by the first 16 hexadecimal characters of the
+`manifestDigest` field stored inside
+`autorelease-run/evidence/evidence-manifest.json`, after its `sha256:` prefix.
+`watch-decision.json` reports the same value as its own `manifestDigest`.
+Never derive the key from the SHA-256 of the manifest file: that file hash is
+only the `digest` of an `evidence_manifest` evidence item, and admission
+rejects a key built from it. For example, a manifest whose `manifestDigest`
+field is `sha256:cf27c1c17087a38632d6...` takes the key
+`no_change:cf27c1c17087a386`, whatever the file's own hash is. This keeps the
+reviewed snapshot uniquely auditable.
 
 A `no_change` plan authorizes no work: set `editsRequired` to false, leave
 both `allowedPaths` arrays empty, set `releaseIntent` to null, and list no
@@ -59,9 +69,19 @@ that requests edit authority.
 
 A php-src tag can appear before an official stable release is published. A tag
 alone is never sufficient evidence for `new_patch` or `new_branch`. For either
-action, include a `php_release_feed` JSON-pointer evidence item whose resolved
-value is the exact `releaseIntent.version`; otherwise classify the tag-only
-change as `no_change` until the official feed publishes that version.
+action, include a JSON-pointer evidence item into an official release feed
+capture whose resolved value is the exact `releaseIntent.version`: either the
+aggregate `php_release_feed` (for example `/8/version`) or the feed of that
+version's own branch, `php_release_feed_<major>.<minor>` (for example
+`/version` in `php_release_feed_8.4`). Otherwise classify the tag-only change
+as `no_change` until the official feed publishes that version.
+
+The aggregate feed names only the newest release of each major, so a patch on
+an older maintained branch appears only in its branch feed. Check every
+`php_release_feed_<major>.<minor>` capture: when the version it names has no
+matching `tag_name` in `php_bin_releases`, that branch needs
+`new_patch:<version>`. When several branches need one, propose the oldest
+branch first; later runs publish the rest.
 
 The plan `actionKey` identifies the classified autorelease action, not the
 phase-scoped action key in the event contract. It must use one of the reviewed

@@ -31,6 +31,7 @@ from autorelease.control import (
     validate_recipe_rebuild_evidence,
     email_digest,
     email_fallback,
+    evidence_sources,
     load_plan_evidence,
     main as control_main,
     mutation_allowed,
@@ -186,10 +187,54 @@ class AutoreleaseControlTests(unittest.TestCase):
             self.assertEqual(body, strip_release_download_counts(body))
 
     def test_only_reviewed_sources_carry_identity_projections(self):
-        projected = {source.capture_id for source in EVIDENCE_SOURCES if source.normalize is not None}
+        projected = {
+            source.capture_id
+            for source in evidence_sources(["8.4", "8.5"])
+            if source.normalize is not None
+        }
         self.assertEqual(
             {"php_bin_releases", "mise_php_releases", "php_supported_versions"}, projected
         )
+
+    def test_every_maintained_branch_has_its_own_release_feed_capture(self):
+        # The aggregate feed names only the newest release of each major, which left
+        # every older maintained branch without admissible evidence for a new patch.
+        sources = evidence_sources(["8.2", "8.3", "8.4", "8.5"])
+        ids = [source.capture_id for source in sources]
+        self.assertEqual(
+            [
+                "php_supported_versions",
+                "php_release_feed",
+                "php_release_feed_8.2",
+                "php_release_feed_8.3",
+                "php_release_feed_8.4",
+                "php_release_feed_8.5",
+                *[source.capture_id for source in EVIDENCE_SOURCES[2:]],
+            ],
+            ids,
+        )
+        feeds = {source.capture_id: source for source in sources}
+        self.assertEqual(
+            "https://www.php.net/releases/index.php?json&version=8.4",
+            feeds["php_release_feed_8.4"].url,
+        )
+        self.assertEqual(feeds["php_release_feed"].max_bytes, feeds["php_release_feed_8.4"].max_bytes)
+        # The branch set follows the policy, so a new branch is captured with no code change.
+        self.assertIn("php_release_feed_8.6", {s.capture_id for s in evidence_sources(["8.5", "8.6"])})
+        self.assertEqual(list(EVIDENCE_SOURCES), list(evidence_sources([])))
+        for branch in ("8", "8.4.1", "../8.4", ""):
+            with self.assertRaises(ControlError, msg=branch):
+                evidence_sources([branch])
+
+    def test_capture_command_derives_branch_feeds_from_the_accepted_policy(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        branches = json.loads((root / "support-policy.json").read_text())["maintainedBranches"]
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "autorelease.control.capture_evidence", return_value={}
+        ) as capture:
+            self.assertEqual(0, run_control("capture-evidence", "--output", tmp)[0])
+        captured = [source.capture_id for source in capture.call_args.args[1]]
+        self.assertEqual([f"php_release_feed_{branch}" for branch in branches], captured[2 : 2 + len(branches)])
 
     def test_supported_versions_date_churn_does_not_change_capture_identity(self):
         adjacent = (
@@ -708,6 +753,24 @@ class AutoreleaseControlTests(unittest.TestCase):
             ],
         }
         validate_evidence_state_record(record)
+        # A record carries one feed per branch the policy maintained when it was taken,
+        # so records from before and after a branch change both stay readable.
+        branch_feeds = [
+            {"captureId": f"php_release_feed_{branch}", "digest": "sha256:" + "d" * 64, "status": 200}
+            for branch in ("8.4", "8.5")
+        ]
+        validate_evidence_state_record({**record, "captures": [*record["captures"], *branch_feeds]})
+        for unknown in ("php_release_feed_8", "php_release_feed_8.4.1", "php_release_feed_latest"):
+            with self.assertRaisesRegex(ControlError, "capture set changed", msg=unknown):
+                validate_evidence_state_record(
+                    {**record, "captures": [*record["captures"], {**branch_feeds[0], "captureId": unknown}]}
+                )
+        with self.assertRaisesRegex(ControlError, "duplicate"):
+            validate_evidence_state_record(
+                {**record, "captures": [*record["captures"], branch_feeds[0], branch_feeds[0]]}
+            )
+        with self.assertRaisesRegex(ControlError, "capture set changed"):
+            validate_evidence_state_record({**record, "captures": [*record["captures"][1:], *branch_feeds]})
         record["captures"][0]["status"] = 500
         with self.assertRaisesRegex(ControlError, "not healthy"):
             validate_evidence_state_record(record)
@@ -740,6 +803,29 @@ class AutoreleaseControlTests(unittest.TestCase):
             "new_patch",
             release_intent,
             [*tag_only, {"captureId": "php_release_feed", "value": "8.5.9"}],
+        )
+
+    def test_older_branch_patch_is_admitted_from_its_own_branch_feed(self):
+        # php.net's aggregate feed only ever named 8.5.x for major 8, so 8.4, 8.3, and
+        # 8.2 patches could never publish. Each branch feed proves its own branch alone.
+        intent = {"version": "8.4.26", "sourceIdentifier": "php_release_feed_8.4"}
+        aggregate = {"captureId": "php_release_feed", "value": "8.5.11"}
+        with self.assertRaisesRegex(ControlError, "official PHP release feed"):
+            validate_stable_release_evidence("new_patch", intent, [aggregate])
+        validate_stable_release_evidence(
+            "new_patch", intent, [aggregate, {"captureId": "php_release_feed_8.4", "value": "8.4.26"}]
+        )
+        for wrong in (
+            {"captureId": "php_release_feed_8.3", "value": "8.4.26"},
+            {"captureId": "php_release_feed_8.4", "value": "8.4.25"},
+            {"captureId": "php_source_tags", "value": "8.4.26"},
+        ):
+            with self.assertRaisesRegex(ControlError, "official PHP release feed", msg=wrong):
+                validate_stable_release_evidence("new_patch", intent, [wrong])
+        validate_stable_release_evidence(
+            "new_branch",
+            {"version": "8.6.0", "sourceIdentifier": "php_release_feed"},
+            [{"captureId": "php_release_feed", "value": "8.6.0"}],
         )
 
     def test_release_recapture_ignores_runtime_evidence_and_verifies_sources(self):
@@ -794,6 +880,35 @@ class AutoreleaseControlTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ControlError, "recaptured evidence changed"):
             validate_recaptured_evidence(plan, manifest, changed)
+
+        def with_captures(extra):
+            items = [*captures, *extra]
+            return {
+                "schemaVersion": 1,
+                "captures": items,
+                "manifestDigest": sha256_bytes(
+                    canonical_json(
+                        [
+                            {"captureId": item["captureId"], "status": item["status"], "digest": item["digest"]}
+                            for item in items
+                        ]
+                    )
+                ),
+            }
+
+        branch_feed = {"captureId": "php_release_feed_8.4", "status": 200, "digest": "sha256:" + "e" * 64}
+        with_branch = with_captures([branch_feed])
+        branch_plan = {"evidence": [*plan["evidence"], {"captureId": branch_feed["captureId"], "digest": branch_feed["digest"]}]}
+        self.assertIn(
+            "php_release_feed_8.4",
+            validate_recaptured_evidence(branch_plan, with_branch, with_branch)["verifiedCaptureIds"],
+        )
+        # A policy change between admission and publication changes the branch set.
+        with self.assertRaisesRegex(ControlError, "capture set changed"):
+            validate_recaptured_evidence(plan, with_branch, manifest)
+        with self.assertRaisesRegex(ControlError, "unknown"):
+            bad = with_captures([{**branch_feed, "captureId": "php_release_feed_latest"}])
+            validate_recaptured_evidence(plan, bad, bad)
 
     def test_runtime_plan_evidence_is_exact_and_allowlisted(self):
         with tempfile.TemporaryDirectory() as temporary:

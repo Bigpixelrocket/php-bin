@@ -15,7 +15,7 @@ import re
 import subprocess
 from typing import Any
 
-from ._evidence import load_plan_evidence
+from ._evidence import branch_feed_capture_id, load_plan_evidence
 from ._validation import (
     ACTION_KEY_RE,
     COMMIT_SHA_RE,
@@ -158,13 +158,21 @@ def validate_stable_release_evidence(
     release_intent: dict[str, Any] | None,
     resolved_evidence: list[dict[str, Any]],
 ) -> None:
+    """Require a stable release to resolve exactly in an official PHP release feed.
+
+    The aggregate feed names only the newest release of each major, so a patch on an
+    older maintained branch is proven by that branch's own feed capture. A branch
+    capture proves only its own branch: `8.4.26` never resolves from the 8.3 feed.
+    """
     if action not in {"new_patch", "new_branch"}:
         return
     require(isinstance(release_intent, dict), "stable release action has no release intent")
     version = release_intent.get("version")
+    branch = re.fullmatch(r"(\d+\.\d+)\.\d+", version) if isinstance(version, str) else None
+    feeds = {"php_release_feed"} | ({branch_feed_capture_id(branch.group(1))} if branch else set())
     require(
         any(
-            item.get("captureId") == "php_release_feed" and item.get("value") == version
+            item.get("captureId") in feeds and item.get("value") == version
             for item in resolved_evidence
         ),
         "stable release version is not exact evidence in the official PHP release feed",
