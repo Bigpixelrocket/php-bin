@@ -40,6 +40,18 @@ from ._validation import (
 
 
 REQUIRED_PLAN_CHECKS = ["Script checks"]
+# Every path whose bytes decide what a release archive contains. Their identity at the
+# commit a release was built from is recorded in its notes, so a later run can tell
+# whether the current recipe would build different bytes and a rebuild is due.
+RECIPE_INPUT_PATHS = (
+    ".spc-version",
+    "expected-modules",
+    "patches",
+    "scripts/build.sh",
+    "scripts/lib.sh",
+    "scripts/package.sh",
+    "stages",
+)
 PROHIBITED_AGENT_AUTHORITY = {
     "merge",
     "push",
@@ -159,6 +171,29 @@ def validate_stable_release_evidence(
     )
 
 
+def validate_recipe_rebuild_evidence(
+    action: str,
+    action_key: str,
+    resolved_evidence: list[dict[str, Any]],
+) -> None:
+    """Require a rebuild to cite the published release it supersedes.
+
+    `recipe_rebuild:<version>:<n>` rebuilds the newest published revision of that
+    version: `<version>` itself for the first rebuild, `<version>-<n-1>` after that.
+    """
+    if action != "recipe_rebuild":
+        return
+    _prefix, version, revision = action_key.split(":")
+    rebuilt = version if revision == "1" else f"{version}-{int(revision) - 1}"
+    require(
+        any(
+            item.get("captureId") == "php_bin_releases" and item.get("value") == rebuilt
+            for item in resolved_evidence
+        ),
+        "recipe rebuild does not cite the published release it supersedes",
+    )
+
+
 def _validate_support_policy_document(
     policy: Any,
     invariants_path: pathlib.Path,
@@ -232,7 +267,7 @@ def validate_support_policy(root: pathlib.Path = ROOT) -> dict[str, Any]:
         "historical exact installs must remain enabled",
     )
     require(invariants.get("immutablePublishedAssets") is True, "published assets must remain immutable")
-    _branches, evidence = _validate_support_policy_document(policy, invariants_path)
+    branches, evidence = _validate_support_policy_document(policy, invariants_path)
     action_key = policy.get("actionKey")
     require(
         action_key == "bootstrap"
@@ -244,6 +279,7 @@ def validate_support_policy(root: pathlib.Path = ROOT) -> dict[str, Any]:
         "valid": True,
         "policyDigest": sha256_file(policy_path),
         "invariantsDigest": sha256_file(invariants_path),
+        "maintainedBranches": branches,
     }
 
 
@@ -251,11 +287,17 @@ def _validate_plan_shape(
     plan: dict[str, Any],
     manifest_path: pathlib.Path,
     completed_actions: set[str] | None,
+    pending_rebuild: str | None = None,
 ) -> str:
     """Reject a plan whose identity is wrong, and return the action key it claims.
 
     Nothing later in admission means anything until the plan names one reviewed
     action and one well-formed key that no completed event already owns.
+
+    `pending_rebuild` is the rebuild the watcher selected deterministically from the
+    same capture and recipe, or None when none is due. A rebuild plan must name exactly
+    that key, and no plan may record the evidence as unchanged while one is due, so a
+    pending rebuild can neither be invented nor silenced by the investigation.
     """
     require(plan.get("schemaVersion") == 1, "unsupported autorelease plan version")
     require(
@@ -265,6 +307,7 @@ def _validate_plan_shape(
             "new_patch",
             "new_branch",
             "branch_eol",
+            "recipe_rebuild",
             "repair",
             "reconcile_partial",
             "blocked",
@@ -287,6 +330,24 @@ def _validate_plan_shape(
             "no-change plan cannot allow paths",
         )
         require(not plan.get("releaseIntent"), "no-change plan cannot request a release")
+        require(not pending_rebuild, f"no-change plan cannot leave a due rebuild pending: {pending_rebuild}")
+    elif plan.get("action") == "recipe_rebuild":
+        require(
+            bool(pending_rebuild) and action_key == pending_rebuild,
+            f"recipe rebuild is not the selected rebuild: {pending_rebuild or 'none is due'}",
+        )
+        _prefix, version, revision = action_key.split(":")
+        require(plan.get("editsRequired") is False, "recipe rebuild plan cannot require edits")
+        allowed_paths = plan.get("allowedPaths")
+        require(
+            isinstance(allowed_paths, dict) and not any(allowed_paths.values()),
+            "recipe rebuild plan cannot allow paths",
+        )
+        release_intent = plan.get("releaseIntent")
+        require(
+            isinstance(release_intent, dict) and release_intent.get("version") == f"{version}-{revision}",
+            "recipe rebuild release intent is not the selected revision",
+        )
     elif plan.get("action") not in {"blocked", "needs_human"}:
         require(plan.get("editsRequired") in {True, False}, "plan must declare whether edits are required")
     require(
@@ -433,6 +494,7 @@ def _validate_plan_actions(
             "prerelease intent is forbidden",
         )
     validate_stable_release_evidence(plan.get("action", ""), release_intent, resolved_evidence)
+    validate_recipe_rebuild_evidence(plan.get("action", ""), plan.get("actionKey", ""), resolved_evidence)
     operations = plan.get("agentOperations")
     require(isinstance(operations, list), "agentOperations must be an array")
     require(all(isinstance(operation, str) for operation in operations), "agentOperations must contain strings")
@@ -460,6 +522,7 @@ def validate_plan(
     repo_heads: dict[str, str] | None = None,
     policy_digest: str | None = None,
     completed_actions: set[str] | None = None,
+    pending_rebuild: str | None = None,
 ) -> dict[str, Any]:
     """Admit one agent plan, or reject it.
 
@@ -467,7 +530,7 @@ def validate_plan(
     against, and what it asks for. A later gate reads values the earlier one
     proved, so none of them is safe to reorder.
     """
-    action_key = _validate_plan_shape(plan, manifest_path, completed_actions)
+    action_key = _validate_plan_shape(plan, manifest_path, completed_actions, pending_rebuild)
     expected_digests, declared_heads = _validate_plan_preconditions(
         plan,
         contract,
@@ -496,6 +559,20 @@ def git(repo: pathlib.Path, *arguments: str, check: bool = True) -> subprocess.C
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+
+
+def recipe_identity(repo: pathlib.Path, commit: str) -> str:
+    """Digest the recipe inputs of one exact commit.
+
+    The digest covers the committed tree entries (path, mode, and blob) under
+    `RECIPE_INPUT_PATHS`, never the working tree, so the watcher, admission, and the
+    publish transaction agree for the same commit even after a build has written
+    beside them.
+    """
+    require(bool(COMMIT_SHA_RE.fullmatch(commit or "")), "recipe commit is not an exact commit SHA")
+    listing = git(repo, "ls-tree", "-r", "--full-tree", commit, "--", *RECIPE_INPUT_PATHS).stdout
+    require(bool(listing.strip()), "recipe inputs are missing at the commit")
+    return sha256_bytes(listing.encode())
 
 
 def changed_paths(repo: pathlib.Path, base: str) -> list[str]:

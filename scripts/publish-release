@@ -10,9 +10,12 @@ import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from autorelease.control import (  # noqa: E402
+    ROOT,
     ControlError,
     LEGAL_RELEASE_TRANSITIONS,
     load_json,
+    recipe_identity,
+    recipe_identity_note,
     release_transition,
     sha256_file,
     validate_archive,
@@ -121,7 +124,10 @@ def github_effect(
                 "--title",
                 f"PHP {version} for macOS arm64",
                 "--notes",
-                "Autorelease publication. Asset digests are recorded in SHA256SUMS.",
+                # The watcher reads the recipe identity back from the published notes
+                # to decide whether this version needs a rebuild revision.
+                "Autorelease publication. Asset digests are recorded in SHA256SUMS.\n\n"
+                + recipe_identity_note(recipe_identity(ROOT, commit)),
                 "--draft",
                 "--verify-tag",
                 capture=False,

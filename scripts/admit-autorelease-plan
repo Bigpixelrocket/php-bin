@@ -4,10 +4,18 @@
 import argparse
 import json
 import pathlib
+import subprocess
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from autorelease.control import ControlError, load_json, validate_plan, write_json  # noqa: E402
+from autorelease.control import (  # noqa: E402
+    ROOT,
+    ControlError,
+    due_recipe_rebuild,
+    load_json,
+    validate_plan,
+    write_json,
+)
 
 
 parser = argparse.ArgumentParser()
@@ -32,6 +40,9 @@ try:
     ):
         raise ControlError("completed actions must be an array of strings")
     completed = set(completed_document)
+    # Re-derived from the same capture, recipe commit, and policy the watcher used,
+    # so the investigation can only confirm the rebuild the watcher selected.
+    pending_rebuild = due_recipe_rebuild(args.manifest, ROOT, args.php_bin_head)
     admission = validate_plan(
         load_json(args.plan),
         args.manifest,
@@ -42,9 +53,10 @@ try:
         heads,
         args.policy_digest,
         completed,
+        pending_rebuild,
     )
     write_json(args.output, admission)
     print(json.dumps(admission))
-except (ControlError, OSError) as error:
+except (ControlError, OSError, subprocess.CalledProcessError) as error:
     print(f"plan admission rejected: {error}", file=sys.stderr)
     raise SystemExit(1)

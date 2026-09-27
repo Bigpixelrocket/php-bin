@@ -29,6 +29,14 @@ from ._validation import (
 # A zero patch component is deliberately excluded: `8.6.0` is equally the tag of a
 # `new_branch:8.6` action, so its action key is not derivable from the tag alone.
 RECOVERABLE_RELEASE_TAG_RE = re.compile(r"^(\d+\.\d+\.[1-9]\d*)(?:-([1-9]\d*))?$")
+# A published release tag: a PHP version, plus a rebuild revision when the recipe
+# changed after that version was first published.
+PUBLISHED_RELEASE_TAG_RE = re.compile(r"^((\d+\.\d+)\.\d+)(?:-([1-9]\d*))?$")
+# The publish transaction writes this line into every release's notes, naming the
+# recipe the release was built from. Release notes reach the watcher inside the
+# `php_bin_releases` capture, so the identity survives across runs with no extra state.
+RECIPE_IDENTITY_NOTE_PREFIX = "Recipe identity: "
+RECIPE_IDENTITY_NOTE_RE = re.compile(r"^Recipe identity: (sha256:[0-9a-f]{64})$", re.MULTILINE)
 LEGAL_EVENT_TRANSITIONS = {
     "detected": {"php_bin_ready", "blocked", "needs_human"},
     "php_bin_ready": {"mise_ready", "release_requested", "blocked", "needs_human"},
@@ -170,6 +178,7 @@ EMAIL_ACTION_KEY_PREFIXES = {
     "new_branch": {"new_branch"},
     "branch_eol": {"branch_eol"},
     "repair": {"repair"},
+    "recipe_rebuild": {"recipe_rebuild"},
 }
 
 
@@ -217,6 +226,17 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
             conclusion != "success" or released is True,
             "a successful publish run must retain released transaction state",
         )
+        if released and conclusion == "success" and "-" in version:
+            base = version.split("-")[0]
+            return _email(
+                "rebuild_published",
+                f"PHP {version} rebuild published",
+                f"The rebuild revision PHP {version} for macOS arm64 is live and fresh public "
+                f"installs of it were verified: https://github.com/{repository}/releases/tag/{version}. "
+                f"Earlier PHP {base} releases stay published unchanged, and installs of the plain "
+                f"version {base} now resolve to this revision.",
+                run_url=run_url,
+            )
         if released and conclusion == "success":
             return _email(
                 "release_published",
@@ -285,6 +305,17 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
         "admitted plan action key does not match its action",
     )
     version = action_key.split(":")[1] if ":" in action_key else ""
+    if action == "recipe_rebuild":
+        revision = f"{version}-{action_key.split(':')[2]}"
+        return _email(
+            "recipe_rebuild_started",
+            f"Watcher: PHP {revision} rebuild started",
+            f"The build recipe changed since PHP {version} was last published, so the watcher "
+            f"admitted rebuild revision {revision} ({action_key}). The publish phase was "
+            "dispatched; a separate email confirms publication or reports the failure. Every "
+            f"existing PHP {version} release stays published and unchanged.",
+            run_url=run_url,
+        )
     if action == "no_change":
         return _email(
             "no_change_reviewed",
@@ -429,6 +460,80 @@ def unrecorded_published_release(
     return min(keys, default=None)
 
 
+def recipe_identity_note(identity: str) -> str:
+    """Return the release-notes line that records the recipe a release was built from."""
+    require(bool(SHA256_RE.fullmatch(identity or "")), "recipe identity is not a sha256 digest")
+    return RECIPE_IDENTITY_NOTE_PREFIX + identity
+
+
+def release_recipe_identity(release: dict[str, Any]) -> str | None:
+    """Return the recipe identity a published release records, or None if it records none.
+
+    Releases published before identities were recorded carry none, and neither does a
+    release whose notes were written by hand; both read as built from an unknown recipe.
+    """
+    body = release.get("body")
+    match = RECIPE_IDENTITY_NOTE_RE.search(body) if isinstance(body, str) else None
+    return match.group(1) if match else None
+
+
+def pending_recipe_rebuild(
+    releases: Iterable[dict[str, Any]],
+    recipe_identity: str,
+    maintained_branches: Iterable[str],
+) -> str | None:
+    """Return the action key of the one rebuild revision that is due, or None.
+
+    A published version is due when its newest revision was built from a recipe other
+    than `recipe_identity`, or records no identity at all. The revision is one past the
+    highest published revision of that version, so the key names a tag that cannot
+    exist yet. Only maintained branches are rebuilt: an EOL branch keeps its releases
+    exactly as published. Drafts and prereleases are ignored, so a rebuild whose draft
+    was left by a failed transaction is selected again and resumes that draft.
+
+    Selection is deterministic so the investigation confirms rather than invents it:
+    the newest version of each branch goes first, because that is what branch
+    shorthand installs resolve to, then older versions, newest first. One key is
+    returned per run; later runs rebuild the rest.
+    """
+    require(bool(SHA256_RE.fullmatch(recipe_identity or "")), "recipe identity is not a sha256 digest")
+    maintained = set(maintained_branches)
+    newest: dict[str, tuple[int, dict[str, Any]]] = {}
+    for release in releases:
+        if not isinstance(release, dict) or release.get("draft") or release.get("prerelease"):
+            continue
+        tag = PUBLISHED_RELEASE_TAG_RE.fullmatch(str(release.get("tag_name", "")))
+        if tag is None or tag.group(2) not in maintained:
+            continue
+        revision = int(tag.group(3) or 0)
+        if tag.group(1) not in newest or revision > newest[tag.group(1)][0]:
+            newest[tag.group(1)] = (revision, release)
+
+    def version_key(version: str) -> tuple[int, ...]:
+        return tuple(int(part) for part in version.split("."))
+
+    latest_of_branch: dict[str, str] = {}
+    for version in newest:
+        branch = version.rsplit(".", 1)[0]
+        if branch not in latest_of_branch or version_key(version) > version_key(latest_of_branch[branch]):
+            latest_of_branch[branch] = version
+    due = [
+        version
+        for version, (_revision, release) in newest.items()
+        if release_recipe_identity(release) != recipe_identity
+    ]
+    if not due:
+        return None
+    selected = min(
+        due,
+        key=lambda version: (
+            latest_of_branch[version.rsplit(".", 1)[0]] != version,
+            tuple(-part for part in version_key(version)),
+        ),
+    )
+    return f"recipe_rebuild:{selected}:{newest[selected][0] + 1}"
+
+
 def watch_decision(
     manifest: dict[str, Any],
     previous: dict[str, Any],
@@ -438,7 +543,19 @@ def watch_decision(
     self_evidence_update: bool = False,
     releases: Iterable[dict[str, Any]] = (),
     record_files: Iterable[str] = (),
+    recipe_identity: str | None = None,
+    maintained_branches: Iterable[str] = (),
 ) -> dict[str, Any]:
+    """Choose the wake trigger, and name any deterministic repair or rebuild that is due.
+
+    `recipe_identity` is the identity of the checked-out recipe. When it is supplied,
+    a published release built from any other recipe keeps the watcher awake: the
+    `rebuild_due` trigger calls the model even on a day whose evidence matches the last
+    reviewed snapshot, so a recorded `no_change` can never leave a rebuild pending
+    quietly. The selected key is reported as `rebuildActionKey`, and admission accepts
+    no other rebuild.
+    """
+    releases = list(releases)
     events = list(events)
     incomplete = sorted(
         event.get("actionKey")
@@ -474,6 +591,15 @@ def watch_decision(
         )
     else:
         trigger = "quiet"
+    # An untrustworthy snapshot cannot prove which releases exist, so a rebuild is only
+    # selected once the health guards have passed, exactly like a missing record.
+    rebuild = (
+        pending_recipe_rebuild(releases, recipe_identity, maintained_branches)
+        if recipe_identity is not None and trigger not in {"health_failed", "source_unhealthy"}
+        else None
+    )
+    if rebuild and trigger == "quiet":
+        trigger = "rebuild_due"
     # A missing record outranks every trigger that a trustworthy snapshot can raise, so
     # it is repaired before new work starts. It never changes whether the model is
     # called: the repair is deterministic, but suppressing the investigation would let a
@@ -495,17 +621,18 @@ def watch_decision(
         "incompleteActions": incomplete,
         "action": "record_completed_event" if trigger == "record_missing" else "none",
         "actionKey": unrecorded if trigger == "record_missing" else "",
+        "rebuildActionKey": rebuild or "",
         "modelCall": model_call,
     }
 
 
 # Only these two admitted actions announce themselves before their route runs, and only
-# these three select a release for the publish transaction.
+# these four select a release for the publish transaction.
 WATCH_LIFECYCLE_NOTIFICATION_ACTIONS = frozenset({"new_branch", "branch_eol"})
 # `watch_decision` names a missing event record as its own action. The recovery overlay
 # owns that repair, so it is a route the plan never takes rather than an unrouted one.
 WATCH_RECOVERY_ACTION = "record_completed_event"
-WATCH_PUBLISH_ACTIONS = frozenset({"new_patch", "new_branch", "reconcile_partial"})
+WATCH_PUBLISH_ACTIONS = frozenset({"new_patch", "new_branch", "recipe_rebuild", "reconcile_partial"})
 
 
 def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:

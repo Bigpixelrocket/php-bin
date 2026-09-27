@@ -238,14 +238,20 @@ def fixture_admission_inputs(directory: pathlib.Path, action: str = "new_patch")
     raw.mkdir()
     release_versions = {"new_patch": "8.5.9", "new_branch": "8.6.0"}
     release_version = release_versions.get(action, "8.5.9")
-    body = canonical_json({"release": {"version": release_version, "stable": True}})
+    # A rebuild is evidenced by the published release it supersedes, not by a feed.
+    capture_id = "php_bin_releases" if action == "recipe_rebuild" else "php_release_feed"
+    body = (
+        canonical_json([{"tag_name": release_version, "draft": False, "prerelease": False}])
+        if action == "recipe_rebuild"
+        else canonical_json({"release": {"version": release_version, "stable": True}})
+    )
     (raw / "release.body").write_bytes(body)
     manifest_path = directory / "evidence-manifest.json"
     manifest = {
         "schemaVersion": 1,
         "captures": [
             {
-                "captureId": "php_release_feed",
+                "captureId": capture_id,
                 "digest": sha256_bytes(body),
                 "bodyPath": "raw/release.body",
                 "status": 200,
@@ -257,12 +263,16 @@ def fixture_admission_inputs(directory: pathlib.Path, action: str = "new_patch")
         "new_patch": "new_patch:8.5.9",
         "new_branch": "new_branch:8.6",
         "branch_eol": "branch_eol:8.2:2026-12-31",
+        "recipe_rebuild": "recipe_rebuild:8.5.9:1",
     }
     release_intent = (
         {"version": release_version, "sourceIdentifier": "php_release_feed"}
         if action in {"new_patch", "new_branch"}
+        else {"version": f"{release_version}-1", "sourceIdentifier": "php_bin_releases"}
+        if action == "recipe_rebuild"
         else None
     )
+    no_edit = action in {"new_patch", "recipe_rebuild"}
     plan = {
         "schemaVersion": 1,
         "actionKey": action_keys[action],
@@ -270,10 +280,13 @@ def fixture_admission_inputs(directory: pathlib.Path, action: str = "new_patch")
         "agentContract": {"contractVersion": 1, "instructionDigests": digests},
         "evidence": [
             {
-                "captureId": "php_release_feed",
+                "captureId": capture_id,
                 "digest": sha256_bytes(body),
                 "claim": f"Fixture supports {action}",
-                "locator": {"kind": "json_pointer", "value": "/release/version"},
+                "locator": {
+                    "kind": "json_pointer",
+                    "value": "/0/tag_name" if action == "recipe_rebuild" else "/release/version",
+                },
             }
         ],
         "researchSources": [],
@@ -283,14 +296,14 @@ def fixture_admission_inputs(directory: pathlib.Path, action: str = "new_patch")
             "misePhpHead": "b" * 40,
             "supportPolicyDigest": "sha256:" + "c" * 64,
         },
-        "editsRequired": action != "new_patch",
-        "allowedPaths": {"php-bin": ["expected-modules/*.txt"] if action != "new_patch" else []},
+        "editsRequired": not no_edit,
+        "allowedPaths": {"php-bin": [] if no_edit else ["expected-modules/*.txt"]},
         "requiredChecks": ["Script checks"],
         "releaseIntent": release_intent,
         "agentOperations": [],
         "budgets": {"maxModelCalls": 1, "maxRetries": 1, "timeoutMinutes": 30},
         "notification": {"suggestedSeverity": "info", "summary": "fixture", "humanActionRequired": False},
-        "risk": "routine" if action == "new_patch" else "lifecycle",
+        "risk": "routine" if no_edit else "lifecycle",
         "completionAssessment": assessment(contract, digests),
         "summary": "Evidence-bound fixture.",
     }
@@ -303,6 +316,8 @@ def fixture_admission_inputs(directory: pathlib.Path, action: str = "new_patch")
         "plan": plan,
         "shared": shared,
         "phase": phase,
+        # The watcher's deterministic selection, which a rebuild plan must name exactly.
+        "pendingRebuild": action_keys[action] if action == "recipe_rebuild" else None,
     }
 
 
@@ -317,6 +332,7 @@ def admit_fixture(inputs: dict[str, Any]) -> dict[str, Any]:
         {"phpBinHead": "a" * 40, "misePhpHead": "b" * 40},
         "sha256:" + "c" * 64,
         set(),
+        inputs["pendingRebuild"],
     )
 
 
@@ -410,12 +426,18 @@ class Verifier:
 
     def a04(self, directory: pathlib.Path) -> list[str]:
         actions = {}
-        for action in ("new_patch", "new_branch", "branch_eol"):
+        for action in ("new_patch", "new_branch", "branch_eol", "recipe_rebuild"):
             target = directory / action
             target.mkdir()
             inputs = fixture_admission_inputs(target, action)
             admit_fixture(inputs)
             actions[action] = inputs["plan"]["actionKey"]
+        # The rebuild is selected deterministically, so the agent can only confirm it.
+        for pending in (None, "recipe_rebuild:8.5.9:2"):
+            assert_reject(
+                lambda pending=pending: admit_fixture({**inputs, "pendingRebuild": pending}),
+                "not the selected rebuild",
+            )
         source = control_package_source()
         assert_true(
             not any(item in source for item in FORBIDDEN_CLASSIFIER_MARKERS),

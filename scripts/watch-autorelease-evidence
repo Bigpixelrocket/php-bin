@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
-"""Choose a wake trigger from opaque digests, health, and incomplete state."""
+"""Choose a wake trigger from opaque digests, health, incomplete state, and due rebuilds."""
 
 import argparse
 import json
 import pathlib
+import subprocess
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from autorelease.control import (  # noqa: E402
+    ROOT,
     ControlError,
-    load_capture,
+    captured_php_bin_releases,
+    git,
     load_json,
-    require,
+    recipe_identity,
     validate_evidence_state_record,
+    validate_support_policy,
     watch_decision,
     write_json,
 )
@@ -57,15 +61,10 @@ try:
             previous["manifestDigest"] = matching[0]
     # Only a healthy capture can prove a release; an unhealthy one already decides the
     # run through the source_unhealthy trigger, so its body is never parsed.
-    releases: list[dict] = []
-    capture, body = load_capture(args.manifest, "php_bin_releases")
-    if capture.get("status") == 200:
-        try:
-            published = json.loads(body)
-        except json.JSONDecodeError as error:
-            raise ControlError(f"captured php-bin releases are not valid JSON: {error}") from error
-        require(isinstance(published, list), "captured php-bin releases are not an array")
-        releases = [item for item in published if isinstance(item, dict)]
+    releases = captured_php_bin_releases(args.manifest)
+    # The recipe is the checked-out commit, which is exactly the phpBinHead precondition
+    # the investigation, admission, and the publish transaction are later bound to.
+    head = git(ROOT, "rev-parse", "HEAD").stdout.strip()
     decision = watch_decision(
         manifest,
         previous,
@@ -74,9 +73,11 @@ try:
         self_evidence_update=args.self_evidence_update,
         releases=releases,
         record_files=record_files,
+        recipe_identity=recipe_identity(ROOT, head),
+        maintained_branches=validate_support_policy(ROOT)["maintainedBranches"],
     )
     write_json(args.output, decision)
     print(json.dumps(decision))
-except (ControlError, OSError) as error:
+except (ControlError, OSError, subprocess.CalledProcessError) as error:
     print(f"watch decision rejected: {error}", file=sys.stderr)
     raise SystemExit(1)

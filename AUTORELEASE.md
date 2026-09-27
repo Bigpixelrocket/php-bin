@@ -94,6 +94,39 @@ flowchart TD
   issue --> actions["Actions failure email fallback"]
 ```
 
+## Recipe rebuilds
+
+A published release is immutable, so a recipe change reaches an existing PHP
+version only as a new rebuild revision: `8.5.9-1`, then `8.5.9-2`. The
+watcher, not the model, decides which one is due:
+
+- The *recipe identity* is a SHA-256 over the committed tree entries of
+  `.spc-version`, `expected-modules/`, `patches/`, `scripts/build.sh`,
+  `scripts/lib.sh`, `scripts/package.sh`, and `stages/` at one exact commit
+  (`recipe_identity` in `autorelease/_admission.py`).
+- The publish transaction writes `Recipe identity: sha256:<hex>` into the
+  notes of every release it creates, computed at the exact commit it builds.
+  The notes come back inside the `php_bin_releases` capture, so the identity
+  survives across runs with no extra state.
+- A published version on a maintained branch is *rebuild due* when its newest
+  revision records a different identity, or none. Every release published
+  before identities were recorded is therefore due once.
+- `pending_recipe_rebuild` in `autorelease/_state.py` picks one due version
+  per run: the newest version of each branch first, then older versions,
+  newest first. Its revision is one past the highest published revision.
+  `watch-decision.json` reports it as `rebuildActionKey`, and the `rebuild_due`
+  trigger calls the model even on an otherwise quiet day.
+- Admission re-derives the same selection from the same capture, commit, and
+  policy. A `recipe_rebuild` plan must name exactly that key, set
+  `releaseIntent.version` to `<version>-<n>`, require no edits, allow no paths,
+  and cite the `php_bin_releases` tag it supersedes. A `no_change` plan is
+  rejected while a rebuild is due, so recorded evidence can never leave one
+  pending.
+- The admitted rebuild goes straight to the publish transaction. Each
+  publication changes `php_bin_releases`, so the next run selects the next
+  rebuild until none is due. New patches, new branches, EOL, and
+  reconciliation take priority in the investigation.
+
 ## Unattended lifecycle
 
 Adding or retiring a PHP branch takes zero human input. Nothing in the system
