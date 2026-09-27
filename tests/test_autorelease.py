@@ -1858,6 +1858,26 @@ class AutoreleaseControlTests(unittest.TestCase):
         )
         self.assertIn("needs.build.result == 'failure'", jobs["notify-failure"]["if"])
 
+        # The release job still runs the built binary to verify installs, so
+        # those steps and mise itself may hold no token, and mise may not
+        # restore a cached binary another job could have saved.
+        mise = [step for step in release["steps"] if str(step.get("uses") or "").startswith("jdx/mise-action@")]
+        self.assertEqual([{"github_token": "", "cache": False}], [step.get("with") for step in mise])
+        mise_index = release["steps"].index(mise[0])
+        self.assertEqual(
+            'test -z "${MISE_GITHUB_TOKEN:-}"',
+            release["steps"][mise_index + 1]["run"],
+        )
+        self.assertNotIn("github.token", json.dumps(release.get("env") or {}))
+        binary_steps = [step for step in release["steps"] if "mise exec" in (step.get("run") or "")]
+        self.assertEqual(2, len(binary_steps))
+        for step in binary_steps:
+            self.assertNotIn("github.token", json.dumps(step))
+            self.assertTrue(
+                step["run"].startswith('test -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}${MISE_GITHUB_TOKEN:-}"\n'),
+                step["name"],
+            )
+
     def test_protected_controls_pass_owner_authored_changes_before_bot_exemptions(self):
         # The owner short-circuit must sit after the no-protected-path exit and
         # before the automation exemptions, so it can never widen what a bot

@@ -92,7 +92,9 @@ which anonymous shared runners would lose to rate limits. The release job holds
 the write token, accepts only that job's artifact, and checks its service
 digest, exact file set, and the archive and `SHA256SUMS` digests the build
 reported before any transition. Reconciling an existing release reuses the
-release's own assets and discards the build.
+release's own assets and discards the build. The release job still runs the
+built binary to verify the draft and public installs, so those steps hold no
+token, and its mise setup gets no token and restores no cache.
 
 Validation deliberately runs the repository's own scripts at the sealed model
 commit: `autorelease-implement.yml`, and `autorelease-consumer.yml` in
