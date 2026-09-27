@@ -24,9 +24,9 @@ snapshots of one feed. Each fetch therefore adds a fresh random
 and evidence identity covers only the capture ID, status, and body digest.
 A fetch the CDN still reports as a cache `HIT` fails as an unhealthy capture,
 so the bypass cannot stop working silently.
-Before building, the publish job recaptures all evidence, and every capture the
-plan cites must recapture unchanged. A stable release is the one exception: it
-ignores release feeds that say nothing about its version, meaning other
+Before releasing, the publish job recaptures all evidence, and every capture
+the plan cites must recapture unchanged. A stable release is the one exception:
+it ignores release feeds that say nothing about its version, meaning other
 branches' feeds and, once the plan cites the version's own branch feed, the
 aggregate feed. That branch feed is bound even when uncited, so a release on
 another branch never stops this one, while any change to this branch's feed,
@@ -79,10 +79,20 @@ flowchart TD
 
 The release transaction is the only component allowed to create an annotated
 tag, draft, assets, or publication. It advances one legal state at a time,
-reconciles existing state before acting, never rebuilds under an existing tag,
-and never overwrites, deletes, or retags a published release. A first release
-on a new PHP branch also requires exact-commit `php_bin_ready` and `mise_ready`
-records.
+reconciles existing state before acting, never replaces an existing release's
+assets with a fresh build, and never overwrites, deletes, or retags a published
+release. A first release on a new PHP branch also requires exact-commit
+`php_bin_ready` and `mise_ready` records.
+
+The build never runs beside the write token. StaticPHP resolves most sources
+through the GitHub API and runs third-party build scripts, so the publish
+workflow builds, gates, and packages the exact commit in a separate job whose
+token can only read contents; that token authenticates StaticPHP's API calls,
+which anonymous shared runners would lose to rate limits. The release job holds
+the write token, accepts only that job's artifact, and checks its service
+digest, exact file set, and the archive and `SHA256SUMS` digests the build
+reported before any transition. Reconciling an existing release reuses the
+release's own assets and discards the build.
 
 Validation deliberately runs the repository's own scripts at the sealed model
 commit: `autorelease-implement.yml`, and `autorelease-consumer.yml` in

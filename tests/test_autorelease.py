@@ -1792,6 +1792,72 @@ class AutoreleaseControlTests(unittest.TestCase):
             release.index("Notify owner of completed release"),
         )
 
+    def test_release_build_runs_apart_from_the_write_token(self):
+        # StaticPHP runs third-party build scripts, so it may only run in a job
+        # whose token reads contents, and the write-scoped release job may only
+        # consume that job's artifact after checking what the build reported.
+        from autorelease.verify import load_workflow, workflow_steps
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        document = load_workflow(root / ".github/workflows/autorelease-publish.yml")
+        jobs = document["jobs"]
+        steps = workflow_steps(document)
+        static_php_jobs = {
+            job
+            for job, _, step in steps
+            if re.search(r"scripts/(build|install-spc|install-build-deps|package)\.sh", step.get("run") or "")
+        }
+        self.assertEqual({"build"}, static_php_jobs)
+
+        build = jobs["build"]
+        self.assertEqual({"contents": "read"}, build["permissions"])
+        self.assertNotIn("environment", build)
+        self.assertEqual("preflight", build["needs"])
+        token_steps = []
+        for _, _, step in (entry for entry in steps if entry[0] == "build"):
+            self.assertFalse(str(step.get("uses") or "").startswith("jdx/mise-action@"))
+            if "github.token" in json.dumps(step):
+                token_steps.append(step)
+        self.assertNotIn("github.token", json.dumps(build.get("env") or {}))
+        self.assertEqual([{"GITHUB_TOKEN": "${{ github.token }}"}], [step.get("env") for step in token_steps])
+        self.assertIn("./scripts/build.sh", token_steps[0]["run"])
+
+        for job, _, step in steps:
+            if str(step.get("uses") or "").startswith("actions/checkout@"):
+                self.assertIs(False, step["with"]["persist-credentials"], job)
+
+        release = jobs["release"]
+        self.assertEqual({"preflight", "build"}, set(release["needs"]))
+        self.assertEqual("php-autorelease-publish", release["environment"])
+        self.assertNotIn("if", release)
+        names = [step.get("name") for step in release["steps"]]
+        download = release["steps"][names.index("Download the isolated build")]
+        self.assertEqual(
+            {
+                "artifact-ids": "${{ needs.build.outputs.artifact_id }}",
+                "path": ".artifacts",
+                "digest-mismatch": "error",
+            },
+            download["with"],
+        )
+        verify = release["steps"][names.index("Verify the staged bytes the build reported")]
+        self.assertEqual("${{ needs.build.outputs.archive_digest }}", verify["env"]["ARCHIVE_DIGEST"])
+        self.assertIn('test "sha256:$archive_hex" = "$ARCHIVE_DIGEST"', verify["run"])
+        self.assertIn("validate-autorelease-archive", verify["run"])
+        self.assertLess(
+            names.index("Reconcile existing immutable release assets"),
+            names.index("Require the isolated build"),
+        )
+        self.assertLess(
+            names.index("Require the isolated build"),
+            names.index("Download the isolated build"),
+        )
+        self.assertLess(
+            names.index("Verify the staged bytes the build reported"),
+            names.index("Initialize release transaction and event"),
+        )
+        self.assertIn("needs.build.result == 'failure'", jobs["notify-failure"]["if"])
+
     def test_protected_controls_pass_owner_authored_changes_before_bot_exemptions(self):
         # The owner short-circuit must sit after the no-protected-path exit and
         # before the automation exemptions, so it can never widen what a bot
