@@ -146,6 +146,30 @@ if "$SCRIPT_DIR/package.sh" "$FIXTURE_ROOT/bin/php" 8.4.99 2>/dev/null; then
   exit 1
 fi
 
+# shellcheck source=scripts/lib.sh
+source "$SCRIPT_DIR/lib.sh"
+
+# build.sh receives the publisher's full release tag; a rebuild revision builds
+# the same PHP patch.
+test "$(php_source_version 8.4)" = 8.4
+test "$(php_source_version 8.4.5)" = 8.4.5
+test "$(php_source_version 8.4.5-12)" = 8.4.5
+for target in 8 8.4.5-0 8.4.5-x 8.4.5-1-2; do
+  if php_source_version "$target" > /dev/null 2>&1; then
+    echo "Expected $target to be rejected as a build target." >&2
+    exit 1
+  fi
+done
+
+# The shipped list parses, and a requirement listed after the extension that
+# needs it is rejected, since php.ini lines load in list order.
+read_shared_extensions "$PROJECT_ROOT/stages/s4-shared.txt" > /dev/null
+printf 'demo_off off requires=demo_on\ndemo_on on\n' > "$SCRATCH_DIR/misordered.txt"
+if read_shared_extensions "$SCRATCH_DIR/misordered.txt" > /dev/null 2>&1; then
+  echo "Expected a requirement listed after its dependent to be rejected." >&2
+  exit 1
+fi
+
 (
   cd "$PROJECT_ROOT"
   python3 -m unittest discover -s tests -p 'test_*.py'

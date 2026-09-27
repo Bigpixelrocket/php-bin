@@ -8,18 +8,16 @@ source "$SCRIPT_DIR/lib.sh"
 
 require_macos_arm64
 
-PHP_VERSION="${1:-8.4}"
+# The publisher passes the full release tag, 8.4.5-1 for a rebuild; the build
+# folder keeps that tag, and StaticPHP gets the PHP version without it.
+BUILD_TARGET="${1:-8.4}"
+PHP_VERSION="$(php_source_version "$BUILD_TARGET")"
 STAGE="${2:-s4}"
 STAGE_FILE="$PROJECT_ROOT/stages/$STAGE.txt"
 # Only stages with a companion list build shared extensions; see its header.
 SHARED_FILE="$PROJECT_ROOT/stages/$STAGE-shared.txt"
 SPC_BIN="${SPC_BIN:-$PROJECT_ROOT/.spc/spc}"
-BUILD_DIR="$PROJECT_ROOT/.build/$PHP_VERSION/$STAGE"
-
-if [[ ! "$PHP_VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
-  echo "PHP version must be a major.minor branch or an exact patch version." >&2
-  exit 1
-fi
+BUILD_DIR="$PROJECT_ROOT/.build/$BUILD_TARGET/$STAGE"
 
 require_file "$STAGE_FILE"
 if [[ ! -x "$SPC_BIN" ]]; then
@@ -84,9 +82,11 @@ build-options:
 download-options:
   retry: 5
 EOF
-  if awk -F '\t' '$5 != "-" { found = 1 } END { exit !found }' <<< "$SHARED_ROWS"; then
+  # Stages without a shared list leave SHARED_ROWS empty, which awk still
+  # reads as one blank record; NF skips it.
+  if awk -F '\t' 'NF && $5 != "-" { found = 1 } END { exit !found }' <<< "$SHARED_ROWS"; then
     echo "  custom-url:"
-    awk -F '\t' '$5 != "-" { printf "    - \"%s\"\n", $5 }' <<< "$SHARED_ROWS"
+    awk -F '\t' 'NF && $5 != "-" { printf "    - \"%s\"\n", $5 }' <<< "$SHARED_ROWS"
   fi
   cat <<EOF
 extra-env:
