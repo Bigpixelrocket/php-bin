@@ -50,6 +50,7 @@ from autorelease._admission import (  # noqa: E402
     validate_completion_assessment,
     validate_plan,
     validate_recipe_rebuild_evidence,
+    validate_release_is_newest_patch,
     validate_stable_release_evidence,
     validate_support_policy,
     validate_task_contract,
@@ -59,13 +60,17 @@ from autorelease._evidence import (  # noqa: E402
     BRANCH_FEED_CAPTURE_RE,
     EVIDENCE_CAPTURE_IDS,
     RUNTIME_PLAN_EVIDENCE_IDS,
+    EDGE_CACHE_BYPASS_PARAMETER,
+    STABLE_RELEASE_ACTIONS,
     EvidenceSource,
     RestrictedRedirect,
     branch_feed_capture_id,
     capture_evidence,
+    fetch_url,
     load_capture,
     load_plan_evidence,
     manifest_digest,
+    release_feed_capture_ids,
     validate_capture_id_set,
     validate_evidence_attestation_predicate,
     validate_evidence_state_record,
@@ -191,11 +196,13 @@ def strip_supported_versions_date_presentation(body: bytes) -> bytes:
 # projections exist: the GitHub releases digests must not cover per-asset download
 # counters or draft releases (visible only to some tokens), and the supported-versions
 # digest must not cover the page's renderings of the capture date. None of these carry
-# a release consequence. These are the fixed
+# a release consequence. Every php.net source bypasses the CDN edge cache in front of
+# it, because an edge can serve a snapshot weeks old and the watcher and the publish
+# recapture reach different edges. These are the fixed
 # sources; `evidence_sources` adds the per-branch release feeds the policy selects.
 EVIDENCE_SOURCES = (
-    EvidenceSource("php_supported_versions", "https://www.php.net/supported-versions.php", 2_000_000, normalize=strip_supported_versions_date_presentation),
-    EvidenceSource("php_release_feed", "https://www.php.net/releases/index.php?json", 5_000_000),
+    EvidenceSource("php_supported_versions", "https://www.php.net/supported-versions.php", 2_000_000, normalize=strip_supported_versions_date_presentation, bypass_edge_cache=True),
+    EvidenceSource("php_release_feed", "https://www.php.net/releases/index.php?json", 5_000_000, bypass_edge_cache=True),
     EvidenceSource("php_source_tags", "https://api.github.com/repos/php/php-src/tags?per_page=100", 5_000_000),
     EvidenceSource("php_bin_releases", "https://api.github.com/repos/bigpixelrocket/php-bin/releases?per_page=100", 10_000_000, normalize=project_release_identity),
     EvidenceSource("php_bin_state", "https://api.github.com/repos/bigpixelrocket/php-bin/commits/main", 2_000_000),
@@ -218,6 +225,7 @@ def evidence_sources(maintained_branches: list[str]) -> tuple[EvidenceSource, ..
             branch_feed_capture_id(branch),
             f"https://www.php.net/releases/index.php?json&version={branch}",
             5_000_000,
+            bypass_edge_cache=True,
         )
         for branch in maintained_branches
     )

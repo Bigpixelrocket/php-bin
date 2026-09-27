@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import secrets
 import time
 import urllib.error
 import urllib.parse
@@ -59,6 +60,28 @@ def branch_feed_capture_id(branch: str) -> str:
     return capture_id
 
 
+STABLE_RELEASE_ACTIONS = {"new_patch", "new_branch"}
+# php.net sits behind a CDN that caches every URL, query string included, for
+# hours to 30 days per edge and ignores request cache headers, so two runners can
+# read different snapshots of the same feed. A fresh value for this parameter on
+# every request is a key no edge has cached; a fixed value would only become one
+# more cached key. The manifest records the canonical URL without it.
+EDGE_CACHE_BYPASS_PARAMETER = "autorelease_fetch"
+
+
+def release_feed_capture_ids(version: str) -> set[str]:
+    """Return the captures that can prove one stable PHP version is released.
+
+    Those are the aggregate feed and the version's own branch feed; another branch's
+    feed never proves it. Admission accepts the version only from one of these, and
+    the publish recapture binds exactly these, so the two agree on what proves a
+    release.
+    """
+    match = re.fullmatch(r"(\d+\.\d+)\.\d+", version) if isinstance(version, str) else None
+    require(bool(match), f"stable release version is invalid: {version}")
+    return {"php_release_feed", branch_feed_capture_id(match.group(1))}
+
+
 def validate_capture_id_set(capture_ids: Iterable[Any], label: str) -> None:
     """Require exactly the fixed sources plus any number of per-branch feeds.
 
@@ -95,7 +118,18 @@ def validate_recaptured_evidence(
     admitted_manifest: dict[str, Any],
     current_manifest: dict[str, Any],
 ) -> dict[str, Any]:
-    """Verify cited authoritative captures while allowing runtime-only evidence."""
+    """Verify that the upstream truth a plan was admitted on still holds at publication.
+
+    Every cited authoritative capture must match the admitted manifest. What must
+    also recapture byte-identically depends on the action. A stable release
+    (`new_patch`, `new_branch`) is bound to the release feeds that can prove its
+    version: every cited one, plus the version's own branch feed whenever it was
+    captured, because admission reads that feed to prove no newer patch on the
+    branch supersedes the version. A new release on another branch, or any other
+    cited context, changes nothing about this release, so it no longer stops the
+    publication. Every other action still binds every cited capture. Runtime-only
+    evidence is never recaptured.
+    """
 
     def indexed_captures(manifest: dict[str, Any], label: str) -> dict[str, dict[str, Any]]:
         require(isinstance(manifest, dict), f"{label} evidence manifest must be an object")
@@ -130,7 +164,12 @@ def validate_recaptured_evidence(
     require(set(admitted) == set(current), "recaptured evidence capture set changed")
     evidence = plan.get("evidence")
     require(isinstance(evidence, list) and bool(evidence), "autorelease plan has no evidence")
-    verified = []
+    bound: set[str] | None = None
+    if plan.get("action") in STABLE_RELEASE_ACTIONS:
+        release_intent = plan.get("releaseIntent")
+        require(isinstance(release_intent, dict), "stable release action has no release intent")
+        bound = release_feed_capture_ids(release_intent.get("version"))
+    cited = set()
     for item in evidence:
         require(isinstance(item, dict), "plan evidence entry must be an object")
         capture_id = item.get("captureId")
@@ -140,9 +179,21 @@ def validate_recaptured_evidence(
             continue
         require(capture_id in admitted, f"plan evidence capture is unknown: {capture_id}")
         require(admitted[capture_id]["digest"] == digest, f"admitted evidence digest mismatch: {capture_id}")
-        require(current[capture_id]["digest"] == digest, f"recaptured evidence changed: {capture_id}")
-        verified.append(capture_id)
-    require(bool(verified), "autorelease plan cites no authoritative captured evidence")
+        cited.add(capture_id)
+    require(bool(cited), "autorelease plan cites no authoritative captured evidence")
+    if bound is None:
+        verified = cited
+    else:
+        # The own branch feed is bound even when uncited: the aggregate feed is not
+        # branch-scoped, so it alone cannot show that the branch has moved on.
+        own_branch_feed = bound - {"php_release_feed"}
+        verified = (cited & bound) | (own_branch_feed & set(admitted))
+        require(bool(verified), "stable release cites no release feed that proves its version")
+    for capture_id in sorted(verified):
+        require(
+            current[capture_id]["digest"] == admitted[capture_id]["digest"],
+            f"recaptured evidence changed: {capture_id}",
+        )
     return {"valid": True, "verifiedCaptureIds": sorted(verified)}
 
 
@@ -240,6 +291,22 @@ class EvidenceSource:
     # so volatile fields with no autorelease consequence stay out of evidence
     # identity. None digests the raw bytes unchanged.
     normalize: Callable[[bytes], bytes] | None = None
+    # Fetch past a shared edge cache that could serve a stale snapshot; see
+    # EDGE_CACHE_BYPASS_PARAMETER. Only the fetch changes: `url` stays the
+    # canonical address the manifest records.
+    bypass_edge_cache: bool = False
+
+
+def fetch_url(source: EvidenceSource) -> str:
+    """Return the address to request for one fetch of a source.
+
+    A cache-bypassing source gets a new random parameter value on every call, so
+    each attempt, including a retry, reaches the origin rather than an edge copy.
+    """
+    if not source.bypass_edge_cache:
+        return source.url
+    separator = "&" if urllib.parse.urlparse(source.url).query else "?"
+    return f"{source.url}{separator}{EDGE_CACHE_BYPASS_PARAMETER}={secrets.token_hex(16)}"
 
 
 def capture_evidence(
@@ -251,7 +318,9 @@ def capture_evidence(
 
     The source set is supplied rather than defaulted: which sources are
     authoritative is a reviewed decision that stays in `control`, so this client
-    holds no opinion about where evidence comes from.
+    holds no opinion about where evidence comes from. Each capture records the
+    source's canonical `url`, never the cache-bypassing address actually fetched,
+    and evidence identity (`manifest_digest`) covers no URL at all.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     opener = urllib.request.build_opener(RestrictedRedirect)
@@ -263,15 +332,12 @@ def capture_evidence(
         }
         if token and urllib.parse.urlparse(source.url).hostname == "api.github.com":
             headers["Authorization"] = f"Bearer {token}"
-        request = urllib.request.Request(
-            source.url,
-            headers=headers,
-        )
         last_error: Exception | None = None
         for attempt in range(3):
             if attempt:
                 time.sleep(2**attempt)
             try:
+                request = urllib.request.Request(fetch_url(source), headers=headers)
                 with opener.open(request, timeout=30) as response:
                     body = response.read(source.max_bytes + 1)
                     require(len(body) <= source.max_bytes, f"capture too large: {source.capture_id}")

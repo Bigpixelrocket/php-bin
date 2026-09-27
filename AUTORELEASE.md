@@ -12,7 +12,21 @@ watcher also captures one feed per branch in `support-policy.json`
 (`php_release_feed_<major>.<minor>`), and a new patch on any maintained branch
 is admitted from its own branch feed. The branch set follows the accepted
 policy, so a new or retired branch changes what is captured with no code
-change.
+change. Admission also rejects a `new_patch` or `new_branch` whose version the
+captured branch feed or aggregate feed already supersedes with a later patch on
+the same branch, so an intermediate release never publishes after its
+successor. A php-src tag alone never counts as that later release.
+Every php.net source is fetched past the CDN edge cache in front of php.net.
+That CDN keeps each URL for hours to 30 days per edge and ignores request cache
+headers, so the watcher and the publish job could otherwise read different
+snapshots of one feed. Each fetch therefore adds a fresh random
+`autorelease_fetch` query parameter; the manifest records the canonical URL,
+and evidence identity covers only the capture ID, status, and body digest.
+Before building, the publish job recaptures all evidence. A stable release
+needs only the release feeds that can prove its version to recapture
+unchanged: each one the plan cites, plus the version's own branch feed. A
+release on another branch or other cited context no longer stops it. A
+rebuild still needs every capture it cites to recapture unchanged.
 The GitHub releases captures digest a projected body with per-asset download
 counters and draft releases removed, so public downloads never register as
 changed evidence, and the read-only watcher and the publish job's write token

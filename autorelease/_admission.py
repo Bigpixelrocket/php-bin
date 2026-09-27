@@ -15,7 +15,13 @@ import re
 import subprocess
 from typing import Any
 
-from ._evidence import branch_feed_capture_id, load_plan_evidence
+from ._evidence import (
+    STABLE_RELEASE_ACTIONS,
+    branch_feed_capture_id,
+    load_capture,
+    load_plan_evidence,
+    release_feed_capture_ids,
+)
 from ._validation import (
     ACTION_KEY_RE,
     COMMIT_SHA_RE,
@@ -174,12 +180,11 @@ def validate_stable_release_evidence(
     older maintained branch is proven by that branch's own feed capture. A branch
     capture proves only its own branch: `8.4.26` never resolves from the 8.3 feed.
     """
-    if action not in {"new_patch", "new_branch"}:
+    if action not in STABLE_RELEASE_ACTIONS:
         return
     require(isinstance(release_intent, dict), "stable release action has no release intent")
     version = release_intent.get("version")
-    branch = re.fullmatch(r"(\d+\.\d+)\.\d+", version) if isinstance(version, str) else None
-    feeds = {"php_release_feed"} | ({branch_feed_capture_id(branch.group(1))} if branch else set())
+    feeds = release_feed_capture_ids(version)
     require(
         any(
             item.get("captureId") in feeds and item.get("value") == version
@@ -187,6 +192,56 @@ def validate_stable_release_evidence(
         ),
         "stable release version is not exact evidence in the official PHP release feed",
     )
+
+
+def validate_release_is_newest_patch(
+    action: str,
+    release_intent: dict[str, Any] | None,
+    manifest_path: pathlib.Path,
+) -> None:
+    """Reject a stable release that a captured release feed already supersedes.
+
+    The version's branch feed names the newest release of that branch and the
+    aggregate feed the newest of its major, so either naming a later patch on the
+    same branch makes the proposed version an intermediate one that would publish
+    after its successor. Both feeds are read from the watcher's capture whether or
+    not the plan cites them, so a plan cannot skip the check by citing less. Only
+    official feeds count: a php-src tag can exist before its release and never
+    supersedes one. The check rejects only on contrary evidence; a feed that is
+    missing, unhealthy, unreadable, or names another branch leaves the decision to
+    the proof requirement in `validate_stable_release_evidence`.
+    """
+    if action not in STABLE_RELEASE_ACTIONS:
+        return
+    require(isinstance(release_intent, dict), "stable release action has no release intent")
+    version = release_intent.get("version")
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version) if isinstance(version, str) else None
+    require(bool(match), f"stable release version is invalid: {version}")
+    major, minor, patch = match.groups()
+    manifest = load_json(manifest_path)
+    captures = manifest.get("captures") if isinstance(manifest, dict) else None
+    require(isinstance(captures, list), "evidence manifest captures must be an array")
+    healthy = {
+        capture.get("captureId")
+        for capture in captures
+        if isinstance(capture, dict) and capture.get("status") == 200
+    }
+    for capture_id, pointer in (
+        (branch_feed_capture_id(f"{major}.{minor}"), "/version"),
+        ("php_release_feed", f"/{major}/version"),
+    ):
+        if capture_id not in healthy:
+            continue
+        _capture, body = load_capture(manifest_path, capture_id)
+        try:
+            newest = resolve_json_pointer(json.loads(body), pointer)
+        except (UnicodeDecodeError, json.JSONDecodeError, ControlError):
+            continue
+        same_branch = re.fullmatch(rf"{major}\.{minor}\.(\d+)", newest) if isinstance(newest, str) else None
+        require(
+            not same_branch or int(same_branch.group(1)) <= int(patch),
+            f"stable release {version} is superseded by {newest} in {capture_id}",
+        )
 
 
 def validate_recipe_rebuild_evidence(
@@ -512,6 +567,7 @@ def _validate_plan_actions(
             "prerelease intent is forbidden",
         )
     validate_stable_release_evidence(plan.get("action", ""), release_intent, resolved_evidence)
+    validate_release_is_newest_patch(plan.get("action", ""), release_intent, manifest_path)
     validate_recipe_rebuild_evidence(plan.get("action", ""), plan.get("actionKey", ""), resolved_evidence)
     operations = plan.get("agentOperations")
     require(isinstance(operations, list), "agentOperations must be an array")
