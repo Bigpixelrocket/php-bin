@@ -27,6 +27,7 @@ import pathlib
 import re
 import subprocess
 import sys
+from typing import Any
 
 # Workflows run this file directly (`./autorelease/control.py <command>`), where only
 # the autorelease directory is on the import path, while the scripts, verify.py, and
@@ -38,14 +39,17 @@ if __package__ in {None, ""}:
 
 from autorelease._admission import (  # noqa: E402
     PROHIBITED_AGENT_AUTHORITY,
+    RECIPE_INPUT_PATHS,
     REQUIRED_PLAN_CHECKS,
     _validate_plan_shape,
     _validate_support_policy_document,
     changed_paths,
     git,
+    recipe_identity,
     seal_patch,
     validate_completion_assessment,
     validate_plan,
+    validate_recipe_rebuild_evidence,
     validate_stable_release_evidence,
     validate_support_policy,
     validate_task_contract,
@@ -71,6 +75,8 @@ from autorelease._state import (  # noqa: E402
     ACTION_FILENAME_MAP,
     LEGAL_EVENT_TRANSITIONS,
     LEGAL_RELEASE_TRANSITIONS,
+    PUBLISHED_RELEASE_TAG_RE,
+    RECIPE_IDENTITY_NOTE_RE,
     RECOVERABLE_RELEASE_TAG_RE,
     WATCH_LIFECYCLE_NOTIFICATION_ACTIONS,
     WATCH_PUBLISH_ACTIONS,
@@ -81,6 +87,9 @@ from autorelease._state import (  # noqa: E402
     email_fallback,
     mutation_allowed,
     notification_decision,
+    pending_recipe_rebuild,
+    recipe_identity_note,
+    release_recipe_identity,
     release_transition,
     retained_notification_issue,
     retry_decision,
@@ -118,18 +127,21 @@ from autorelease._validation import (  # noqa: E402
 )
 
 
-def strip_release_download_counts(body: bytes) -> bytes:
+def project_release_identity(body: bytes) -> bytes:
     """Project a GitHub releases capture to its release identity.
 
     Per-asset download counters move whenever anyone fetches a published
-    artifact, so a digest that covers them wakes the watcher — and can break a
-    mid-transaction recapture — with no release consequence. The projection
-    drops only `assets[].download_count`; every other field stays covered by
-    the digest, and the capture client retains the unprojected bytes beside
-    the digested body. A body that is not a GitHub releases array is returned
-    unchanged so an unexpected source format still registers as changed
-    evidence. This projects identity only: classifying lifecycle state from a
-    body remains forbidden (verify.py check A11).
+    artifact, so a digest that covers them wakes the watcher, and can break a
+    mid-transaction recapture, with no release consequence. Draft releases are
+    listed only to a token with push access, so the read-only watcher never sees
+    one while the publish job's write token does; covering them would make every
+    recapture fail while a draft exists, including the draft a rebuild resumes.
+    The projection drops only `assets[].download_count` and draft entries; every
+    other field stays covered by the digest, and the capture client retains the
+    unprojected bytes beside the digested body. A body that is not a GitHub
+    releases array is returned unchanged so an unexpected source format still
+    registers as changed evidence. This projects identity only: classifying
+    lifecycle state from a body remains forbidden (verify.py check A11).
     """
     try:
         releases = json.loads(body)
@@ -137,6 +149,9 @@ def strip_release_download_counts(body: bytes) -> bytes:
         return body
     if not isinstance(releases, list):
         return body
+    releases = [
+        release for release in releases if not (isinstance(release, dict) and release.get("draft") is True)
+    ]
     for release in releases:
         if not isinstance(release, dict):
             continue
@@ -174,16 +189,17 @@ def strip_supported_versions_date_presentation(body: bytes) -> bytes:
 # verify.py check A11 reads this file to prove the raw sources are still fetched as
 # opaque bytes and never classified into lifecycle state. Two reviewed identity
 # projections exist: the GitHub releases digests must not cover per-asset download
-# counters, and the supported-versions digest must not cover the page's renderings of
-# the capture date. Both change without any release consequence. These are the fixed
+# counters or draft releases (visible only to some tokens), and the supported-versions
+# digest must not cover the page's renderings of the capture date. None of these carry
+# a release consequence. These are the fixed
 # sources; `evidence_sources` adds the per-branch release feeds the policy selects.
 EVIDENCE_SOURCES = (
     EvidenceSource("php_supported_versions", "https://www.php.net/supported-versions.php", 2_000_000, normalize=strip_supported_versions_date_presentation),
     EvidenceSource("php_release_feed", "https://www.php.net/releases/index.php?json", 5_000_000),
     EvidenceSource("php_source_tags", "https://api.github.com/repos/php/php-src/tags?per_page=100", 5_000_000),
-    EvidenceSource("php_bin_releases", "https://api.github.com/repos/bigpixelrocket/php-bin/releases?per_page=100", 10_000_000, normalize=strip_release_download_counts),
+    EvidenceSource("php_bin_releases", "https://api.github.com/repos/bigpixelrocket/php-bin/releases?per_page=100", 10_000_000, normalize=project_release_identity),
     EvidenceSource("php_bin_state", "https://api.github.com/repos/bigpixelrocket/php-bin/commits/main", 2_000_000),
-    EvidenceSource("mise_php_releases", "https://api.github.com/repos/bigpixelrocket/mise-php/releases?per_page=100", 10_000_000, normalize=strip_release_download_counts),
+    EvidenceSource("mise_php_releases", "https://api.github.com/repos/bigpixelrocket/mise-php/releases?per_page=100", 10_000_000, normalize=project_release_identity),
     EvidenceSource("mise_php_state", "https://api.github.com/repos/bigpixelrocket/mise-php/commits/main", 2_000_000),
 )
 
@@ -220,6 +236,47 @@ def cli_flag(value: str, name: str) -> bool:
 def cli_error(error: Exception) -> int:
     print(f"autorelease control rejected input: {error}", file=sys.stderr)
     return 1
+
+
+def captured_php_bin_releases(manifest_path: pathlib.Path) -> list[dict[str, Any]]:
+    """Return the php-bin releases a healthy capture lists, or none from an unhealthy one.
+
+    An unhealthy capture already decides the run through the `source_unhealthy`
+    trigger, so its body is never parsed.
+    """
+    capture, body = load_capture(manifest_path, "php_bin_releases")
+    if capture.get("status") != 200:
+        return []
+    try:
+        published = json.loads(body)
+    except json.JSONDecodeError as error:
+        raise ControlError(f"captured php-bin releases are not valid JSON: {error}") from error
+    require(isinstance(published, list), "captured php-bin releases are not an array")
+    return [item for item in published if isinstance(item, dict)]
+
+
+def recipe_identities(root: pathlib.Path, commit: str) -> dict[str, str]:
+    """Map every maintained branch in the accepted policy to its recipe identity at `commit`."""
+    return {
+        branch: recipe_identity(root, commit, branch)
+        for branch in validate_support_policy(root)["maintainedBranches"]
+    }
+
+
+def due_recipe_rebuild(manifest_path: pathlib.Path, root: pathlib.Path, commit: str) -> str | None:
+    """Select the rebuild due for a capture and one exact recipe commit.
+
+    Admission calls this with the same capture, commit, and accepted policy the watcher
+    used, so it re-derives the selection instead of trusting it. Like the watcher, it
+    selects nothing from a capture with any unhealthy source: that run is decided by
+    `source_unhealthy`, and its publication would fail recapture anyway.
+    """
+    manifest = load_json(manifest_path)
+    captures = manifest.get("captures") if isinstance(manifest, dict) else None
+    require(isinstance(captures, list), "evidence manifest captures must be an array")
+    if any(not isinstance(capture, dict) or capture.get("status") != 200 for capture in captures):
+        return None
+    return pending_recipe_rebuild(captured_php_bin_releases(manifest_path), recipe_identities(root, commit))
 
 
 def main(argv: list[str] | None = None) -> int:

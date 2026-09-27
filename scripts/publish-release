@@ -10,9 +10,14 @@ import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from autorelease.control import (  # noqa: E402
+    ROOT,
     ControlError,
     LEGAL_RELEASE_TRANSITIONS,
+    PUBLISHED_RELEASE_TAG_RE,
     load_json,
+    recipe_identity,
+    recipe_identity_note,
+    release_recipe_identity,
     release_transition,
     sha256_file,
     validate_archive,
@@ -98,8 +103,18 @@ def github_effect(
                 object_sha = tag["object"]["sha"]
             if object_sha != commit:
                 raise ControlError("existing tag does not point to the admitted commit")
+        # The watcher reads the recipe identity back from the published notes to
+        # decide whether this version needs a rebuild revision.
+        release_tag = PUBLISHED_RELEASE_TAG_RE.fullmatch(version)
+        if release_tag is None:
+            raise ControlError(f"release version is not a PHP version: {version}")
+        identity = recipe_identity(ROOT, commit, release_tag.group(2))
+        notes = (
+            "Autorelease publication. Asset digests are recorded in SHA256SUMS.\n\n"
+            + recipe_identity_note(identity)
+        )
         existing = subprocess.run(
-            ["gh", "release", "view", version, "--repo", repo, "--json", "isDraft,tagName"],
+            ["gh", "release", "view", version, "--repo", repo, "--json", "isDraft,tagName,body"],
             check=False,
             text=True,
             stdout=subprocess.PIPE,
@@ -108,8 +123,12 @@ def github_effect(
         if existing.returncode == 0:
             # A matching published release is a recoverable partial transaction.
             # Later verification downloads it and proves every byte before the
-            # idempotent publish transition is accepted.
-            json.loads(existing.stdout)
+            # idempotent publish transition is accepted. A resumed draft still has
+            # editable notes, so it gains the identity it would otherwise publish
+            # without; a missing identity would only select the version for rebuild.
+            release = json.loads(existing.stdout)
+            if release.get("isDraft") and release_recipe_identity(release) != identity:
+                gh("release", "edit", version, "--repo", repo, "--notes", notes, capture=False)
         else:
             gh(
                 "release",
@@ -121,7 +140,7 @@ def github_effect(
                 "--title",
                 f"PHP {version} for macOS arm64",
                 "--notes",
-                "Autorelease publication. Asset digests are recorded in SHA256SUMS.",
+                notes,
                 "--draft",
                 "--verify-tag",
                 capture=False,
@@ -148,30 +167,36 @@ def github_effect(
             gh("release", "edit", version, "--repo", repo, "--draft=false", capture=False)
 
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--transaction", type=pathlib.Path, required=True)
-parser.add_argument("--target", required=True)
-parser.add_argument("--assets", type=pathlib.Path, required=True)
-parser.add_argument("--version", required=True)
-parser.add_argument("--commit", required=True)
-parser.add_argument("--backend", choices=["filesystem", "github"], default="filesystem")
-parser.add_argument("--repo", default="bigpixelrocket/php-bin")
-parser.add_argument("--output", type=pathlib.Path, required=True)
-args = parser.parse_args()
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--transaction", type=pathlib.Path, required=True)
+    parser.add_argument("--target", required=True)
+    parser.add_argument("--assets", type=pathlib.Path, required=True)
+    parser.add_argument("--version", required=True)
+    parser.add_argument("--commit", required=True)
+    parser.add_argument("--backend", choices=["filesystem", "github"], default="filesystem")
+    parser.add_argument("--repo", default="bigpixelrocket/php-bin")
+    parser.add_argument("--output", type=pathlib.Path, required=True)
+    args = parser.parse_args()
 
-try:
-    transaction = load_json(args.transaction)
-    if LEGAL_RELEASE_TRANSITIONS.get(transaction.get("state", "requested")) != args.target:
-        raise ControlError("target is not the single legal next transition")
-    digests = expected_assets(args.assets, args.version)
-    if args.backend == "github":
-        github_effect(args.target, args.repo, args.version, args.commit, args.assets, digests)
-    updated = release_transition(transaction, args.target, args.assets, digests)
-    updated["version"] = args.version
-    updated["commit"] = args.commit
-    write_json(args.output, updated)
-    print(json.dumps(updated))
-except (ControlError, OSError, subprocess.CalledProcessError) as error:
-    detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) and error.stderr else str(error)
-    print(f"release transition rejected: {detail}", file=sys.stderr)
-    raise SystemExit(1)
+    try:
+        transaction = load_json(args.transaction)
+        if LEGAL_RELEASE_TRANSITIONS.get(transaction.get("state", "requested")) != args.target:
+            raise ControlError("target is not the single legal next transition")
+        digests = expected_assets(args.assets, args.version)
+        if args.backend == "github":
+            github_effect(args.target, args.repo, args.version, args.commit, args.assets, digests)
+        updated = release_transition(transaction, args.target, args.assets, digests)
+        updated["version"] = args.version
+        updated["commit"] = args.commit
+        write_json(args.output, updated)
+        print(json.dumps(updated))
+        return 0
+    except (ControlError, OSError, subprocess.CalledProcessError) as error:
+        detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) and error.stderr else str(error)
+        print(f"release transition rejected: {detail}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -99,3 +99,18 @@ plan evidence array, `preconditions.phpBinHead`, `preconditions.misePhpHead`,
 `preconditions.supportPolicyDigest`, or `researchSources[N]` for an item in the
 research source array. Put explanations in the criterion status or plan summary,
 not in an evidence-reference array.
+
+A `recipe_rebuild` republishes an already published PHP version, built from
+the current recipe, as a new revision tag. The watcher selects it
+deterministically, so confirm it and never invent, reorder, or skip one:
+`watch-decision.json` field `rebuildActionKey` names the one rebuild that is
+due (empty when every maintained release was built from the current recipe),
+and admission rejects any other rebuild key. Reconciling an incomplete
+record, `new_branch`, `branch_eol`, and `new_patch` all take priority; propose
+the rebuild only when none of them is due. For `recipe_rebuild:<version>:<n>`,
+set `releaseIntent.version` to `<version>-<n>`, `editsRequired` to false, both
+`allowedPaths` arrays empty, and cite the `php_bin_releases` JSON pointer to
+the `tag_name` of the release being superseded: `<version>` when `<n>` is 1,
+otherwise `<version>-<n-1>`. While `rebuildActionKey` is non-empty, `no_change`
+is never correct: admission rejects it, because recording the evidence as
+unchanged would leave the rebuild pending.

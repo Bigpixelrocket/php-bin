@@ -14,12 +14,21 @@ from autorelease.control import (
     ACTION_KEY_RE,
     COMPLETION_EVIDENCE_REF_RE,
     EVIDENCE_SOURCES,
+    RECIPE_INPUT_PATHS,
+    ROOT,
     ControlError,
     EvidenceSource,
     _validate_plan_shape,
     action_filename,
     canonical_json,
     capture_evidence,
+    due_recipe_rebuild,
+    git,
+    pending_recipe_rebuild,
+    recipe_identity,
+    recipe_identity_note,
+    release_recipe_identity,
+    validate_recipe_rebuild_evidence,
     email_digest,
     email_fallback,
     evidence_sources,
@@ -34,7 +43,7 @@ from autorelease.control import (
     seal_patch,
     sha256_bytes,
     sha256_file,
-    strip_release_download_counts,
+    project_release_identity,
     strip_supported_versions_date_presentation,
     transition_event,
     validate_archive,
@@ -167,15 +176,27 @@ class AutoreleaseControlTests(unittest.TestCase):
             ).encode()
 
         self.assertEqual(
-            strip_release_download_counts(releases(20, 9)),
-            strip_release_download_counts(releases(21, 10)),
+            project_release_identity(releases(20, 9)),
+            project_release_identity(releases(21, 10)),
         )
         self.assertNotEqual(
-            strip_release_download_counts(releases(20, 9)),
-            strip_release_download_counts(releases(20, 9).replace(b"8.5.9", b"8.5.10")),
+            project_release_identity(releases(20, 9)),
+            project_release_identity(releases(20, 9).replace(b"8.5.9", b"8.5.10")),
         )
         for body in (b"<html>service unavailable</html>", b'{"message": "API rate limit exceeded"}'):
-            self.assertEqual(body, strip_release_download_counts(body))
+            self.assertEqual(body, project_release_identity(body))
+        # Drafts are listed only to a token with push access, so the watcher and the
+        # publish job's recapture digest the same list whether or not one exists.
+        published = json.loads(releases(20, 9))
+        draft = {"tag_name": "8.5.9-1", "draft": True, "assets": []}
+        self.assertEqual(
+            project_release_identity(canonical_json(published)),
+            project_release_identity(canonical_json([draft, *published])),
+        )
+        self.assertNotEqual(
+            project_release_identity(canonical_json(published)),
+            project_release_identity(canonical_json([{**draft, "draft": False}, *published])),
+        )
 
     def test_only_reviewed_sources_carry_identity_projections(self):
         projected = {
@@ -286,7 +307,7 @@ class AutoreleaseControlTests(unittest.TestCase):
             "php_bin_releases",
             "https://api.github.com/repos/bigpixelrocket/php-bin/releases?per_page=100",
             1_000_000,
-            normalize=strip_release_download_counts,
+            normalize=project_release_identity,
         )
         with tempfile.TemporaryDirectory() as tmp:
             output = pathlib.Path(tmp)
@@ -372,6 +393,295 @@ class AutoreleaseControlTests(unittest.TestCase):
             releases=[*releases, {"tag_name": "8.5.9-2", "draft": False, "prerelease": False, "immutable": True}],
         )
         self.assertEqual("recipe_rebuild:8.5.9:2", rebuild["actionKey"])
+        # A revision makes a zero patch unambiguous; the plain `8.6.0` stays unrecoverable.
+        branch_rebuild = watch_decision(
+            manifest,
+            manifest,
+            [*events, {"actionKey": "new_patch:8.5.9", "state": "complete"}],
+            {"healthy": True},
+            releases=[*releases, {"tag_name": "8.6.0-1", "draft": False, "prerelease": False, "immutable": True}],
+        )
+        self.assertEqual("recipe_rebuild:8.6.0:1", branch_rebuild["actionKey"])
+
+    @staticmethod
+    def _published(tag, identity=None, **fields):
+        body = "Autorelease publication." + (f"\n\n{recipe_identity_note(identity)}" if identity else "")
+        return {"tag_name": tag, "draft": False, "prerelease": False, "immutable": True, "body": body, **fields}
+
+    def test_recipe_identity_covers_only_committed_recipe_inputs_of_its_branch(self):
+        def commit(repo, files, message):
+            for name, text in files.items():
+                (repo / name).parent.mkdir(parents=True, exist_ok=True)
+                (repo / name).write_text(text)
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", message], cwd=repo, check=True)
+            return git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = pathlib.Path(temporary)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.name", "Fixture"], cwd=repo, check=True)
+            subprocess.run(["git", "config", "user.email", "fixture@invalid"], cwd=repo, check=True)
+            base = commit(
+                repo,
+                {
+                    "stages/s4.txt": "redis\n",
+                    "scripts/build.sh": "build\n",
+                    "expected-modules/8.4.txt": "Core\n",
+                    "expected-modules/8.5.txt": "Core\n",
+                    "NOTICE": "notice\n",
+                    "README.md": "readme\n",
+                },
+                "recipe",
+            )
+            identity = recipe_identity(repo, base, "8.5")
+            # Unrelated paths and uncommitted build output never change the identity.
+            docs = commit(repo, {"README.md": "changed\n"}, "docs")
+            (repo / "stages/s4.txt").write_text("dirty working tree\n")
+            self.assertEqual(identity, recipe_identity(repo, docs, "8.5"))
+            subprocess.run(["git", "checkout", "-q", "--", "stages/s4.txt"], cwd=repo, check=True)
+            # Another branch's module list, or a new branch, leaves this branch's identity alone.
+            other = commit(repo, {"expected-modules/8.4.txt": "Core\nredis\n", "expected-modules/8.6.txt": "Core\n"}, "other branches")
+            self.assertEqual(identity, recipe_identity(repo, other, "8.5"))
+            self.assertNotEqual(recipe_identity(repo, base, "8.4"), recipe_identity(repo, other, "8.4"))
+            own = commit(repo, {"expected-modules/8.5.txt": "Core\nredis\n"}, "own modules")
+            self.assertNotEqual(identity, recipe_identity(repo, own, "8.5"))
+            # Shared inputs, including the files copied into every archive, change every branch.
+            notice = commit(repo, {"NOTICE": "changed notice\n"}, "notice")
+            self.assertNotEqual(recipe_identity(repo, own, "8.4"), recipe_identity(repo, notice, "8.4"))
+            recipe = commit(repo, {"stages/s4.txt": "redis\nyaml\n"}, "recipe change")
+            self.assertNotEqual(recipe_identity(repo, notice, "8.5"), recipe_identity(repo, recipe, "8.5"))
+            self.assertEqual(identity, recipe_identity(repo, base, "8.5"))
+            with self.assertRaisesRegex(ControlError, "exact commit SHA"):
+                recipe_identity(repo, "HEAD", "8.5")
+            with self.assertRaisesRegex(ControlError, "recipe branch is invalid"):
+                recipe_identity(repo, base, "8.5/../..")
+        for path in (".spc-sha256", ".spc-version", "LICENSE", "NOTICE", "stages", "scripts/install-spc.sh"):
+            self.assertIn(path, RECIPE_INPUT_PATHS)
+        # Each branch covers only its own module list, never the whole directory.
+        self.assertNotIn("expected-modules", RECIPE_INPUT_PATHS)
+
+    def test_recipe_identity_note_round_trips_through_release_notes(self):
+        identity = "sha256:" + "a" * 64
+        notes = "Autorelease publication.\n\n" + recipe_identity_note(identity)
+        self.assertEqual(identity, release_recipe_identity({"body": notes}))
+        # Notes saved from the GitHub web interface use CRLF line endings.
+        self.assertEqual(identity, release_recipe_identity({"body": notes.replace("\n", "\r\n") + "\r\n"}))
+        for body in (None, "", "Autorelease publication.", "Recipe identity: sha256:short", 7):
+            self.assertIsNone(release_recipe_identity({"body": body}), body)
+        with self.assertRaises(ControlError):
+            recipe_identity_note("sha256:short")
+    def test_publisher_records_the_recipe_identity_on_new_and_resumed_drafts(self):
+        namespace = runpy.run_path(
+            str(pathlib.Path(__file__).resolve().parents[1] / "scripts/publish-release"),
+            run_name="publish_release_fixture",
+        )
+        github_effect = namespace["github_effect"]
+        identity = "sha256:" + "a" * 64
+        commit = "c" * 40
+        tag_ref = json.dumps({"object": {"type": "commit", "sha": commit}})
+
+        def effect(existing):
+            calls = []
+
+            def gh(*arguments, capture=True):
+                calls.append(arguments)
+                return ""
+
+            def run(argv, **_kwargs):
+                if argv[:3] == ["gh", "api", "repos/o/r/git/ref/tags/8.5.9-1"]:
+                    return mock.Mock(returncode=0, stdout=tag_ref)
+                if existing is None:
+                    return mock.Mock(returncode=1, stdout="")
+                return mock.Mock(returncode=0, stdout=json.dumps(existing))
+
+            with mock.patch.dict(
+                github_effect.__globals__,
+                {"gh": gh, "recipe_identity": lambda root, sha, branch: identity if branch == "8.5" else None},
+            ), mock.patch.object(github_effect.__globals__["subprocess"], "run", side_effect=run):
+                github_effect("draft_created", "o/r", "8.5.9-1", commit, pathlib.Path("assets"), {"SHA256SUMS": identity})
+            return calls
+
+        created = effect(None)
+        self.assertEqual("create", created[0][1])
+        self.assertIn(recipe_identity_note(identity), created[0][created[0].index("--notes") + 1])
+        # A draft left by an earlier attempt without the identity gains it before publication.
+        edited = effect({"isDraft": True, "body": "Autorelease publication."})
+        self.assertEqual(("release", "edit", "8.5.9-1"), edited[0][:3])
+        self.assertIn(recipe_identity_note(identity), edited[0][edited[0].index("--notes") + 1])
+        self.assertEqual([], effect({"isDraft": True, "body": recipe_identity_note(identity)}))
+        # A published release is immutable and is never edited.
+        self.assertEqual([], effect({"isDraft": False, "body": "Autorelease publication."}))
+
+    def test_rebuild_selection_is_deterministic_and_covers_every_published_version(self):
+        current = "sha256:" + "c" * 64
+        # The releases published before recipe identities existed record none.
+        releases = [
+            self._published(tag)
+            for tag in ("8.5.11", "8.5.10", "8.5.9", "8.5.8", "8.4.23", "8.3.32", "8.2.32")
+        ]
+        maintained = ["8.2", "8.3", "8.4", "8.5"]
+        order = []
+        while key := pending_recipe_rebuild(releases, dict.fromkeys(maintained, current)):
+            order.append(key)
+            _prefix, version, revision = key.split(":")
+            releases.append(self._published(f"{version}-{revision}", current))
+            self.assertLess(len(order), 10, "selection never converged")
+        # Each branch's newest version first, since branch shorthand resolves to it.
+        self.assertEqual(
+            [
+                "recipe_rebuild:8.5.11:1",
+                "recipe_rebuild:8.4.23:1",
+                "recipe_rebuild:8.3.32:1",
+                "recipe_rebuild:8.2.32:1",
+                "recipe_rebuild:8.5.10:1",
+                "recipe_rebuild:8.5.9:1",
+                "recipe_rebuild:8.5.8:1",
+            ],
+            order,
+        )
+        # A later recipe change makes the newest revision due again, one revision on.
+        changed = "sha256:" + "d" * 64
+        self.assertEqual("recipe_rebuild:8.5.11:2", pending_recipe_rebuild(releases, dict.fromkeys(maintained, changed)))
+        # A change to one branch's recipe rebuilds only that branch.
+        self.assertEqual(
+            "recipe_rebuild:8.4.23:2",
+            pending_recipe_rebuild(releases, {**dict.fromkeys(maintained, current), "8.4": changed}),
+        )
+        # A patch published by the current recipe needs no rebuild.
+        fresh = [self._published("8.4.26", current), self._published("8.4.23")]
+        self.assertEqual("recipe_rebuild:8.4.23:1", pending_recipe_rebuild(fresh, {"8.4": current}))
+        self.assertIsNone(pending_recipe_rebuild(fresh[:1], {"8.4": current}))
+        # Drafts and prereleases never count: a rebuild whose draft a failed transaction
+        # left behind is selected again, and the transaction resumes that draft.
+        draft = [self._published("8.4.26", current), self._published("8.4.23"), self._published("8.4.23-1", current, draft=True)]
+        self.assertEqual("recipe_rebuild:8.4.23:1", pending_recipe_rebuild(draft, {"8.4": current}))
+        prerelease = [self._published("8.4.23-1", current, prerelease=True), self._published("8.4.23")]
+        self.assertEqual("recipe_rebuild:8.4.23:1", pending_recipe_rebuild(prerelease, {"8.4": current}))
+        # An EOL branch keeps its releases exactly as published.
+        self.assertIsNone(pending_recipe_rebuild([self._published("8.1.33")], dict.fromkeys(maintained, current)))
+        for malformed in ("8.5.9-0", "8.5.9-rc1", "v8.5.9", "8.5"):
+            self.assertIsNone(pending_recipe_rebuild([self._published(malformed)], dict.fromkeys(maintained, current)))
+        with self.assertRaises(ControlError):
+            pending_recipe_rebuild(releases, dict.fromkeys(maintained, "sha256:short"))
+
+    def test_due_rebuild_keeps_the_watcher_awake_until_it_is_published(self):
+        manifest = self._releases_manifest()
+        current = "sha256:" + "c" * 64
+        releases = [self._published("8.5.11"), self._published("8.4.26", current)]
+        events = [{"actionKey": "new_patch:8.5.11", "state": "complete"}, {"actionKey": "new_patch:8.4.26", "state": "complete"}]
+        decision = watch_decision(
+            manifest, manifest, events, {"healthy": True},
+            releases=releases, recipe_identities=dict.fromkeys(["8.4", "8.5"], current),
+        )
+        self.assertEqual("rebuild_due", decision["trigger"])
+        self.assertTrue(decision["modelCall"])
+        self.assertEqual("recipe_rebuild:8.5.11:1", decision["rebuildActionKey"])
+        self.assertEqual("none", decision["action"])
+        # Recording a no_change snapshot is exactly the self-update that would otherwise
+        # be quiet; a pending rebuild still wakes the model.
+        self_update = watch_decision(
+            manifest, manifest, events, {"healthy": True}, self_evidence_update=True,
+            releases=releases, recipe_identities=dict.fromkeys(["8.4", "8.5"], current),
+        )
+        self.assertEqual("rebuild_due", self_update["trigger"])
+        # Changed evidence keeps its own trigger and still reports the rebuild.
+        moved = watch_decision(
+            {**manifest, "manifestDigest": "sha256:" + "e" * 64}, manifest, events, {"healthy": True},
+            releases=releases, recipe_identities=dict.fromkeys(["8.4", "8.5"], current),
+        )
+        self.assertEqual(("evidence_changed", "recipe_rebuild:8.5.11:1"), (moved["trigger"], moved["rebuildActionKey"]))
+        published = [*releases, self._published("8.5.11-1", current)]
+        quiet = watch_decision(
+            manifest, manifest, [*events, {"actionKey": "recipe_rebuild:8.5.11:1", "state": "complete"}],
+            {"healthy": True}, releases=published, recipe_identities=dict.fromkeys(["8.4", "8.5"], current),
+        )
+        self.assertEqual(("quiet", False, ""), (quiet["trigger"], quiet["modelCall"], quiet["rebuildActionKey"]))
+        unhealthy = self._releases_manifest(status=500)
+        self.assertEqual(
+            "",
+            watch_decision(
+                unhealthy, unhealthy, events, {"healthy": True},
+                releases=releases, recipe_identities={"8.5": current},
+            )["rebuildActionKey"],
+        )
+
+    def test_rebuild_admission_binds_the_deterministic_selection(self):
+        key = "recipe_rebuild:8.5.9:2"
+        plan = {
+            "schemaVersion": 1,
+            "action": "recipe_rebuild",
+            "actionKey": key,
+            "editsRequired": False,
+            "allowedPaths": {"php-bin": [], "mise-php": []},
+            "releaseIntent": {"version": "8.5.9-2", "sourceIdentifier": "php_bin_releases"},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = pathlib.Path(tmp) / "evidence-manifest.json"
+            manifest_path.write_bytes(canonical_json({"manifestDigest": "sha256:" + "c" * 64}))
+            self.assertEqual(key, _validate_plan_shape(plan, manifest_path, set(), key))
+            for pending in (None, "recipe_rebuild:8.5.9:3", "recipe_rebuild:8.5.10:1"):
+                with self.assertRaisesRegex(ControlError, "not the selected rebuild", msg=pending):
+                    _validate_plan_shape(plan, manifest_path, set(), pending)
+            for field, value, message in (
+                ("editsRequired", True, "cannot require edits"),
+                ("allowedPaths", {"php-bin": ["stages/s4.txt"], "mise-php": []}, "cannot allow paths"),
+                ("releaseIntent", {"version": "8.5.9", "sourceIdentifier": "x"}, "not the selected revision"),
+                ("releaseIntent", None, "not the selected revision"),
+            ):
+                with self.assertRaisesRegex(ControlError, message, msg=field):
+                    _validate_plan_shape({**plan, field: value}, manifest_path, set(), key)
+            with self.assertRaisesRegex(ControlError, "already completed"):
+                _validate_plan_shape(plan, manifest_path, {key}, key)
+            # A pending rebuild can never be silenced by recording the evidence unchanged.
+            no_change = {
+                "schemaVersion": 1,
+                "action": "no_change",
+                "actionKey": "no_change:" + "c" * 16,
+                "editsRequired": False,
+                "allowedPaths": {"php-bin": [], "mise-php": []},
+                "releaseIntent": None,
+            }
+            self.assertEqual(no_change["actionKey"], _validate_plan_shape(no_change, manifest_path, set(), None))
+            with self.assertRaisesRegex(ControlError, "due rebuild pending"):
+                _validate_plan_shape(no_change, manifest_path, set(), key)
+
+    def test_rebuild_cites_the_release_it_supersedes(self):
+        validate_recipe_rebuild_evidence(
+            "recipe_rebuild", "recipe_rebuild:8.5.9:1", [{"captureId": "php_bin_releases", "value": "8.5.9"}]
+        )
+        validate_recipe_rebuild_evidence(
+            "recipe_rebuild", "recipe_rebuild:8.5.9:3", [{"captureId": "php_bin_releases", "value": "8.5.9-2"}]
+        )
+        for evidence in (
+            [{"captureId": "php_bin_releases", "value": "8.5.9"}],
+            [{"captureId": "php_bin_releases", "value": "8.5.9-1"}],
+            [{"captureId": "php_release_feed", "value": "8.5.9-2"}],
+        ):
+            with self.assertRaisesRegex(ControlError, "supersedes", msg=evidence):
+                validate_recipe_rebuild_evidence("recipe_rebuild", "recipe_rebuild:8.5.9:3", evidence)
+        validate_recipe_rebuild_evidence("new_patch", "new_patch:8.5.9", [])
+
+    def test_admission_re_derives_the_rebuild_from_the_capture_and_recipe_commit(self):
+        head = git(ROOT, "rev-parse", "HEAD").stdout.strip()
+        branch = json.loads((ROOT / "support-policy.json").read_text())["maintainedBranches"][-1]
+        identity = recipe_identity(ROOT, head, branch)
+        releases = [self._published(f"{branch}.2", identity), self._published(f"{branch}.1")]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            (root / "raw").mkdir()
+            body = canonical_json(releases)
+            (root / "raw/php_bin_releases.body").write_bytes(body)
+            manifest_path = root / "evidence-manifest.json"
+            capture = {"captureId": "php_bin_releases", "status": 200, "digest": sha256_bytes(body), "bodyPath": "raw/php_bin_releases.body"}
+            manifest_path.write_bytes(canonical_json({"schemaVersion": 1, "captures": [capture]}))
+            self.assertEqual(f"recipe_rebuild:{branch}.1:1", due_recipe_rebuild(manifest_path, ROOT, head))
+            manifest_path.write_bytes(canonical_json({"schemaVersion": 1, "captures": [{**capture, "status": 500}]}))
+            self.assertIsNone(due_recipe_rebuild(manifest_path, ROOT, head))
+            # Like the watcher, admission selects nothing while any other source is unhealthy.
+            other = {"captureId": "php_release_feed", "status": 503, "digest": sha256_bytes(b""), "bodyPath": "raw/feed.body"}
+            manifest_path.write_bytes(canonical_json({"schemaVersion": 1, "captures": [capture, other]}))
+            self.assertIsNone(due_recipe_rebuild(manifest_path, ROOT, head))
 
     def test_unprovable_release_records_are_not_recovered(self):
         manifest = self._releases_manifest()
@@ -766,6 +1076,16 @@ class AutoreleaseControlTests(unittest.TestCase):
                 "last legal state",
             ),
             (
+                {**base, "decision": changed, "plan": {"action": "recipe_rebuild", "actionKey": "recipe_rebuild:8.5.9:2"}},
+                "recipe_rebuild_started",
+                "PHP 8.5.9-2 rebuild started",
+            ),
+            (
+                {**base, "workflow": "publish", "transaction": {"released": True, "version": "8.5.9-2"}},
+                "rebuild_published",
+                "installs of the plain version 8.5.9 now resolve to this revision",
+            ),
+            (
                 {**base, "decision": changed, "plan": {"action": "needs_human", "actionKey": "auth_failure:" + "b" * 8}},
                 "watcher_attention",
                 "needs_human",
@@ -827,6 +1147,7 @@ class AutoreleaseControlTests(unittest.TestCase):
             {**base, "decision": changed, "plan": {"action": "new_patch", "actionKey": "new_patch:8.5.9; rm -rf"}},
             {**base, "decision": changed, "plan": {"action": "new_patch", "actionKey": None}},
             {**base, "decision": changed, "plan": {"action": "new_patch", "actionKey": "repair:8.5.9:deadbeef"}},
+            {**base, "decision": changed, "plan": {"action": "recipe_rebuild", "actionKey": "new_patch:8.5.9"}},
             {**base, "decision": changed, "plan": {"action": "publish", "actionKey": "new_patch:8.5.9"}},
             {**base, "workflow": "publish", "transaction": {"released": True, "version": "main"}},
             {**base, "workflow": "publish"},
@@ -1032,8 +1353,22 @@ class AutoreleaseControlTests(unittest.TestCase):
         # Unrouted combinations fail loudly instead of exiting green.
         with self.assertRaises(ControlError):
             route_watch_action({"action": "repair", "editsRequired": False})
+        # A rebuild publishes an existing version as a new revision with no edit.
+        self.assertEqual(
+            "dispatch_publish",
+            route(action="recipe_rebuild", actionKey="recipe_rebuild:8.5.9:1")["route"],
+        )
+        self.assertEqual("none", route(action="recipe_rebuild")["notify"])
+        self.assertEqual(
+            "release_published_pending_record",
+            route(
+                action="recipe_rebuild",
+                actionKey="recipe_rebuild:8.5.9:1",
+                recordActionKey="recipe_rebuild:8.5.9:1",
+            )["reason"],
+        )
         with self.assertRaises(ControlError):
-            route_watch_action({"action": "recipe_rebuild", "editsRequired": False})
+            route_watch_action({"action": "publish", "editsRequired": False})
 
     def test_operator_gate_blocks_paused_state(self):
         self.assertTrue(mutation_allowed({"unattendedMutation": "enabled"}))
