@@ -159,7 +159,7 @@ jobs:
       # mise installs no tools here, so it needs no token. Without one it also
       # exports none into the steps that run the built binary, and without the
       # cache it never runs a mise binary another job could have saved.
-      - uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
           github_token: ""
           cache: false
