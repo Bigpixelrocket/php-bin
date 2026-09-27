@@ -40,14 +40,24 @@ from ._validation import (
 
 
 REQUIRED_PLAN_CHECKS = ["Script checks"]
-# Every path whose bytes decide what a release archive contains. Their identity at the
-# commit a release was built from is recorded in its notes, so a later run can tell
-# whether the current recipe would build different bytes and a rebuild is due.
+# Every committed path whose bytes decide what a release archive contains: the
+# toolchain pin, the build and packaging scripts the publish job runs, the extension
+# sets, and the files copied into every archive. Their identity at the commit a release
+# was built from is recorded in its notes, so a later run can tell whether the current
+# recipe would build different bytes and a rebuild is due. Each branch also covers its
+# own `expected-modules/<branch>.txt` (see `recipe_identity`). Inputs outside the
+# repository (the runner image, unpinned Homebrew packages) and the workflow definition
+# are deliberately not covered: they change without a reviewed recipe change, and
+# covering them would rebuild every release on an unrelated workflow edit.
 RECIPE_INPUT_PATHS = (
+    ".spc-sha256",
     ".spc-version",
-    "expected-modules",
+    "LICENSE",
+    "NOTICE",
     "patches",
     "scripts/build.sh",
+    "scripts/install-build-deps.sh",
+    "scripts/install-spc.sh",
     "scripts/lib.sh",
     "scripts/package.sh",
     "stages",
@@ -569,16 +579,28 @@ def git(repo: pathlib.Path, *arguments: str, check: bool = True) -> subprocess.C
     )
 
 
-def recipe_identity(repo: pathlib.Path, commit: str) -> str:
-    """Digest the recipe inputs of one exact commit.
+def recipe_identity(repo: pathlib.Path, commit: str, branch: str) -> str:
+    """Digest the recipe inputs one PHP branch is built from at one exact commit.
 
     The digest covers the committed tree entries (path, mode, and blob) under
-    `RECIPE_INPUT_PATHS`, never the working tree, so the watcher, admission, and the
-    publish transaction agree for the same commit even after a build has written
-    beside them.
+    `RECIPE_INPUT_PATHS` plus that branch's `expected-modules/<branch>.txt`, never the
+    working tree, so the watcher, admission, and the publish transaction agree for the
+    same commit even after a build has written beside them. Only the branch's own
+    module list is covered, so adding a new branch, or changing another branch's list,
+    rebuilds nothing already published on this one.
     """
     require(bool(COMMIT_SHA_RE.fullmatch(commit or "")), "recipe commit is not an exact commit SHA")
-    listing = git(repo, "ls-tree", "-r", "--full-tree", commit, "--", *RECIPE_INPUT_PATHS).stdout
+    require(bool(re.fullmatch(r"\d+\.\d+", branch or "")), f"recipe branch is invalid: {branch}")
+    listing = git(
+        repo,
+        "ls-tree",
+        "-r",
+        "--full-tree",
+        commit,
+        "--",
+        *RECIPE_INPUT_PATHS,
+        f"expected-modules/{branch}.txt",
+    ).stdout
     require(bool(listing.strip()), "recipe inputs are missing at the commit")
     return sha256_bytes(listing.encode())
 

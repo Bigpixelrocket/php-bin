@@ -14,8 +14,10 @@ is admitted from its own branch feed. The branch set follows the accepted
 policy, so a new or retired branch changes what is captured with no code
 change.
 The GitHub releases captures digest a projected body with per-asset download
-counters removed, so public downloads never register as changed evidence; the
-unprojected bytes are retained beside the digested body. The watcher compares
+counters and draft releases removed, so public downloads never register as
+changed evidence, and the read-only watcher and the publish job's write token
+digest the same list; the unprojected bytes are retained beside the digested
+body. The watcher compares
 only opaque digests and incomplete-event state. An unchanged healthy day is
 quiet: it makes no model call and causes no issue, repository, tag, asset, or
 release mutation.
@@ -106,10 +108,15 @@ A published release is immutable, so a recipe change reaches an existing PHP
 version only as a new rebuild revision: `8.5.9-1`, then `8.5.9-2`. The
 watcher, not the model, decides which one is due:
 
-- The *recipe identity* is a SHA-256 over the committed tree entries of
-  `.spc-version`, `expected-modules/`, `patches/`, `scripts/build.sh`,
-  `scripts/lib.sh`, `scripts/package.sh`, and `stages/` at one exact commit
-  (`recipe_identity` in `autorelease/_admission.py`).
+- The *recipe identity* of a branch is a SHA-256 over the committed tree
+  entries of `.spc-sha256`, `.spc-version`, `LICENSE`, `NOTICE`, `patches/`,
+  `scripts/build.sh`, `scripts/install-build-deps.sh`, `scripts/install-spc.sh`,
+  `scripts/lib.sh`, `scripts/package.sh`, `stages/`, and that branch's own
+  `expected-modules/<branch>.txt` at one exact commit (`recipe_identity` in
+  `autorelease/_admission.py`). Adding a branch or changing another branch's
+  module list rebuilds nothing. The runner image, unpinned Homebrew packages,
+  and the workflow definition are not covered, and changing the covered path
+  set itself makes every maintained version due once.
 - The publish transaction writes `Recipe identity: sha256:<hex>` into the
   notes of every release it creates, computed at the exact commit it builds.
   The notes come back inside the `php_bin_releases` capture, so the identity
@@ -132,6 +139,11 @@ watcher, not the model, decides which one is due:
   publication changes `php_bin_releases`, so the next run selects the next
   rebuild until none is due. New patches, new branches, EOL, and
   reconciliation take priority in the investigation.
+- Selection has no skip: a version whose rebuild keeps failing is selected
+  again on every run and holds back the rebuilds ordered after it until the
+  recipe is fixed. The `php_bin_releases` capture reads the newest 100
+  releases, so a version whose releases all fall beyond that page is not
+  considered for a rebuild.
 
 ## Unattended lifecycle
 

@@ -13,6 +13,7 @@ from autorelease.control import (  # noqa: E402
     ROOT,
     ControlError,
     LEGAL_RELEASE_TRANSITIONS,
+    PUBLISHED_RELEASE_TAG_RE,
     load_json,
     recipe_identity,
     recipe_identity_note,
@@ -104,7 +105,10 @@ def github_effect(
                 raise ControlError("existing tag does not point to the admitted commit")
         # The watcher reads the recipe identity back from the published notes to
         # decide whether this version needs a rebuild revision.
-        identity = recipe_identity(ROOT, commit)
+        release_tag = PUBLISHED_RELEASE_TAG_RE.fullmatch(version)
+        if release_tag is None:
+            raise ControlError(f"release version is not a PHP version: {version}")
+        identity = recipe_identity(ROOT, commit, release_tag.group(2))
         notes = (
             "Autorelease publication. Asset digests are recorded in SHA256SUMS.\n\n"
             + recipe_identity_note(identity)

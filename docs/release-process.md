@@ -43,9 +43,11 @@ A human changes what gets built, never how it gets released:
 5. Confirm `scripts/test.sh` and public-language checks pass.
 6. Open a pull request with the build log and module diff.
 
-After that merges, the watcher sees that every published version was built
-from a different recipe and rebuilds them one per run as revisions such as
-`8.4.5-1`. Each release records the identity of the recipe it was built from
+After that merges, the watcher sees which published versions were built from
+a different recipe and rebuilds them one per run as revisions such as
+`8.4.5-1`. A change to one branch's `expected-modules/<branch>.txt` rebuilds
+only that branch; a change to a shared recipe input rebuilds every maintained
+version. Each release records the identity of the recipe it was built from
 in its notes, and a version is rebuilt when its newest revision records a
 different identity or none. The watcher selects the version and revision
 deterministically, the investigation confirms it as a

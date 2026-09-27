@@ -14,9 +14,8 @@ from autorelease.control import (  # noqa: E402
     captured_php_bin_releases,
     git,
     load_json,
-    recipe_identity,
+    recipe_identities,
     validate_evidence_state_record,
-    validate_support_policy,
     watch_decision,
     write_json,
 )
@@ -73,8 +72,7 @@ try:
         self_evidence_update=args.self_evidence_update,
         releases=releases,
         record_files=record_files,
-        recipe_identity=recipe_identity(ROOT, head),
-        maintained_branches=validate_support_policy(ROOT)["maintainedBranches"],
+        recipe_identities=recipe_identities(ROOT, head),
     )
     write_json(args.output, decision)
     print(json.dumps(decision))
