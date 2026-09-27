@@ -1,4 +1,5 @@
 import contextlib
+import http.client
 import io
 import json
 import pathlib
@@ -310,6 +311,35 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertEqual(canonical, bypassed["captures"][0]["url"])
         # Evidence identity covers the body alone, so the fetch address never moves it.
         self.assertEqual(direct["manifestDigest"], bypassed["manifestDigest"])
+
+    def test_capture_fails_when_the_edge_serves_a_bypassing_fetch_from_cache(self):
+        # A unique key cannot be a genuine hit, so a HIT means the CDN now ignores the
+        # parameter; the capture must fail loudly rather than go stale silently.
+        def capture(source, cache_status):
+            headers = http.client.HTTPMessage()
+            if cache_status is not None:
+                headers["cdn-cache"] = cache_status
+            response = mock.Mock(status=200, headers=headers)
+            response.read.return_value = b'{"version": "8.3.35"}'
+            opener = mock.MagicMock()
+            opener.open.return_value.__enter__.return_value = response
+            with tempfile.TemporaryDirectory() as tmp, mock.patch(
+                "autorelease._evidence.urllib.request.build_opener", return_value=opener
+            ), mock.patch("autorelease._evidence.time.sleep"):
+                manifest = capture_evidence(pathlib.Path(tmp), [source])
+            return manifest["captures"][0], opener.open.call_count
+
+        canonical = "https://www.php.net/releases/index.php?json&version=8.3"
+        bypassing = EvidenceSource("php_release_feed_8.3", canonical, 1_000_000, bypass_edge_cache=True)
+        plain = EvidenceSource("php_release_feed_8.3", canonical, 1_000_000)
+        failed, attempts = capture(bypassing, "HIT")
+        self.assertEqual((0, "EdgeCacheHit", sha256_bytes(b"")), (failed["status"], failed["error"], failed["digest"]))
+        # A HIT on a fresh key is configuration, not a transient failure: no retry.
+        self.assertEqual(1, attempts)
+        for source, cache_status in ((bypassing, "MISS"), (bypassing, None), (plain, "HIT")):
+            healthy, _attempts = capture(source, cache_status)
+            self.assertEqual(200, healthy["status"], (source.bypass_edge_cache, cache_status))
+            self.assertNotIn("error", healthy)
 
     def test_supported_versions_date_churn_does_not_change_capture_identity(self):
         adjacent = (
@@ -1119,27 +1149,47 @@ class AutoreleaseControlTests(unittest.TestCase):
                 "verifiedCaptureIds"
             ],
         )
-        # Citing the aggregate feed as proof binds it as well.
+        # Other branches' feeds, and the aggregate feed beside the cited branch feed,
+        # are released; every other cited capture, repository state included, binds.
+        other_branches = changed("php_release_feed", "php_release_feed_8.3", "php_release_feed_8.4", "php_release_feed_8.5")
         self.assertEqual(
-            ["php_release_feed", "php_release_feed_8.2"],
-            validate_recaptured_evidence(everything, admitted, admitted)["verifiedCaptureIds"],
+            [
+                "mise_php_releases",
+                "mise_php_state",
+                "php_bin_releases",
+                "php_bin_state",
+                "php_release_feed_8.2",
+                "php_source_tags",
+                "php_supported_versions",
+            ],
+            validate_recaptured_evidence(everything, admitted, other_branches)["verifiedCaptureIds"],
         )
-        with self.assertRaisesRegex(ControlError, "recaptured evidence changed: php_release_feed$"):
-            validate_recaptured_evidence(everything, admitted, unrelated)
+        for moved in ("php_bin_state", "mise_php_state", "php_bin_releases", "php_supported_versions", "php_source_tags"):
+            with self.assertRaisesRegex(ControlError, f"recaptured evidence changed: {moved}$"):
+                validate_recaptured_evidence(everything, admitted, changed(moved))
         # A changed feed for the released version still stops publication, cited or not.
         with self.assertRaisesRegex(ControlError, "recaptured evidence changed: php_release_feed_8.2"):
             validate_recaptured_evidence(plan("8.2.34", "php_release_feed_8.2"), admitted, changed("php_release_feed_8.2"))
-        with self.assertRaisesRegex(ControlError, "recaptured evidence changed: php_release_feed_8.5"):
-            validate_recaptured_evidence(plan("8.5.11", "php_release_feed"), admitted, changed("php_release_feed_8.5"))
-        # A first branch release has no branch feed yet, so the aggregate proof binds.
+        with self.assertRaisesRegex(ControlError, "recaptured evidence changed: php_release_feed_8.2"):
+            validate_recaptured_evidence(everything, admitted, changed("php_release_feed_8.2"))
+        # An aggregate-only proof binds the aggregate feed and the own branch feed.
+        aggregate_proof = plan("8.5.11", "php_release_feed")
         self.assertEqual(
-            ["php_release_feed"],
-            validate_recaptured_evidence(
-                plan("8.6.0", "php_release_feed", "php_supported_versions", action="new_branch"),
-                admitted,
-                changed("php_supported_versions"),
-            )["verifiedCaptureIds"],
+            ["php_release_feed", "php_release_feed_8.5"],
+            validate_recaptured_evidence(aggregate_proof, admitted, changed("php_release_feed_8.4"))["verifiedCaptureIds"],
         )
+        with self.assertRaisesRegex(ControlError, "recaptured evidence changed: php_release_feed$"):
+            validate_recaptured_evidence(aggregate_proof, admitted, changed("php_release_feed"))
+        with self.assertRaisesRegex(ControlError, "recaptured evidence changed: php_release_feed_8.5"):
+            validate_recaptured_evidence(aggregate_proof, admitted, changed("php_release_feed_8.5"))
+        # A first branch release has no branch feed yet, so the aggregate proof binds.
+        first_release = plan("8.6.0", "php_release_feed", "php_supported_versions", action="new_branch")
+        self.assertEqual(
+            ["php_release_feed", "php_supported_versions"],
+            validate_recaptured_evidence(first_release, admitted, changed("php_release_feed_8.5"))["verifiedCaptureIds"],
+        )
+        with self.assertRaisesRegex(ControlError, "recaptured evidence changed: php_release_feed$"):
+            validate_recaptured_evidence(first_release, admitted, changed("php_release_feed"))
         with self.assertRaisesRegex(ControlError, "cites no release feed that proves its version"):
             validate_recaptured_evidence(plan("8.6.0", "php_bin_releases", action="new_branch"), admitted, admitted)
         # Every cited capture must still be the one admission saw.

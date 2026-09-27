@@ -58,10 +58,9 @@ from autorelease._admission import (  # noqa: E402
 )
 from autorelease._evidence import (  # noqa: E402
     BRANCH_FEED_CAPTURE_RE,
+    EDGE_CACHE_BYPASS_PARAMETER,
     EVIDENCE_CAPTURE_IDS,
     RUNTIME_PLAN_EVIDENCE_IDS,
-    EDGE_CACHE_BYPASS_PARAMETER,
-    STABLE_RELEASE_ACTIONS,
     EvidenceSource,
     RestrictedRedirect,
     branch_feed_capture_id,
@@ -70,7 +69,6 @@ from autorelease._evidence import (  # noqa: E402
     load_capture,
     load_plan_evidence,
     manifest_digest,
-    release_feed_capture_ids,
     validate_capture_id_set,
     validate_evidence_attestation_predicate,
     validate_evidence_state_record,

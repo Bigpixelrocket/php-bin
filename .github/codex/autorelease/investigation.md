@@ -91,9 +91,9 @@ Reading every branch feed is how you classify, not what the plan cites. A
 pointer that proves `releaseIntent.version`, in that version's own branch feed
 when it is captured and otherwise in the aggregate feed. Do not cite other
 branches' feeds, or the aggregate feed alongside the branch feed, as context.
-The publish job stops when a cited feed that could prove the version has
-changed, so citing the aggregate feed beside the branch feed only adds a way
-for a release on another branch to block this one.
+The publish job ignores other branches' feeds, and the aggregate feed once the
+branch feed is cited, so citing them adds no proof; it stops when the version's
+own branch feed or any other cited capture has changed.
 
 The plan `actionKey` identifies the classified autorelease action, not the
 phase-scoped action key in the event contract. It must use one of the reviewed

@@ -67,6 +67,14 @@ STABLE_RELEASE_ACTIONS = {"new_patch", "new_branch"}
 # every request is a key no edge has cached; a fixed value would only become one
 # more cached key. The manifest records the canonical URL without it.
 EDGE_CACHE_BYPASS_PARAMETER = "autorelease_fetch"
+# The CDN names the cache result of every response in this header. A key no request
+# has used before cannot be a genuine hit, so a HIT on a bypassing fetch means the
+# CDN has started to ignore the parameter and the bypass no longer works.
+EDGE_CACHE_STATUS_HEADER = "CDN-Cache"
+
+
+class EdgeCacheHit(ControlError):
+    """A cache-bypassing fetch was answered from an edge cache anyway."""
 
 
 def release_feed_capture_ids(version: str) -> set[str]:
@@ -74,12 +82,19 @@ def release_feed_capture_ids(version: str) -> set[str]:
 
     Those are the aggregate feed and the version's own branch feed; another branch's
     feed never proves it. Admission accepts the version only from one of these, and
-    the publish recapture binds exactly these, so the two agree on what proves a
-    release.
+    the publish recapture requires the plan to cite one of them, so the two agree
+    on what proves a release.
     """
     match = re.fullmatch(r"(\d+\.\d+)\.\d+", version) if isinstance(version, str) else None
     require(bool(match), f"stable release version is invalid: {version}")
     return {"php_release_feed", branch_feed_capture_id(match.group(1))}
+
+
+def is_release_feed(capture_id: Any) -> bool:
+    """Return whether a capture ID names the aggregate or one branch's release feed."""
+    return capture_id == "php_release_feed" or (
+        isinstance(capture_id, str) and bool(BRANCH_FEED_CAPTURE_RE.fullmatch(capture_id))
+    )
 
 
 def validate_capture_id_set(capture_ids: Iterable[Any], label: str) -> None:
@@ -120,15 +135,16 @@ def validate_recaptured_evidence(
 ) -> dict[str, Any]:
     """Verify that the upstream truth a plan was admitted on still holds at publication.
 
-    Every cited authoritative capture must match the admitted manifest. What must
-    also recapture byte-identically depends on the action. A stable release
-    (`new_patch`, `new_branch`) is bound to the release feeds that can prove its
-    version: every cited one, plus the version's own branch feed whenever it was
-    captured, because admission reads that feed to prove no newer patch on the
-    branch supersedes the version. A new release on another branch, or any other
-    cited context, changes nothing about this release, so it no longer stops the
-    publication. Every other action still binds every cited capture. Runtime-only
-    evidence is never recaptured.
+    Every cited authoritative capture must match the admitted manifest and, with
+    one exception, recapture byte-identically. The exception is a stable release
+    (`new_patch`, `new_branch`) and release feeds that say nothing about its
+    version: another branch's feed, and the aggregate feed when the version's own
+    branch feed is the cited proof. A release on another branch moves those feeds
+    without changing anything about this one, so they do not stop the
+    publication. The own branch feed is bound whenever it was captured, cited or
+    not, because admission reads it to prove no newer patch on the branch
+    supersedes the version. Every other cited capture, repository state included,
+    stays bound for every action. Runtime-only evidence is never recaptured.
     """
 
     def indexed_captures(manifest: dict[str, Any], label: str) -> dict[str, dict[str, Any]]:
@@ -164,11 +180,11 @@ def validate_recaptured_evidence(
     require(set(admitted) == set(current), "recaptured evidence capture set changed")
     evidence = plan.get("evidence")
     require(isinstance(evidence, list) and bool(evidence), "autorelease plan has no evidence")
-    bound: set[str] | None = None
+    proof_feeds: set[str] | None = None
     if plan.get("action") in STABLE_RELEASE_ACTIONS:
         release_intent = plan.get("releaseIntent")
         require(isinstance(release_intent, dict), "stable release action has no release intent")
-        bound = release_feed_capture_ids(release_intent.get("version"))
+        proof_feeds = release_feed_capture_ids(release_intent.get("version"))
     cited = set()
     for item in evidence:
         require(isinstance(item, dict), "plan evidence entry must be an object")
@@ -181,14 +197,19 @@ def validate_recaptured_evidence(
         require(admitted[capture_id]["digest"] == digest, f"admitted evidence digest mismatch: {capture_id}")
         cited.add(capture_id)
     require(bool(cited), "autorelease plan cites no authoritative captured evidence")
-    if bound is None:
-        verified = cited
-    else:
+    verified = cited
+    if proof_feeds is not None:
+        require(bool(cited & proof_feeds), "stable release cites no release feed that proves its version")
+        own_branch_feed = proof_feeds - {"php_release_feed"}
+        release_feeds = {capture_id for capture_id in admitted if is_release_feed(capture_id)}
+        # The aggregate feed stays bound only while it is the proof: once the own
+        # branch feed is cited, the aggregate adds nothing but other branches' news.
+        unrelated = release_feeds - own_branch_feed
+        if not cited & own_branch_feed:
+            unrelated -= {"php_release_feed"}
         # The own branch feed is bound even when uncited: the aggregate feed is not
         # branch-scoped, so it alone cannot show that the branch has moved on.
-        own_branch_feed = bound - {"php_release_feed"}
-        verified = (cited & bound) | (own_branch_feed & set(admitted))
-        require(bool(verified), "stable release cites no release feed that proves its version")
+        verified = (cited - unrelated) | (own_branch_feed & set(admitted))
     for capture_id in sorted(verified):
         require(
             current[capture_id]["digest"] == admitted[capture_id]["digest"],
@@ -309,6 +330,21 @@ def fetch_url(source: EvidenceSource) -> str:
     return f"{source.url}{separator}{EDGE_CACHE_BYPASS_PARAMETER}={secrets.token_hex(16)}"
 
 
+def require_edge_cache_miss(source: EvidenceSource, headers: Any) -> None:
+    """Reject a bypassing fetch the edge says it served from its cache.
+
+    The capture then fails like any unreachable source (status 0): the watcher
+    raises `source_unhealthy` and the publish recapture refuses it, instead of
+    evidence silently going stale again. A response without the header is accepted: only a
+    positive hit proves the bypass failed.
+    """
+    if not source.bypass_edge_cache:
+        return
+    status = str(headers.get(EDGE_CACHE_STATUS_HEADER) or "").strip().upper()
+    if status == "HIT":
+        raise EdgeCacheHit(f"edge cache served a bypassing fetch: {source.capture_id}")
+
+
 def capture_evidence(
     output_dir: pathlib.Path,
     sources: Iterable[EvidenceSource],
@@ -339,6 +375,7 @@ def capture_evidence(
             try:
                 request = urllib.request.Request(fetch_url(source), headers=headers)
                 with opener.open(request, timeout=30) as response:
+                    require_edge_cache_miss(source, response.headers)
                     body = response.read(source.max_bytes + 1)
                     require(len(body) <= source.max_bytes, f"capture too large: {source.capture_id}")
                     stored = source.normalize(body) if source.normalize else body

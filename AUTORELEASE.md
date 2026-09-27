@@ -22,11 +22,15 @@ headers, so the watcher and the publish job could otherwise read different
 snapshots of one feed. Each fetch therefore adds a fresh random
 `autorelease_fetch` query parameter; the manifest records the canonical URL,
 and evidence identity covers only the capture ID, status, and body digest.
-Before building, the publish job recaptures all evidence. A stable release
-needs only the release feeds that can prove its version to recapture
-unchanged: each one the plan cites, plus the version's own branch feed. A
-release on another branch or other cited context no longer stops it. A
-rebuild still needs every capture it cites to recapture unchanged.
+A fetch the CDN still reports as a cache `HIT` fails as an unhealthy capture,
+so the bypass cannot stop working silently.
+Before building, the publish job recaptures all evidence, and every capture the
+plan cites must recapture unchanged. A stable release is the one exception: it
+ignores release feeds that say nothing about its version, meaning other
+branches' feeds and, once the plan cites the version's own branch feed, the
+aggregate feed. That branch feed is bound even when uncited, so a release on
+another branch never stops this one, while any change to this branch's feed,
+the repository state, or other cited context still does.
 The GitHub releases captures digest a projected body with per-asset download
 counters and draft releases removed, so public downloads never register as
 changed evidence, and the read-only watcher and the publish job's write token
