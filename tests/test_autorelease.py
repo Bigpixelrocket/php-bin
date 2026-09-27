@@ -387,8 +387,47 @@ class AutoreleaseControlTests(unittest.TestCase):
             self.assertIsNone(release_recipe_identity({"body": body}), body)
         with self.assertRaises(ControlError):
             recipe_identity_note("sha256:short")
-        publisher = (pathlib.Path(__file__).resolve().parents[1] / "scripts/publish-release").read_text()
-        self.assertIn("recipe_identity_note(recipe_identity(ROOT, commit))", publisher)
+    def test_publisher_records_the_recipe_identity_on_new_and_resumed_drafts(self):
+        namespace = runpy.run_path(
+            str(pathlib.Path(__file__).resolve().parents[1] / "scripts/publish-release"),
+            run_name="publish_release_fixture",
+        )
+        github_effect = namespace["github_effect"]
+        identity = "sha256:" + "a" * 64
+        commit = "c" * 40
+        tag_ref = json.dumps({"object": {"type": "commit", "sha": commit}})
+
+        def effect(existing):
+            calls = []
+
+            def gh(*arguments, capture=True):
+                calls.append(arguments)
+                return ""
+
+            def run(argv, **_kwargs):
+                if argv[:3] == ["gh", "api", "repos/o/r/git/ref/tags/8.5.9-1"]:
+                    return mock.Mock(returncode=0, stdout=tag_ref)
+                if existing is None:
+                    return mock.Mock(returncode=1, stdout="")
+                return mock.Mock(returncode=0, stdout=json.dumps(existing))
+
+            with mock.patch.dict(
+                github_effect.__globals__,
+                {"gh": gh, "recipe_identity": lambda root, sha: identity},
+            ), mock.patch.object(github_effect.__globals__["subprocess"], "run", side_effect=run):
+                github_effect("draft_created", "o/r", "8.5.9-1", commit, pathlib.Path("assets"), {"SHA256SUMS": identity})
+            return calls
+
+        created = effect(None)
+        self.assertEqual("create", created[0][1])
+        self.assertIn(recipe_identity_note(identity), created[0][created[0].index("--notes") + 1])
+        # A draft left by an earlier attempt without the identity gains it before publication.
+        edited = effect({"isDraft": True, "body": "Autorelease publication."})
+        self.assertEqual(("release", "edit", "8.5.9-1"), edited[0][:3])
+        self.assertIn(recipe_identity_note(identity), edited[0][edited[0].index("--notes") + 1])
+        self.assertEqual([], effect({"isDraft": True, "body": recipe_identity_note(identity)}))
+        # A published release is immutable and is never edited.
+        self.assertEqual([], effect({"isDraft": False, "body": "Autorelease publication."}))
 
     def test_rebuild_selection_is_deterministic_and_covers_every_published_version(self):
         current = "sha256:" + "c" * 64
