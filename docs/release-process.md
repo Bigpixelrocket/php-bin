@@ -30,10 +30,18 @@ A first release on a new PHP branch additionally waits for exact-commit
 A human changes what gets built, never how it gets released:
 
 1. Update `expected-modules/<minor>.txt` only from a reviewed module baseline.
-2. Update the recipe and run the exact module comparison on macOS arm64. The
-   build gate must report a macOS 26.0 deployment target.
-3. Confirm `scripts/test.sh` and public-language checks pass.
-4. Open a pull request with the build log and module diff.
+   It lists every module loaded by default: the static binary plus the
+   default-on shared extensions.
+2. Update the recipe: `stages/s4.txt` for modules compiled into the binary,
+   `stages/s4-shared.txt` for shared extensions, their default state, and
+   the stable release each new extension is pinned to.
+3. Run `scripts/build.sh <minor> s4` on macOS arm64. Its module gate must pass
+   and report a macOS 26.0 deployment target for the binary and every `.so`.
+4. Package the build with `scripts/package.sh` and install the archive through
+   `mise-php` from a local server to confirm `php --ini` and the default
+   extensions.
+5. Confirm `scripts/test.sh` and public-language checks pass.
+6. Open a pull request with the build log and module diff.
 
 After that merges, the next admitted plan picks it up and requests a rebuild
 revision such as `8.4.5-1` when the PHP patch is unchanged but the recipe
