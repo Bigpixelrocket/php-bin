@@ -1849,7 +1849,18 @@ class AutoreleaseControlTests(unittest.TestCase):
         )
         verify = release["steps"][names.index("Verify the staged bytes the build reported")]
         self.assertEqual("${{ needs.build.outputs.archive_digest }}", verify["env"]["ARCHIVE_DIGEST"])
+        self.assertEqual("${{ needs.build.outputs.checksums_digest }}", verify["env"]["CHECKSUMS_DIGEST"])
+        self.assertIn(
+            'test "$(find .artifacts -mindepth 1 -print | LC_ALL=C sort | paste -sd \' \' -)" \\\n'
+            '  = ".artifacts/SHA256SUMS .artifacts/$archive"',
+            verify["run"],
+        )
         self.assertIn('test "sha256:$archive_hex" = "$ARCHIVE_DIGEST"', verify["run"])
+        self.assertIn(
+            'test "sha256:$(shasum -a 256 .artifacts/SHA256SUMS | awk \'{print $1}\')" = "$CHECKSUMS_DIGEST"',
+            verify["run"],
+        )
+        self.assertIn('grep -Fx "$archive_hex  $archive" .artifacts/SHA256SUMS', verify["run"])
         self.assertIn("validate-autorelease-archive", verify["run"])
         self.assertLess(
             names.index("Reconcile existing immutable release assets"),
