@@ -162,13 +162,17 @@ for target in 8 8.4.5-0 8.4.5-x 8.4.5-1-2; do
 done
 
 # The shipped list parses, and a requirement listed after the extension that
-# needs it is rejected, since php.ini lines load in list order.
+# needs it, or an extension requiring itself, is rejected, since php.ini lines
+# load in list order.
 read_shared_extensions "$PROJECT_ROOT/stages/s4-shared.txt" > /dev/null
 printf 'demo_off off requires=demo_on\ndemo_on on\n' > "$SCRATCH_DIR/misordered.txt"
-if read_shared_extensions "$SCRATCH_DIR/misordered.txt" > /dev/null 2>&1; then
-  echo "Expected a requirement listed after its dependent to be rejected." >&2
-  exit 1
-fi
+printf 'demo_on on requires=demo_on\n' > "$SCRATCH_DIR/self.txt"
+for list in misordered self; do
+  if read_shared_extensions "$SCRATCH_DIR/$list.txt" > /dev/null 2>&1; then
+    echo "Expected the $list shared-extension list to be rejected." >&2
+    exit 1
+  fi
+done
 
 (
   cd "$PROJECT_ROOT"

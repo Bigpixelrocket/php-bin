@@ -87,7 +87,7 @@ read_shared_extensions() {
             printf "%s: %s requires unlisted extension %s\n", FILENAME, name, dependency > "/dev/stderr"
             exit 1
           }
-          if (position[dependency] > i) {
+          if (position[dependency] >= i) {
             printf "%s: %s must be listed after its requirement %s\n", FILENAME, name, dependency > "/dev/stderr"
             exit 1
           }
