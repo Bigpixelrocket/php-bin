@@ -173,6 +173,22 @@ fi
 grep -Fq 'lexbor/core/base.h' "$SCRATCH_DIR/missing-header.log"
 mv "$SCRATCH_DIR/base.h" "$FIXTURE_LEXBOR/core/base.h"
 
+# A library header that cannot be copied stops packaging too.
+mkdir -p "$SCRATCH_DIR/failing-install"
+cat > "$SCRATCH_DIR/failing-install/install" <<'SH'
+#!/usr/bin/env bash
+for argument in "$@"; do
+  [[ "$argument" == */include/sodium/export.h ]] && exit 1
+done
+exec /usr/bin/install "$@"
+SH
+chmod +x "$SCRATCH_DIR/failing-install/install"
+if PATH="$SCRATCH_DIR/failing-install:$PATH" \
+  "$SCRIPT_DIR/package.sh" "$FIXTURE_ROOT/bin/php" 8.4.99 2>/dev/null; then
+  echo "Expected packaging to reject a library header it could not copy." >&2
+  exit 1
+fi
+
 # And any shared extension the verified list does not name.
 printf 'fixture\n' > "$FIXTURE_ROOT/modules/stray.so"
 if "$SCRIPT_DIR/package.sh" "$FIXTURE_ROOT/bin/php" 8.4.99 2>/dev/null; then

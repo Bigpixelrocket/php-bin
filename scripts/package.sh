@@ -105,8 +105,11 @@ if [[ -f "$KIT_INCLUDE/ext/sodium/php_libsodium.h" ]]; then
   fi
   install -m 0644 "$BUILDROOT/include/sodium.h" "$KIT_INCLUDE/sodium.h"
   mkdir -p "$KIT_INCLUDE/sodium"
-  find "$BUILDROOT/include/sodium" -maxdepth 1 -type f -name '*.h' \
-    -exec install -m 0644 {} "$KIT_INCLUDE/sodium/" \;
+  # Each copy runs in this shell, so a failed one stops packaging; find -exec would
+  # report success whatever its command returned.
+  while IFS= read -r -d '' header; do
+    install -m 0644 "$header" "$KIT_INCLUDE/sodium/"
+  done < <(find "$BUILDROOT/include/sodium" -maxdepth 1 -type f -name '*.h' -print0)
 fi
 if [[ -f "$KIT_INCLUDE/ext/uri/uri_parser_whatwg.h" ]]; then
   stage_header_closure "$BUILD_DIR/source/php-src/ext/lexbor" "lexbor/" lexbor/url/url.h
