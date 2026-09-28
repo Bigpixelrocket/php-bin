@@ -189,6 +189,17 @@ if PATH="$SCRATCH_DIR/failing-install:$PATH" \
   exit 1
 fi
 
+# So does an empty sodium header folder.
+mv "$FIXTURE_ROOT/include/sodium" "$SCRATCH_DIR/sodium"
+mkdir "$FIXTURE_ROOT/include/sodium"
+if "$SCRIPT_DIR/package.sh" "$FIXTURE_ROOT/bin/php" 8.4.99 2> "$SCRATCH_DIR/empty-sodium.log"; then
+  echo "Expected packaging to reject an empty sodium header folder." >&2
+  exit 1
+fi
+grep -Fq 'no headers in' "$SCRATCH_DIR/empty-sodium.log"
+rmdir "$FIXTURE_ROOT/include/sodium"
+mv "$SCRATCH_DIR/sodium" "$FIXTURE_ROOT/include/sodium"
+
 # And any shared extension the verified list does not name.
 printf 'fixture\n' > "$FIXTURE_ROOT/modules/stray.so"
 if "$SCRIPT_DIR/package.sh" "$FIXTURE_ROOT/bin/php" 8.4.99 2>/dev/null; then

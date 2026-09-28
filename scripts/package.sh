@@ -107,9 +107,15 @@ if [[ -f "$KIT_INCLUDE/ext/sodium/php_libsodium.h" ]]; then
   mkdir -p "$KIT_INCLUDE/sodium"
   # Each copy runs in this shell, so a failed one stops packaging; find -exec would
   # report success whatever its command returned.
+  copied=0
   while IFS= read -r -d '' header; do
     install -m 0644 "$header" "$KIT_INCLUDE/sodium/"
+    copied=$((copied + 1))
   done < <(find "$BUILDROOT/include/sodium" -maxdepth 1 -type f -name '*.h' -print0)
+  if ((copied == 0)); then
+    echo "Build kit is incomplete, no headers in: $BUILDROOT/include/sodium" >&2
+    exit 1
+  fi
 fi
 if [[ -f "$KIT_INCLUDE/ext/uri/uri_parser_whatwg.h" ]]; then
   stage_header_closure "$BUILD_DIR/source/php-src/ext/lexbor" "lexbor/" lexbor/url/url.h
