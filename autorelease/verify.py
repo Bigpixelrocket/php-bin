@@ -722,7 +722,7 @@ class Verifier:
         assets.mkdir()
         (assets / "archive").write_text("staged")
         digests = {"archive": sha256_file(assets / "archive")}
-        transaction = {"state": "draft_verified", "history": [], "publishedAssets": {"archive": "sha256:" + "0" * 64}}
+        transaction = {"state": "publishing", "history": [], "publishedAssets": {"archive": "sha256:" + "0" * 64}}
         assert_reject(lambda: release_transition(transaction, "published", assets, digests), "inconsistency")
         (directory / "result.txt").write_text("critical-stop; no overwrite; no delete; no retag\n")
         return ["result.txt"]
@@ -790,11 +790,13 @@ class Verifier:
             if "./scripts/publish-release" in (step.get("run") or "")
         ]
         assert_true(effect_steps, "release workflow performs no release transition")
+        # The transaction runs in two write-scoped jobs: `release` reaches a verified
+        # draft, and `publish` makes it public once the read-only draft install passed.
         assert_true(
-            all(
-                job_name == "release"
-                and "operator-gate --operator-file release-run/current-operator.json --require-enabled" in step["run"]
-                for job_name, step in effect_steps
+            {job_name for job_name, _ in effect_steps} == {"release", "publish"}
+            and all(
+                "operator-gate --operator-file release-run/current-operator.json --require-enabled" in step["run"]
+                for _, step in effect_steps
             ),
             "release effects are not gated by the live operator state",
         )

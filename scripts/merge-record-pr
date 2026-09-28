@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Merge one automation pull request that changes exactly one record file.
+#
+# Every autorelease record (an event record, the reviewed evidence state) reaches
+# main through the same gate: the dispatched required checks pass at the exact head,
+# the head is still the commit the caller pushed, that commit is a single child of
+# the current main, it changes exactly the named record, and the record holds exactly
+# the bytes the caller committed. Any difference stops before the merge, and the merge
+# itself only accepts that same head.
+#
+# --require-protected-controls additionally asserts the Protected controls check,
+# for records filed from a run whose base must still be main.
+
+set -euo pipefail
+
+usage() {
+  echo "Usage: $0 --pr <number> --base <sha> --head <sha> --record <path>" \
+    "--digest sha256:<hex> --checks-output <path> [--require-protected-controls]" >&2
+  exit 2
+}
+
+fail() {
+  echo "record merge refused: $1" >&2
+  exit 1
+}
+
+pr_number=""
+base=""
+head=""
+record=""
+digest=""
+checks_output=""
+require_protected="false"
+
+while (($#)); do
+  case "$1" in
+    --pr) pr_number="${2:-}"; shift 2 ;;
+    --base) base="${2:-}"; shift 2 ;;
+    --head) head="${2:-}"; shift 2 ;;
+    --record) record="${2:-}"; shift 2 ;;
+    --digest) digest="${2:-}"; shift 2 ;;
+    --checks-output) checks_output="${2:-}"; shift 2 ;;
+    --require-protected-controls) require_protected="true"; shift ;;
+    *) usage ;;
+  esac
+done
+
+[[ "$pr_number" =~ ^[1-9][0-9]*$ ]] || usage
+[[ "$base" =~ ^[0-9a-f]{40}$ && "$head" =~ ^[0-9a-f]{40}$ ]] || usage
+[[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || usage
+[[ -n "$record" && -n "$checks_output" ]] || usage
+repository="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+"$script_dir/dispatch-pr-checks" --pr "$pr_number" --check "Script checks" --output "$checks_output"
+if [[ "$require_protected" == "true" ]]; then
+  "$script_dir/assert-admission-checks" --require-protected-controls --checks "$checks_output"
+else
+  "$script_dir/assert-admission-checks" --checks "$checks_output"
+fi
+
+actual="$(gh pr view "$pr_number" --repo "$repository" --json headRefOid --jq .headRefOid)"
+[[ "$actual" == "$head" ]] || fail "pull request head $actual is not the committed record $head"
+git fetch origin main
+[[ "$(git rev-parse origin/main)" == "$base" ]] || fail "main moved away from $base"
+[[ "$(git rev-list --parents -n 1 "$head")" == "$head $base" ]] || fail "the record is not a single commit on $base"
+[[ "$(git diff --name-only "$base" "$head")" == "$record" ]] || fail "the commit changes more than $record"
+actual_digest="sha256:$(git show "$head:$record" | shasum -a 256 | awk '{print $1}')"
+[[ "$actual_digest" == "$digest" ]] || fail "$record does not hold the committed bytes"
+
+# --repo keeps the branch deletion remote-only: without it gh also deletes the local
+# branch, which git refuses while a worktree still holds it. --match-head-commit binds
+# the merge to the head checked above, so a push after those checks cannot be merged.
+gh pr merge "$pr_number" --repo "$repository" --squash --delete-branch --match-head-commit "$head"

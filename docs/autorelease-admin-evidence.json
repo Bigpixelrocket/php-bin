@@ -10,7 +10,7 @@
       },
       "afterSnapshot": {
         "path": "docs/admin-state/php-bin-after.json",
-        "digest": "sha256:3d0ed7f751c408e71033bdc593f7eeba2161470658277281d1c409a7b0572797"
+        "digest": "sha256:98cac908af2f21155f19452a3e8e47eb81f784853b19a25e3ecc59a571df5b33"
       },
       "settingsPullRequests": [
         "https://github.com/Bigpixelrocket/php-bin/pull/8",
@@ -75,12 +75,6 @@
     "protectedBranchesOnly": true,
     "administratorBypass": false
   },
-  "agentCanaryEnvironment": {
-    "name": "php-autorelease-canary",
-    "protectedBranchesOnly": true,
-    "administratorBypass": false,
-    "purpose": "Exercise the pinned Codex Action and repository API key only from reviewed main workflow bytes."
-  },
   "securityControls": {
     "dependabotSecurityUpdates": true,
     "providerSecretScanning": true,
@@ -107,7 +101,7 @@
   "secrets": {
     "valuesCaptured": false,
     "names": [
-      "OPENAI_API_KEY"
+      "RESEND_API_KEY"
     ]
   }
 }

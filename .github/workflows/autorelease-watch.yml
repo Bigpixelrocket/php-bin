@@ -297,20 +297,16 @@ jobs:
           url="$(gh pr create --base main --head "$branch" --title "chore: complete $ACTION_KEY" \
             --body "Recovered durable event record for an immutable published release.")"
           number="${url##*/}"
-          ./scripts/dispatch-pr-checks \
+          # The merge deletes the branch remote-only, since the recovery worktree still
+          # holds it locally.
+          ./scripts/merge-record-pr \
             --pr "$number" \
-            --check "Script checks" \
-            --output autorelease-plan-download/recovery-checks.json
-          ./scripts/assert-admission-checks --require-protected-controls --checks autorelease-plan-download/recovery-checks.json
-          test "$(gh pr view "$number" --json headRefOid --jq .headRefOid)" = "$head"
-          git fetch origin main
-          test "$(git rev-parse origin/main)" = "$base"
-          test "$(git rev-list --parents -n 1 "$head")" = "$head $base"
-          test "$(git diff --name-only "$base" "$head")" = "$event"
-          test "sha256:$(git show "$head:$event" | shasum -a 256 | awk '{print $1}')" = "$digest"
-          # --repo keeps the branch deletion remote-only. Without it gh also deletes the
-          # local branch, which git refuses while the recovery worktree still holds it.
-          gh pr merge "$number" --repo "${{ github.repository }}" --squash --delete-branch
+            --base "$base" \
+            --head "$head" \
+            --record "$event" \
+            --digest "$digest" \
+            --checks-output autorelease-plan-download/recovery-checks.json \
+            --require-protected-controls
           # The merge already retired both, so cleanup has nothing left to withdraw.
           number=""
           pushed=false
@@ -355,7 +351,7 @@ jobs:
             > autorelease-plan-download/evidence-attestation-predicate.json
       - name: Attest deterministic no-change evidence
         if: needs.investigate.outputs.action == 'no_change' && steps.operator.outputs.enabled == 'true' && steps.evidence.outputs.already_recorded == 'false'
-        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: autorelease-state/last-evidence.json
           predicate-type: https://bigpixelrocket.dev/autorelease/evidence-state/v1
@@ -442,18 +438,14 @@ jobs:
                 --body "Opaque evidence state for a reviewed no-change result.")"
               number="${url##*/}"
             fi
-            ./scripts/dispatch-pr-checks \
+            ./scripts/merge-record-pr \
               --pr "$number" \
-              --check "Script checks" \
-              --output autorelease-plan-download/no-change-checks.json
-            ./scripts/assert-admission-checks --require-protected-controls --checks autorelease-plan-download/no-change-checks.json
-            test "$(gh pr view "$number" --json headRefOid --jq .headRefOid)" = "$head"
-            git fetch origin main
-            test "$(git rev-parse origin/main)" = "$base"
-            test "$(git rev-list --parents -n 1 "$head")" = "$head $base"
-            test "$(git diff --name-only "$base" "$head")" = "autorelease-state/last-evidence.json"
-            test "sha256:$(git show "$head:autorelease-state/last-evidence.json" | shasum -a 256 | awk '{print $1}')" = "$record_digest"
-            gh pr merge "$number" --squash --delete-branch
+              --base "$base" \
+              --head "$head" \
+              --record autorelease-state/last-evidence.json \
+              --digest "$record_digest" \
+              --checks-output autorelease-plan-download/no-change-checks.json \
+              --require-protected-controls
             ;;
           dispatch_implementation)
             gh workflow run autorelease-implement.yml \
@@ -524,18 +516,14 @@ jobs:
             url="$(gh pr create --base main --head "$branch" --title "chore: complete $ACTION_KEY" \
               --body "Deterministic EOL completion bound to exact cross-repository readiness.")"
             number="${url##*/}"
-            ./scripts/dispatch-pr-checks \
+            ./scripts/merge-record-pr \
               --pr "$number" \
-              --check "Script checks" \
-              --output autorelease-plan-download/eol-checks.json
-            ./scripts/assert-admission-checks --require-protected-controls --checks autorelease-plan-download/eol-checks.json
-            test "$(gh pr view "$number" --json headRefOid --jq .headRefOid)" = "$head"
-            git fetch origin main
-            test "$(git rev-parse origin/main)" = "$base"
-            test "$(git rev-list --parents -n 1 "$head")" = "$head $base"
-            test "$(git diff --name-only "$base" "$head")" = "$event"
-            test "sha256:$(git show "$head:$event" | shasum -a 256 | awk '{print $1}')" = "$digest"
-            gh pr merge "$number" --squash --delete-branch
+              --base "$base" \
+              --head "$head" \
+              --record "$event" \
+              --digest "$digest" \
+              --checks-output autorelease-plan-download/eol-checks.json \
+              --require-protected-controls
             jq '.severity="info" | .summary="Branch EOL support cleanup completed at exact php-bin and mise-php commits." | .finalResult="passed"' \
               "$event" > autorelease-plan-download/eol-notification.json
             ./scripts/notify-autorelease \

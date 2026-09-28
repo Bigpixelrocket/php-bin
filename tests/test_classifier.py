@@ -556,9 +556,13 @@ class WorkflowWiringTests(unittest.TestCase):
 
     def test_new_branch_publication_verifies_the_plugin_at_the_readiness_commit(self):
         publish = (ROOT / ".github/workflows/autorelease-publish.yml").read_text()
-        self.assertIn('compare/$ready_commit...$(git -C mise-php rev-parse HEAD)', publish)
-        self.assertIn('git -C mise-php checkout --detach "$ready_commit"', publish)
-        self.assertNotIn('.misePhpCommit release-run/mise-readiness.json)" = "$(git -C mise-php rev-parse HEAD)"', publish)
+        # The captured mise-php main must contain the readiness commit, and the installs
+        # then check the plugin out at exactly that commit rather than at main.
+        self.assertIn('mise_commit="$(jq -r .sha admitted-run/evidence/raw/mise_php_state.body)"', publish)
+        self.assertIn('compare/$ready_commit...$mise_commit', publish)
+        self.assertIn('mise_commit="$ready_commit"', publish)
+        self.assertEqual(2, publish.count("ref: ${{ needs.release.outputs.mise_commit }}"))
+        self.assertNotIn('.misePhpCommit release-run/mise-readiness.json)" = "$mise_commit"', publish)
 
     def test_module_diff_extraction_matches_the_comparison_output(self):
         implement = (ROOT / ".github/workflows/autorelease-implement.yml").read_text()

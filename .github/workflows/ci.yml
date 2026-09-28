@@ -30,6 +30,6 @@ jobs:
       - name: Check shell scripts
         # The extensionless bash scripts are named one by one: every other
         # extensionless script under scripts/ is Python, which shellcheck cannot read.
-        run: shellcheck scripts/*.sh scripts/assert-admission-checks scripts/dispatch-pr-checks
+        run: shellcheck scripts/*.sh scripts/assert-admission-checks scripts/dispatch-pr-checks scripts/merge-record-pr
       - name: Run contract tests
         run: scripts/test.sh
