@@ -574,14 +574,18 @@ class _Classifier:
             branch for branch in self.maintained if branch in rows and rows[branch].state == "future"
         ]
         newest = self.maintained[-1] if self.maintained else None
-        unmaintained_older = [
-            branch
-            for branch, row in rows.items()
-            if row.state in SUPPORTED_STATES
-            and branch not in maintained
-            and newest is not None
-            and version_key(branch) < version_key(newest)
-        ]
+        # Sorted, like the two lists above, so the contradiction key ignores page order.
+        unmaintained_older = sorted(
+            (
+                branch
+                for branch, row in rows.items()
+                if row.state in SUPPORTED_STATES
+                and branch not in maintained
+                and newest is not None
+                and version_key(branch) < version_key(newest)
+            ),
+            key=version_key,
+        )
         contradictions = sorted(set(vanished + misclassified + unmaintained_older), key=version_key)
         if contradictions:
             item, _value = self.capture.pointer(

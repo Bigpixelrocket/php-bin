@@ -239,6 +239,12 @@ class ClassifierTests(unittest.TestCase):
         missing = self.classify(self.capture(rows={"8.5": MAINTAINED["8.5"]}))
         moved = self.classify(self.capture(rows={"8.5": ("security", "31 Dec 2029")}))
         self.assertEqual(missing["actionKey"], moved["actionKey"])
+        # Nor does the order the page lists older unmaintained branches in.
+        older = {"8.2": ("security", "31 Dec 2026"), "8.3": ("security", "31 Dec 2027")}
+        ascending = self.classify(self.capture(rows={**older, **MAINTAINED}))
+        descending = self.classify(self.capture(rows={"8.3": older["8.3"], "8.2": older["8.2"], **MAINTAINED}))
+        self.assertEqual("needs_human", ascending["action"])
+        self.assertEqual(ascending["actionKey"], descending["actionKey"])
 
     def test_an_unrecognised_lifecycle_page_blocks_instead_of_guessing(self):
         first = self.capture(raw_page=b"<main>We moved the table.</main>")
@@ -541,8 +547,11 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertIn("grep -qE '^(Missing modules:|Unexpected modules:)' new-branch-build/module-diff.txt", implement)
         self.assertIn("rm -f new-branch-build/module-diff.txt", implement)
         self.assertIn("-s new-branch-build/module-diff.txt", implement)
+
+    def test_the_lifecycle_merge_is_bound_to_the_validated_commit(self):
         # A later attempt can replace the automation branch, so the merge is bound to
         # the validated commit.
+        implement = (ROOT / ".github/workflows/autorelease-implement.yml").read_text()
         self.assertIn('--match-head-commit "$(jq -r .headSha autorelease-run/validation.json)"', implement)
 
     def test_new_branch_publication_verifies_the_plugin_at_the_readiness_commit(self):
