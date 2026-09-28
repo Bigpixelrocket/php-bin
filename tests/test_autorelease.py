@@ -2113,6 +2113,9 @@ class AutoreleaseControlTests(unittest.TestCase):
                 (None, "", 2, {1: True}, True),
                 ("draft_verified", "", 2, {1: False}, False),
                 ("draft_verified", "true", 2, {}, False),
+                # A definite draft answer outranks an earlier attempt's cautious record.
+                ("draft_verified", "true", 2, {1: True}, False),
+                ("publishing", "true", 2, {1: True}, False),
             )
             for index, (state, is_draft, run_attempt, prior, expected) in enumerate(cases):
                 run_dir = work / "release-run"

@@ -164,7 +164,8 @@ only after the one before succeeded:
    known to be possibly live, and reports a warning rather than a failed
    release; so does a rerun that stops early after an earlier attempt already
    published, because the recorded state asks GitHub whether the release is
-   public and keeps any earlier attempt's record that it was.
+   public and, only when GitHub cannot answer, keeps an earlier attempt's
+   record that it was.
 4. `verify-public`, read-only like `verify-draft`, runs fresh public
    exact-version and branch-shorthand installs.
 5. `finalize` completes the durable event record through an exact-SHA pull

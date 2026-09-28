@@ -603,10 +603,12 @@ jobs:
               fi
               ;;
           esac
-          # A release never goes back to a draft, so a state an earlier attempt retained
-          # as released stays released when this attempt cannot establish it itself.
+          # When GitHub could not be asked, an earlier attempt that retained the release
+          # as live still counts: a rerun resumes from the draft handoff, so this attempt
+          # alone cannot tell. A definite answer from GitHub always wins over history.
           attempt=$((RUN_ATTEMPT - 1))
-          while [[ "$released" != "true" ]] && ((attempt > 0)); do
+          while [[ "$released" != "true" && "$is_draft" != "true" && "$is_draft" != "false" ]] \
+            && ((attempt > 0)); do
             prior="$RUNNER_TEMP/prior-transaction-state-$attempt"
             if gh run download "$RUN_ID" --repo "${{ github.repository }}" \
               --name "release-transaction-state-$RUN_ID-$attempt" --dir "$prior" 2>/dev/null \
