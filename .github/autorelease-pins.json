@@ -6,10 +6,9 @@
     "actions/download-artifact": "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
     "actions/attest": "f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6",
     "actions/upload-artifact": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
-    "jdx/mise-action": "9e7f7633ff6f6d6048a9418a68d48f288f50eb14",
-    "openai/codex-action": "52fe01ec70a42f454c9d2ebd47598f9fd6893d56"
+    "jdx/mise-action": "9e7f7633ff6f6d6048a9418a68d48f288f50eb14"
   },
   "workflows": {
-    ".github/workflows/autorelease-e2e.yml": "sha256:5ae830a817f55657a6583dd3ed121c1156de1ce843a23e0b7ed8fa56a0f0f274"
+    ".github/workflows/autorelease-e2e.yml": "sha256:5789094102bc706ede2deef9f1f690909f207cce73362bf9d519d2abaea5714c"
   }
 }

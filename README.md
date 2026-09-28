@@ -19,9 +19,10 @@ pass.
 ## Autorelease
 
 Releases are produced automatically. A daily watcher detects upstream PHP
-release and lifecycle changes, a read-only Codex agent investigates, and
-deterministic workflows build, verify, and publish the binaries. The agent
-holds no write credential and cannot tag, publish, or merge.
+release and lifecycle changes, fixed rules classify them into one plan, an
+independent admission check accepts or rejects that plan, and deterministic
+workflows build, verify, and publish the binaries. No model takes part in any
+step.
 
 See [AUTORELEASE.md](AUTORELEASE.md) for the full contract, the operator
 pause control, and maintainer commands.
@@ -126,10 +127,14 @@ published version, one per run.
 
 For a new branch such as PHP `8.6`:
 
-Codex prepares bounded changes in both repositories. Staged S0–S4 builds must
-resolve extension compatibility and exact-module drift without weakening a
-gate. Publication waits for readiness records tied to the same action key,
-evidence digests, php-bin policy commit, and exact repository commits.
+The watcher adds the branch to `support-policy.json` and copies the newest
+maintained branch's module list to `expected-modules/<branch>.txt`, and
+`mise-php` regenerates its support snapshot from the new policy. The branch
+merges only after its first release builds and passes the exact module
+comparison; a module difference stops with an owner issue that names it, and
+the list is then corrected by pull request. Publication waits for readiness
+records tied to the same action key, evidence digests, php-bin policy commit,
+and exact repository commits.
 
 A new major such as PHP `9.0` follows the same process unchanged: no validator,
 regular expression, or policy file is anchored to PHP 8, so any maintained

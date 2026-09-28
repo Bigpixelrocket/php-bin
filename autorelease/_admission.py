@@ -1,8 +1,10 @@
-"""Admission of agent work: the plan, the sealed patch, and the merge.
+"""Admission of autorelease work: the plan, the sealed patch, and the merge.
 
-These are the three gates a model-authored change passes before it can reach a
-protected branch. Each one re-asserts the reviewed bounds from the artefacts in
-front of it rather than trusting the phase that produced them.
+These are the three gates a classified plan and its repository change pass before
+they can reach a protected branch or a release. Each one re-asserts the reviewed
+bounds from the artefacts in front of it rather than trusting the code that produced
+them, so admission stays an independent check on the deterministic classifier
+(`_classifier`) and the lifecycle edits (`_implementation`).
 """
 
 from __future__ import annotations
@@ -25,14 +27,12 @@ from ._evidence import (
 from ._validation import (
     ACTION_KEY_RE,
     COMMIT_SHA_RE,
-    COMPLETION_EVIDENCE_REF_RE,
     ROOT,
     SECRET_PATTERNS,
     SHA256_RE,
     STABLE_VERSION_RE,
     ControlError,
     canonical_json,
-    instruction_digest,
     load_json,
     path_is_allowed,
     path_is_protected,
@@ -68,107 +68,6 @@ RECIPE_INPUT_PATHS = (
     "scripts/package.sh",
     "stages",
 )
-PROHIBITED_AGENT_AUTHORITY = {
-    "merge",
-    "push",
-    "tag",
-    "release",
-    "publish",
-    "delete_release",
-    "overwrite_asset",
-    "workflow_permissions",
-    "secret_access",
-}
-
-
-def validate_task_contract(contract: dict[str, Any]) -> None:
-    require(contract.get("contractVersion") == 1, "unsupported task contract version")
-    require(
-        contract.get("phase") in {"investigation", "implementation", "repair"},
-        "invalid phase",
-    )
-    for field in (
-        "goal",
-        "actionKey",
-        "preconditions",
-        "allowedAuthority",
-        "nonGoals",
-        "completionCriteria",
-        "stopConditions",
-    ):
-        require(field in contract, f"task contract is missing {field}")
-    require(bool(contract["goal"]), "phase goal is empty")
-    require(
-        isinstance(contract["allowedAuthority"], list),
-        "allowedAuthority must be an array",
-    )
-    require(
-        all(isinstance(item, str) for item in contract["allowedAuthority"]),
-        "allowedAuthority must contain only strings",
-    )
-    require(
-        not (set(contract["allowedAuthority"]) & PROHIBITED_AGENT_AUTHORITY),
-        "agent contract grants prohibited irreversible authority",
-    )
-    criteria = contract["completionCriteria"]
-    require(isinstance(criteria, list) and criteria, "completion criteria are empty")
-    require(all(isinstance(item, dict) for item in criteria), "completion criteria must be objects")
-    ids = [criterion.get("id") for criterion in criteria]
-    require(all(isinstance(item, str) and item for item in ids), "criterion id is missing")
-    require(len(ids) == len(set(ids)), "criterion ids are not unique")
-    for criterion in criteria:
-        require(bool(criterion.get("requirement")), "criterion requirement is missing")
-        require(
-            bool(criterion.get("evidenceRequired")),
-            "criterion evidence requirement is missing",
-        )
-
-
-def validate_completion_assessment(
-    assessment: dict[str, Any],
-    contract: dict[str, Any],
-    expected_digests: dict[str, str] | None = None,
-) -> None:
-    validate_task_contract(contract)
-    require(assessment.get("contractVersion") == 1, "unsupported assessment version")
-    if expected_digests is not None:
-        require(
-            assessment.get("instructionDigests") == expected_digests,
-            "assessment instruction digests do not match admitted inputs",
-        )
-    status = assessment.get("phaseStatus")
-    require(status in {"complete", "blocked", "needs_human"}, "invalid phaseStatus")
-    require(assessment.get("goNoGo") in {"go", "no_go"}, "invalid goNoGo")
-    expected_ids = {
-        criterion["id"] for criterion in contract["completionCriteria"]
-    }
-    results = assessment.get("criteria")
-    require(isinstance(results, list), "assessment criteria must be an array")
-    result_ids = [result.get("id") for result in results]
-    require(len(result_ids) == len(set(result_ids)), "duplicate criterion result")
-    require(set(result_ids) == expected_ids, "criterion results are missing or unexpected")
-    for result in results:
-        require(
-            result.get("status") in {"passed", "failed", "unresolved"},
-            f"invalid result for {result.get('id')}",
-        )
-        evidence = result.get("evidence")
-        require(isinstance(evidence, list), "criterion evidence must be an array")
-        if result["status"] == "passed":
-            require(bool(evidence), f"passed criterion {result['id']} has no evidence")
-    unresolved = assessment.get("unresolved")
-    require(isinstance(unresolved, list), "unresolved must be an array")
-    mechanically_go = (
-        status == "complete"
-        and all(result["status"] == "passed" for result in results)
-        and not unresolved
-    )
-    require(
-        (assessment["goNoGo"] == "go") == mechanically_go,
-        "go/no-go is inconsistent with criterion results",
-    )
-
-
 def validate_stable_release_evidence(
     action: str,
     release_intent: dict[str, Any] | None,
@@ -357,6 +256,40 @@ def validate_support_policy(root: pathlib.Path = ROOT) -> dict[str, Any]:
     }
 
 
+PLAN_FIELDS = frozenset(
+    {
+        "schemaVersion",
+        "actionKey",
+        "action",
+        "evidence",
+        "repositories",
+        "preconditions",
+        "editsRequired",
+        "allowedPaths",
+        "requiredChecks",
+        "releaseIntent",
+        "notification",
+        "risk",
+        "summary",
+    }
+)
+PLAN_ACTIONS = frozenset(
+    {"no_change", "new_patch", "new_branch", "branch_eol", "recipe_rebuild", "blocked", "needs_human"}
+)
+# A plan that stops the run, or records evidence as reviewed, authorizes no work at all.
+NO_WORK_ACTIONS = frozenset({"no_change", "blocked", "needs_human"})
+
+
+def _require_no_work(plan: dict[str, Any], label: str) -> None:
+    require(plan.get("editsRequired") is False, f"{label} plan cannot require edits")
+    allowed_paths = plan.get("allowedPaths")
+    require(
+        isinstance(allowed_paths, dict) and not any(allowed_paths.values()),
+        f"{label} plan cannot allow paths",
+    )
+    require(plan.get("releaseIntent") is None, f"{label} plan cannot request a release")
+
+
 def _validate_plan_shape(
     plan: dict[str, Any],
     manifest_path: pathlib.Path,
@@ -365,47 +298,35 @@ def _validate_plan_shape(
 ) -> str:
     """Reject a plan whose identity is wrong, and return the action key it claims.
 
-    Nothing later in admission means anything until the plan names one reviewed
-    action and one well-formed key that no completed event already owns.
+    Nothing later in admission means anything until the plan has exactly the reviewed
+    fields, names one reviewed action and one well-formed key that no completed event
+    already owns.
 
     `pending_rebuild` is the rebuild the watcher selected deterministically from the
     same capture and recipe, or None when none is due. A rebuild plan must name exactly
     that key, and no plan may record the evidence as unchanged while one is due, so a
-    pending rebuild can neither be invented nor silenced by the investigation.
+    pending rebuild can neither be invented nor silenced by the classifier.
     """
+    require(isinstance(plan, dict), "autorelease plan must be an object")
+    require(set(plan) == PLAN_FIELDS, "autorelease plan fields are unknown or missing")
     require(plan.get("schemaVersion") == 1, "unsupported autorelease plan version")
-    require(
-        plan.get("action")
-        in {
-            "no_change",
-            "new_patch",
-            "new_branch",
-            "branch_eol",
-            "recipe_rebuild",
-            "repair",
-            "reconcile_partial",
-            "blocked",
-            "needs_human",
-        },
-        "invalid autorelease action",
-    )
+    action = plan.get("action")
+    require(action in PLAN_ACTIONS, "invalid autorelease action")
     action_key = plan.get("actionKey", "")
-    require(bool(ACTION_KEY_RE.fullmatch(action_key)), "invalid action key")
-    if plan.get("action") == "no_change":
+    require(isinstance(action_key, str) and bool(ACTION_KEY_RE.fullmatch(action_key)), "invalid action key")
+    require(plan.get("editsRequired") in {True, False}, "plan must declare whether edits are required")
+    if action in {"new_patch", "new_branch", "branch_eol"}:
+        require(action_key.startswith(f"{action}:"), "action key does not match its action")
+    if action in NO_WORK_ACTIONS:
+        _require_no_work(plan, action.replace("_", "-"))
+    if action == "no_change":
         manifest_digest = load_json(manifest_path).get("manifestDigest", "")
         require(
             action_key == f"no_change:{manifest_digest.removeprefix('sha256:')[:16]}",
             "no-change action key is not bound to the evidence manifest",
         )
-        require(plan.get("editsRequired") is False, "no-change plan cannot require edits")
-        allowed_paths = plan.get("allowedPaths")
-        require(
-            isinstance(allowed_paths, dict) and not any(allowed_paths.values()),
-            "no-change plan cannot allow paths",
-        )
-        require(not plan.get("releaseIntent"), "no-change plan cannot request a release")
         require(not pending_rebuild, f"no-change plan cannot leave a due rebuild pending: {pending_rebuild}")
-    elif plan.get("action") == "recipe_rebuild":
+    elif action == "recipe_rebuild":
         require(
             bool(pending_rebuild) and action_key == pending_rebuild,
             f"recipe rebuild is not the selected rebuild: {pending_rebuild or 'none is due'}",
@@ -422,8 +343,6 @@ def _validate_plan_shape(
             isinstance(release_intent, dict) and release_intent.get("version") == f"{version}-{revision}",
             "recipe rebuild release intent is not the selected revision",
         )
-    elif plan.get("action") not in {"blocked", "needs_human"}:
-        require(plan.get("editsRequired") in {True, False}, "plan must declare whether edits are required")
     require(
         action_key not in (completed_actions or set()),
         "action key already completed",
@@ -433,50 +352,16 @@ def _validate_plan_shape(
 
 def _validate_plan_preconditions(
     plan: dict[str, Any],
-    contract: dict[str, Any],
-    shared_path: pathlib.Path,
-    phase_path: pathlib.Path,
-    event_contract_path: pathlib.Path,
     repo_heads: dict[str, str] | None,
     policy_digest: str | None,
-) -> tuple[dict[str, str], dict[str, Any]]:
-    """Bind the plan to the instructions it was written against and the state it saw.
-
-    Returns the instruction digests the admission record carries and the declared
-    preconditions, which the plan's own evidence references are resolved against.
-    """
-    expected_digests = {
-        "shared": instruction_digest(shared_path),
-        "phaseTemplate": instruction_digest(phase_path),
-        "eventContract": instruction_digest(event_contract_path),
-    }
-    agent_contract = plan.get("agentContract", {})
-    require(agent_contract.get("contractVersion") == 1, "invalid agent contract version")
-    require(
-        agent_contract.get("instructionDigests") == expected_digests,
-        "plan instruction digests do not match supplied instructions",
-    )
-    validate_completion_assessment(
-        {
-            **plan.get("completionAssessment", {}),
-            "contractVersion": 1,
-            "instructionDigests": expected_digests,
-        },
-        contract,
-        expected_digests,
-    )
-    if plan["action"] in {"blocked", "needs_human"}:
-        require(
-            plan["completionAssessment"]["goNoGo"] == "no_go",
-            "blocked plans cannot advance",
-        )
-    else:
-        require(
-            plan["completionAssessment"]["goNoGo"] == "go",
-            "only an internally complete agent plan can advance",
-        )
-    declared_heads = plan.get("preconditions", {})
+) -> dict[str, Any]:
+    """Bind the plan to the exact repository and policy state it was classified against."""
+    declared_heads = plan.get("preconditions")
     require(isinstance(declared_heads, dict), "preconditions must be an object")
+    require(
+        set(declared_heads) == {"phpBinHead", "misePhpHead", "supportPolicyDigest"},
+        "plan preconditions are unknown or missing",
+    )
     if repo_heads:
         for key, value in repo_heads.items():
             require(declared_heads.get(key) == value, f"stale repository precondition: {key}")
@@ -485,25 +370,27 @@ def _validate_plan_preconditions(
             declared_heads.get("supportPolicyDigest") == policy_digest,
             "stale support policy precondition",
         )
-    return expected_digests, declared_heads
+    return declared_heads
 
 
 def _validate_plan_actions(
     plan: dict[str, Any],
     manifest_path: pathlib.Path,
-    declared_heads: dict[str, Any],
 ) -> None:
-    """Reject the effects the plan asks for: evidence, paths, release, and budgets.
+    """Reject the effects the plan asks for: evidence, paths, checks, and release.
 
     Every claim is re-derived from the captured bodies and the reviewed bounds
     rather than trusted from the plan that asserts it.
     """
-    evidence_refs = {}
+    evidence = plan.get("evidence")
+    require(isinstance(evidence, list) and bool(evidence), "plan cites no evidence")
     resolved_evidence = []
-    for index, evidence in enumerate(plan.get("evidence", [])):
-        capture, body = load_plan_evidence(manifest_path, evidence.get("captureId", ""))
-        require(evidence.get("digest") == capture["digest"], "plan evidence digest mismatch")
-        locator = evidence.get("locator", {})
+    for item in evidence:
+        require(isinstance(item, dict), "plan evidence entry must be an object")
+        capture, body = load_plan_evidence(manifest_path, item.get("captureId", ""))
+        require(item.get("digest") == capture["digest"], "plan evidence digest mismatch")
+        locator = item.get("locator", {})
+        require(isinstance(locator, dict), "plan evidence locator must be an object")
         if locator.get("kind") == "json_pointer":
             try:
                 document = json.loads(body)
@@ -516,31 +403,14 @@ def _validate_plan_actions(
             resolved_value = fragment
         else:
             raise ControlError("unsupported evidence locator")
-        evidence_refs[f"evidence[{index}]"] = evidence
-        resolved_evidence.append(
-            {"captureId": evidence.get("captureId"), "value": resolved_value}
-        )
-    research_sources = plan.get("researchSources", [])
-    require(isinstance(research_sources, list), "researchSources must be an array")
-    precondition_refs = {f"preconditions.{key}" for key in declared_heads}
-    source_refs = {f"researchSources[{index}]" for index in range(len(research_sources))}
-    for result in plan["completionAssessment"]["criteria"]:
-        for reference in result["evidence"]:
-            require(
-                bool(COMPLETION_EVIDENCE_REF_RE.fullmatch(reference)),
-                f"invalid criterion evidence reference: {reference}",
-            )
-            require(
-                reference in evidence_refs
-                or reference in precondition_refs
-                or reference in source_refs,
-                f"criterion evidence reference does not resolve: {reference}",
-            )
+        resolved_evidence.append({"captureId": item.get("captureId"), "value": resolved_value})
     allowed_paths = plan.get("allowedPaths", {})
     require(isinstance(allowed_paths, dict), "allowedPaths must be an object")
+    require(set(allowed_paths) == {"php-bin", "mise-php"}, "allowedPaths repositories changed")
     for patterns in allowed_paths.values():
         require(isinstance(patterns, list), "allowed path set must be an array")
         for pattern in patterns:
+            require(isinstance(pattern, str) and bool(pattern), "allowed path must be a non-empty string")
             pure = pathlib.PurePosixPath(pattern)
             require(not pure.is_absolute() and ".." not in pure.parts, f"unsafe allowed path: {pattern}")
             require(
@@ -550,6 +420,10 @@ def _validate_plan_actions(
             if fnmatch.fnmatch("support-policy.json", pattern):
                 require(plan.get("risk") == "lifecycle", "support state requires lifecycle risk")
                 require(plan.get("action") in {"new_branch", "branch_eol"}, "support state requires a lifecycle action")
+    require(
+        plan.get("editsRequired") is False or plan.get("action") in {"new_branch", "branch_eol"},
+        "only a lifecycle plan may require repository edits",
+    )
     repositories = plan.get("repositories")
     require(
         isinstance(repositories, list)
@@ -570,58 +444,32 @@ def _validate_plan_actions(
     validate_stable_release_evidence(plan.get("action", ""), release_intent, resolved_evidence)
     validate_release_is_newest_patch(plan.get("action", ""), release_intent, manifest_path)
     validate_recipe_rebuild_evidence(plan.get("action", ""), plan.get("actionKey", ""), resolved_evidence)
-    operations = plan.get("agentOperations")
-    require(isinstance(operations, list), "agentOperations must be an array")
-    require(all(isinstance(operation, str) for operation in operations), "agentOperations must contain strings")
-    for operation in operations:
-        require(operation not in PROHIBITED_AGENT_AUTHORITY, f"prohibited agent operation: {operation}")
-    budgets = plan.get("budgets")
-    require(isinstance(budgets, dict) and bool(budgets), "plan must declare reviewed budgets")
-    for field, upper, label in (
-        ("maxModelCalls", 5, "model-call"),
-        ("maxRetries", 3, "retry"),
-        ("timeoutMinutes", 60, "time"),
-    ):
-        value = budgets.get(field)
-        require(isinstance(value, int) and not isinstance(value, bool), f"{field} must be an integer")
-        require(0 < value <= upper, f"{label} budget is outside reviewed bound")
 
 
 def validate_plan(
     plan: dict[str, Any],
     manifest_path: pathlib.Path,
-    contract: dict[str, Any],
-    shared_path: pathlib.Path,
-    phase_path: pathlib.Path,
-    event_contract_path: pathlib.Path,
     repo_heads: dict[str, str] | None = None,
     policy_digest: str | None = None,
     completed_actions: set[str] | None = None,
     pending_rebuild: str | None = None,
 ) -> dict[str, Any]:
-    """Admit one agent plan, or reject it.
+    """Admit one classified plan, or reject it.
 
-    The three gates run in a fixed order: what the plan is, what it was written
-    against, and what it asks for. A later gate reads values the earlier one
-    proved, so none of them is safe to reorder.
+    Admission is the independent second check on the deterministic classifier: it
+    shares no decision logic with it and re-derives every claim from the capture. The
+    three gates run in a fixed order: what the plan is, what state it was classified
+    against, and what it asks for. A later gate reads values the earlier one proved,
+    so none of them is safe to reorder.
     """
     action_key = _validate_plan_shape(plan, manifest_path, completed_actions, pending_rebuild)
-    expected_digests, declared_heads = _validate_plan_preconditions(
-        plan,
-        contract,
-        shared_path,
-        phase_path,
-        event_contract_path,
-        repo_heads,
-        policy_digest,
-    )
-    _validate_plan_actions(plan, manifest_path, declared_heads)
+    _validate_plan_preconditions(plan, repo_heads, policy_digest)
+    _validate_plan_actions(plan, manifest_path)
     return {
         "admitted": True,
         "admittedAt": utc_now(),
         "actionKey": action_key,
         "planDigest": sha256_bytes(canonical_json(plan)),
-        "instructionDigests": expected_digests,
     }
 
 
@@ -673,13 +521,16 @@ def seal_patch(
     repo: pathlib.Path,
     base: str,
     plan: dict[str, Any],
-    result: dict[str, Any],
-    contract: dict[str, Any],
     output_dir: pathlib.Path,
 ) -> dict[str, Any]:
-    expected_digests = plan["agentContract"]["instructionDigests"]
-    validate_completion_assessment(result, contract, expected_digests)
-    require(result["goNoGo"] == "go", "implementation result is no-go")
+    """Seal the working-tree diff of one admitted plan against its exact base.
+
+    Only admitted, unprotected, small UTF-8 text files may change, and a regenerated
+    `support-policy.json` must validate against the reviewed invariants and be bound
+    to the plan's own evidence digests and action key. The sealed patch and its file
+    digests are what clean validation applies and what the exact-SHA merge gate
+    compares, so nothing written after sealing can reach main.
+    """
     require(bool(COMMIT_SHA_RE.fullmatch(base or "")), "base is not an exact commit SHA")
     require(git(repo, "rev-parse", f"{base}^{{commit}}").stdout.strip() == base, "base is not an exact commit")
     paths = changed_paths(repo, base)

@@ -172,14 +172,13 @@ EMAIL_SUBJECT_PREFIX = "[php-bin autorelease]"
 # Repository slugs reach the digest from `github.repository`, never from run state.
 EMAIL_REPOSITORY_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 # ACTION_KEY_RE fixes key syntax only, so each version-deriving action also pins
-# the key family it may carry. reconcile_partial reuses the incomplete action's
-# key and blocked/needs_human carry whatever key failed, so they accept any.
+# the key family it may carry. blocked/needs_human carry whatever key stopped, so
+# they accept any.
 EMAIL_ACTION_KEY_PREFIXES = {
     "no_change": {"no_change"},
     "new_patch": {"new_patch"},
     "new_branch": {"new_branch"},
     "branch_eol": {"branch_eol"},
-    "repair": {"repair"},
     "recipe_rebuild": {"recipe_rebuild"},
 }
 
@@ -196,7 +195,7 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
     """Select and fill the one fixed email template for a completed pipeline run.
 
     Every value interpolated into a subject or body is validated against the
-    same shape rules admission enforces, so model-authored prose never reaches
+    same shape rules admission enforces, so free-form plan prose never reaches
     the outbound channel — a plan only ever picks which fixed sentence is sent.
     An outcome with no template is rejected instead of guessed at.
     """
@@ -282,19 +281,19 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
         isinstance(digest, str) and bool(SHA256_RE.fullmatch(digest)),
         "watch decision manifest digest is invalid",
     )
-    model_call = decision.get("modelCall")
-    require(isinstance(model_call, bool), "watch decision model call flag is invalid")
-    if not model_call:
+    classified = decision.get("classify")
+    require(isinstance(classified, bool), "watch decision classify flag is invalid")
+    if not classified:
         return _email(
             "quiet_day",
             "Watcher: no upstream changes",
             "The watcher captured fresh upstream evidence and it matches the last reviewed "
-            "capture, so no model call was made and nothing was changed.",
+            "capture, so nothing needed classifying and nothing was changed.",
             f"Evidence manifest: {digest}",
             run_url=run_url,
         )
     plan = report.get("plan")
-    require(isinstance(plan, dict), "a successful watcher model call must supply its admitted plan")
+    require(isinstance(plan, dict), "a successful classified watcher run must supply its admitted plan")
     action = plan.get("action")
     action_key = plan.get("actionKey")
     require(
@@ -322,7 +321,7 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
         return _email(
             "no_change_reviewed",
             "Watcher: evidence changed, no release needed",
-            f"Upstream evidence changed and the investigation classified it as requiring no "
+            f"Upstream evidence changed and the classifier found it requires no "
             f"release work ({action_key}). The reviewed evidence snapshot was recorded on main, "
             "so tomorrow's run compares against today's state.",
             f"Evidence manifest: {digest}",
@@ -355,29 +354,11 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
             "the branch stay immutable and installable.",
             run_url=run_url,
         )
-    if action == "repair":
-        return _email(
-            "repair_started",
-            f"Watcher: repair started for PHP {version}",
-            f"The investigation admitted a bounded repair plan ({action_key}) and dispatched it. "
-            "The exact evidence and allowed paths are retained with the run's admitted plan "
-            "artifact.",
-            run_url=run_url,
-        )
-    if action == "reconcile_partial":
-        return _email(
-            "reconcile_started",
-            "Watcher: reconciling a partial prior run",
-            f"An earlier run left {action_key} incomplete and the watcher admitted a "
-            "reconciliation for it. The event record resumes from its last legal state; no work "
-            "is repeated and nothing is overwritten.",
-            run_url=run_url,
-        )
     if action in {"blocked", "needs_human"}:
         return _email(
             "watcher_attention",
             f"Watcher needs attention ({action})",
-            f"The investigation stopped at '{action}' for {action_key} and mutated nothing. A "
+            f"The classifier stopped at '{action}' for {action_key} and mutated nothing. A "
             "GitHub issue has been filed or updated with the exact evidence and the required "
             "next step.",
             run_url=run_url,
@@ -422,7 +403,7 @@ def action_filename(action_key: str, suffix: str = ".json") -> str:
 
     Every event record, readiness record, and automation branch in both repositories is
     named from its action key by this one mapping, so the name is only ever derived here.
-    The key is model-authored and reaches shell arguments and repository paths, so its
+    The key comes from a retained plan or record and reaches shell arguments and repository paths, so its
     alphabet is re-asserted at this boundary rather than trusted from the caller.
     """
     require(bool(ACTION_KEY_RE.fullmatch(action_key)), f"invalid action key: {action_key}")
@@ -494,7 +475,7 @@ def pending_recipe_rebuild(
     so a rebuild whose draft was left by a failed transaction is selected again and
     resumes that draft.
 
-    Selection is deterministic so the investigation confirms rather than invents it:
+    Selection is deterministic so the classifier confirms rather than invents it:
     the newest version of each branch goes first, because that is what branch
     shorthand installs resolve to, then older versions, newest first. One key is
     returned per run; later runs rebuild the rest.
@@ -555,7 +536,7 @@ def watch_decision(
 
     `recipe_identities` maps each maintained branch to the identity of the checked-out
     recipe for it. When it is supplied, a published release built from any other recipe
-    keeps the watcher awake: the `rebuild_due` trigger calls the model even on a day
+    keeps the watcher awake: the `rebuild_due` trigger runs the classifier even on a day
     whose evidence matches the last reviewed snapshot, so a recorded `no_change` can
     never leave a rebuild pending quietly. The selected key is reported as
     `rebuildActionKey`, and admission accepts no other rebuild.
@@ -606,10 +587,10 @@ def watch_decision(
     if rebuild and trigger == "quiet":
         trigger = "rebuild_due"
     # A missing record outranks every trigger that a trustworthy snapshot can raise, so
-    # it is repaired before new work starts. It never changes whether the model is
-    # called: the repair is deterministic, but suppressing the investigation would let a
+    # it is repaired before new work starts. It never changes whether the classifier
+    # runs: the repair is deterministic, but suppressing classification would let a
     # blocked repair starve reconciliation and selection on every later run.
-    model_call = trigger != "quiet"
+    classify = trigger != "quiet"
     # An untrustworthy snapshot cannot be read for a missing record either, so the
     # repair is only looked for once the health guards above have passed.
     unrecorded = (
@@ -627,17 +608,17 @@ def watch_decision(
         "action": "record_completed_event" if trigger == "record_missing" else "none",
         "actionKey": unrecorded if trigger == "record_missing" else "",
         "rebuildActionKey": rebuild or "",
-        "modelCall": model_call,
+        "classify": classify,
     }
 
 
 # Only these two admitted actions announce themselves before their route runs, and only
-# these four select a release for the publish transaction.
+# these three select a release for the publish transaction.
 WATCH_LIFECYCLE_NOTIFICATION_ACTIONS = frozenset({"new_branch", "branch_eol"})
 # `watch_decision` names a missing event record as its own action. The recovery overlay
 # owns that repair, so it is a route the plan never takes rather than an unrouted one.
 WATCH_RECOVERY_ACTION = "record_completed_event"
-WATCH_PUBLISH_ACTIONS = frozenset({"new_patch", "new_branch", "recipe_rebuild", "reconcile_partial"})
+WATCH_PUBLISH_ACTIONS = frozenset({"new_patch", "new_branch", "recipe_rebuild"})
 
 
 def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:
@@ -699,7 +680,10 @@ def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:
     if action == "no_change":
         return routed("no_change_evidence", "record_reviewed_evidence", notify)
     if edits_required:
-        return routed("dispatch_implementation", "admitted_plan_requires_edits", notify)
+        # Only lifecycle work has a deterministic repository edit to implement.
+        if action in WATCH_LIFECYCLE_NOTIFICATION_ACTIONS:
+            return routed("dispatch_implementation", "admitted_plan_requires_edits", notify)
+        raise ControlError(f"no deterministic implementation exists for action: {action}")
     if action in WATCH_PUBLISH_ACTIONS:
         if record_action_key and action_key == record_action_key:
             # The ledger this plan was admitted against is the one missing this record,
@@ -709,27 +693,6 @@ def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:
     if action == "branch_eol":
         return routed("complete_branch_eol", "complete_admitted_eol", notify)
     raise ControlError(f"watcher action is unrouted: {action} with editsRequired={edits_required}")
-
-
-def retry_decision(
-    event: dict[str, Any],
-    failure_fingerprint: str,
-    max_attempts: int,
-) -> dict[str, Any]:
-    """Decide whether a failed agent phase may be recalled.
-
-    No workflow calls this: the retry budget is an acceptance property, asserted
-    by autorelease/verify.py check A06, which proves an identical repeated
-    failure can never spend an unbounded number of agent runs.
-    """
-    require(0 < max_attempts <= 5, "retry budget is outside the reviewed bound")
-    attempts = int(event.get("attemptCount", 0))
-    previous = event.get("failureFingerprint")
-    if previous == failure_fingerprint and attempts >= max_attempts:
-        return {"recallAgent": False, "reason": "identical_failure_exhausted", "attemptCount": attempts}
-    if previous == failure_fingerprint and event.get("lastRejectionRepeated", False):
-        return {"recallAgent": False, "reason": "identical_rejection", "attemptCount": attempts}
-    return {"recallAgent": attempts < max_attempts, "reason": "bounded_retry", "attemptCount": attempts + 1}
 
 
 def mutation_allowed(operator_state: dict[str, Any]) -> bool:

@@ -11,12 +11,6 @@ on:
         description: Exact admitted php-bin base commit
         required: true
         type: string
-      phase:
-        description: Agent phase
-        required: true
-        default: implementation
-        type: choice
-        options: [implementation, repair]
 
 permissions:
   contents: read
@@ -37,40 +31,57 @@ jobs:
     outputs:
       run_id: ${{ steps.validated.outputs.run_id }}
       base_sha: ${{ steps.validated.outputs.base_sha }}
-      phase: ${{ steps.validated.outputs.phase }}
     steps:
       - name: Enforce exact input shapes
         id: validated
         env:
           RUN_ID: ${{ inputs.investigation_run_id }}
           BASE_SHA: ${{ inputs.exact_base_sha }}
-          PHASE: ${{ inputs.phase }}
         run: |
           [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$PHASE" == "implementation" || "$PHASE" == "repair" ]]
           {
             echo "run_id=$RUN_ID"
             echo "base_sha=$BASE_SHA"
-            echo "phase=$PHASE"
           } >> "$GITHUB_OUTPUT"
 
   implement:
-    name: Offline agent and patch sealing
+    name: Deterministic lifecycle edit and sealing
     needs: preflight
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
+    outputs:
+      action_key: ${{ steps.admitted.outputs.action_key }}
+      action: ${{ steps.admitted.outputs.action }}
+      version: ${{ steps.admitted.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.preflight.outputs.base_sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Download admitted investigation
+      - name: Download admitted classification
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ needs.preflight.outputs.run_id }}
         run: gh run download "$RUN_ID" --name "autorelease-investigation-$RUN_ID" --dir autorelease-run
+      - name: Expose the admitted action
+        id: admitted
+        run: |
+          action_key="$(jq -r .actionKey autorelease-run/autorelease-plan.json)"
+          action="$(jq -r .action autorelease-run/autorelease-plan.json)"
+          # The key reaches outputs and later shell steps, so its alphabet is
+          # re-asserted here by the one mapping every record name derives from.
+          ./autorelease/control.py action-filename "$action_key" > /dev/null
+          test "$(jq -r .actionKey autorelease-run/admission.json)" = "$action_key"
+          [[ "$action" == "new_branch" || "$action" == "branch_eol" ]]
+          version="$(jq -r '.releaseIntent.version // ""' autorelease-run/autorelease-plan.json)"
+          [[ -z "$version" || "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          {
+            echo "action_key=$action_key"
+            echo "action=$action"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
       - name: Enforce operator pause
         run: ./autorelease/control.py operator-gate --operator-file .github/autorelease-operator.json --require-enabled
       - name: Verify exact admitted base
@@ -79,59 +90,20 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$BASE_SHA"
           test "$(jq -r .preconditions.phpBinHead autorelease-run/autorelease-plan.json)" = "$BASE_SHA"
-      - name: Prepare offline phase contract
-        env:
-          PHASE: ${{ needs.preflight.outputs.phase }}
+      - name: Apply the admitted lifecycle edit
         run: |
-          phase="$PHASE"
-          ./scripts/prepare-agent-task \
-            --phase "$phase" \
-            --action-key "$(jq -r .actionKey autorelease-run/autorelease-plan.json)" \
-            --goal "Implement the exact admitted autorelease plan and leave a sealable diff." \
-            --preconditions autorelease-run/preconditions.json \
-            --allowed-authority workspace_write_admitted_paths \
-            --allowed-authority local_advisory_checks \
-            --non-goal protected_control_change \
-            --non-goal irreversible_github_effect \
-            --stop-condition changed_precondition \
-            --stop-condition required_protected_or_unadmitted_change \
-            --stop-condition required_check_unavailable \
-            --shared .github/codex/autorelease/shared.md \
-            --phase-template ".github/codex/autorelease/$phase.md" \
-            --contract-output autorelease-run/implementation-contract.json \
-            --prompt-output autorelease-run/implementation-prompt.md
-          shared="$(./autorelease/control.py digest .github/codex/autorelease/shared.md)"
-          phase_digest="$(./autorelease/control.py digest ".github/codex/autorelease/$phase.md")"
-          event="$(./autorelease/control.py digest autorelease-run/implementation-contract.json)"
-          jq --arg shared "$shared" --arg phaseTemplate "$phase_digest" --arg eventContract "$event" \
-            '.agentContract.instructionDigests={shared:$shared,phaseTemplate:$phaseTemplate,eventContract:$eventContract}' \
-            autorelease-run/autorelease-plan.json > autorelease-run/implementation-plan.json
-          mkdir -p "$RUNNER_TEMP/codex-home"
-          cp ".codex/$phase.config.toml" "$RUNNER_TEMP/codex-home/config.toml"
-      - name: Run offline Codex implementation
-        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
-        with:
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-          codex-version: 0.145.0
-          prompt-file: autorelease-run/implementation-prompt.md
-          output-file: autorelease-run/implementation-result.json
-          codex-home: ${{ runner.temp }}/codex-home
-          sandbox: workspace-write
-          safety-strategy: drop-sudo
-          allow-users: loadinglucian
-          allow-bots: false
-          allow-bot-users: github-actions[bot]
-          codex-args: '["--strict-config","--ephemeral","--output-schema","schemas/agent-completion-assessment.schema.json"]'
-      - name: Seal exact agent diff
+          ./scripts/apply-autorelease-plan \
+            --plan autorelease-run/autorelease-plan.json \
+            --manifest autorelease-run/evidence/evidence-manifest.json \
+            --repo .
+      - name: Seal exact deterministic diff
         env:
           BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
         run: |
           ./scripts/seal-autorelease-patch \
             --repo . \
             --base "$BASE_SHA" \
-            --plan autorelease-run/implementation-plan.json \
-            --result autorelease-run/implementation-result.json \
-            --contract autorelease-run/implementation-contract.json \
+            --plan autorelease-run/autorelease-plan.json \
             --output autorelease-run/sealed
       - name: Retain sealed patch
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -205,23 +177,33 @@ jobs:
           if-no-files-found: error
           retention-days: 90
           include-hidden-files: true
-      # Last step on purpose: the merge job keys on this output and then downloads
-      # the validated artifact, so a failed bundle or upload must leave `passed`
-      # unset rather than advertise a patch that is missing or incomplete. An unset
-      # output reads as not-passed to both merge and repair. validate-repair needs
-      # no equivalent: merge gates on that job's own result, and its upload is
-      # already the last step.
+      # There is no repair phase: a failing check fails this job after its log is
+      # retained, and notify-failure raises the owner issue.
+      - name: Stop on a failed authoritative check
+        if: steps.run-checks.outputs.status != 'passed'
+        run: |
+          echo "Authoritative checks failed on the sealed lifecycle edit; see authoritative-checks.log." >&2
+          exit 1
+      # Last step on purpose: later jobs key on this output and then download the
+      # validated artifact, so a failed bundle or upload must leave `passed` unset
+      # rather than advertise a patch that is missing or incomplete.
       - name: Record that the patch validated
         id: checks
-        if: steps.run-checks.outputs.status == 'passed'
         run: echo "passed=true" >> "$GITHUB_OUTPUT"
 
-  repair:
-    name: One bounded offline repair
-    needs: [preflight, validate]
-    if: needs.validate.outputs.passed != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+  # A new branch merges only once its first release actually builds at the validated
+  # commit and passes the exact module comparison against the list the lifecycle edit
+  # copied. The build holds a read-only token, exactly like the publish build.
+  build-new-branch:
+    name: Build the new branch at the validated commit
+    needs: [preflight, implement, validate]
+    if: needs.validate.outputs.passed == 'true' && needs.implement.outputs.action == 'new_branch'
+    runs-on: macos-26
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.implement.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -229,129 +211,54 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: failed-autorelease-validation-${{ github.run_id }}
-          path: autorelease-run
-      - name: Restore failed patch and prepare exact repair contract
-        run: |
-          git apply --index autorelease-run/sealed/sealed.patch
-          fingerprint="$(./autorelease/control.py digest autorelease-run/authoritative-checks.log)"
-          ./scripts/prepare-agent-task \
-            --phase repair \
-            --action-key "$(jq -r .actionKey autorelease-run/implementation-plan.json)" \
-            --goal "Repair the retained authoritative failure $fingerprint without expanding the admitted diff." \
-            --preconditions autorelease-run/preconditions.json \
-            --allowed-authority workspace_write_admitted_paths \
-            --allowed-authority local_advisory_checks \
-            --non-goal protected_control_change \
-            --non-goal irreversible_github_effect \
-            --stop-condition changed_precondition \
-            --stop-condition repeated_or_unrelated_failure \
-            --stop-condition required_protected_or_unadmitted_change \
-            --shared .github/codex/autorelease/shared.md \
-            --phase-template .github/codex/autorelease/repair.md \
-            --contract-output autorelease-run/repair-contract.json \
-            --prompt-output autorelease-run/repair-prompt-base.md
-          shared="$(./autorelease/control.py digest .github/codex/autorelease/shared.md)"
-          phase_digest="$(./autorelease/control.py digest .github/codex/autorelease/repair.md)"
-          event="$(./autorelease/control.py digest autorelease-run/repair-contract.json)"
-          jq --arg shared "$shared" --arg phaseTemplate "$phase_digest" --arg eventContract "$event" \
-            '.agentContract.instructionDigests={shared:$shared,phaseTemplate:$phaseTemplate,eventContract:$eventContract}' \
-            autorelease-run/implementation-plan.json > autorelease-run/repair-plan.json
-          {
-            cat autorelease-run/repair-prompt-base.md
-            printf '\n\n# Retained authoritative failure log\n\n```text\n'
-            cat autorelease-run/authoritative-checks.log
-            printf '\n```\n\n# Exact admitted plan\n\n```json\n'
-            jq . autorelease-run/repair-plan.json
-            printf '\n```\n'
-          } > autorelease-run/repair-prompt.md
-          mkdir -p "$RUNNER_TEMP/codex-home"
-          cp .codex/repair.config.toml "$RUNNER_TEMP/codex-home/config.toml"
-      - name: Run one offline Codex repair
-        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
-        with:
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-          codex-version: 0.145.0
-          prompt-file: autorelease-run/repair-prompt.md
-          output-file: autorelease-run/repair-result.json
-          codex-home: ${{ runner.temp }}/codex-home
-          sandbox: workspace-write
-          safety-strategy: drop-sudo
-          allow-users: loadinglucian
-          allow-bots: false
-          allow-bot-users: github-actions[bot]
-          codex-args: '["--strict-config","--ephemeral","--output-schema","schemas/agent-completion-assessment.schema.json"]'
-      - name: Seal the combined repaired diff
-        env:
-          BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
-        run: |
-          mv autorelease-run/repair-plan.json autorelease-run/implementation-plan.json
-          ./scripts/seal-autorelease-patch \
-            --repo . \
-            --base "$BASE_SHA" \
-            --plan autorelease-run/implementation-plan.json \
-            --result autorelease-run/repair-result.json \
-            --contract autorelease-run/repair-contract.json \
-            --output autorelease-run/sealed-repair
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: repaired-autorelease-patch-${{ github.run_id }}
-          path: autorelease-run/
-          if-no-files-found: error
-          retention-days: 90
-          include-hidden-files: true
-
-  validate-repair:
-    name: Clean deterministic repair validation
-    needs: [preflight, repair]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ needs.preflight.outputs.base_sha }}
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: repaired-autorelease-patch-${{ github.run_id }}
-          path: autorelease-run
-      - name: Apply and validate exact repaired bytes
-        run: |
-          test "$(./autorelease/control.py digest autorelease-run/sealed-repair/sealed.patch)" = "$(jq -r .patchDigest autorelease-run/sealed-repair/patch-manifest.json)"
-          git apply --index autorelease-run/sealed-repair/sealed.patch
-          ./scripts/test.sh
-          cp autorelease-run/sealed-repair/sealed.patch autorelease-run/sealed/sealed.patch
-          cp autorelease-run/sealed-repair/patch-manifest.json autorelease-run/sealed/patch-manifest.json
-      - name: Record repaired validated SHA and tree
-        env:
-          BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
-        run: |
-          export GIT_AUTHOR_NAME=autorelease-validator
-          export GIT_AUTHOR_EMAIL=autorelease@invalid
-          export GIT_COMMITTER_NAME=autorelease-validator
-          export GIT_COMMITTER_EMAIL=autorelease@invalid
-          export GIT_AUTHOR_DATE=2000-01-01T00:00:00Z
-          export GIT_COMMITTER_DATE=2000-01-01T00:00:00Z
-          git commit -m "chore: apply admitted autorelease repair"
-          jq -n --arg headSha "$(git rev-parse HEAD)" --arg tree "$(git rev-parse HEAD^{tree})" '{headSha:$headSha,tree:$tree,checks:{"Script checks":"success"}}' > autorelease-run/validation.json
-          git bundle create autorelease-run/validated.bundle HEAD "^$BASE_SHA"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: validated-autorelease-patch-${{ github.run_id }}
-          path: autorelease-run/
+          path: autorelease-run
+      - name: Restore exact validated commit
+        run: |
+          validated="$(jq -r .headSha autorelease-run/validation.json)"
+          git fetch autorelease-run/validated.bundle HEAD
+          git checkout --detach "$validated"
+          test "$(git rev-parse HEAD)" = "$validated"
+          test "$(uname -s)" = Darwin && test "$(uname -m)" = arm64
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+      - name: Install build dependencies
+        run: ./scripts/install-build-deps.sh
+      - name: Install pinned StaticPHP
+        run: ./scripts/install-spc.sh
+      - name: Build and compare modules exactly
+        env:
+          # StaticPHP authenticates GitHub API calls only through this variable.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p new-branch-build
+          set +e
+          ./scripts/build.sh "$VERSION" s4 2>&1 | tee new-branch-build/build.log
+          status="${PIPESTATUS[0]}"
+          set -e
+          if [[ "$status" != "0" ]]; then
+            # compare-modules.sh names every missing (-) and unexpected (+) module
+            # under the check that found it; that is the diff the owner acts on.
+            grep -E '^(Checking |Missing modules:|Unexpected modules:|  [-+] |Built shared extensions differ)' \
+              new-branch-build/build.log > new-branch-build/module-diff.txt || true
+            exit "$status"
+          fi
+      - name: Retain the module comparison
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: new-branch-build-${{ github.run_id }}
+          path: new-branch-build/
           if-no-files-found: error
           retention-days: 90
-          include-hidden-files: true
 
   merge:
     name: Exact-SHA PR and merge admission
-    needs: [preflight, validate, validate-repair]
-    # always() keeps this job reachable when repair paths skip, so the preflight
-    # result is asserted explicitly. Without it a rejected dispatch input would
-    # still reach checkout, with an empty ref.
-    if: always() && needs.preflight.result == 'success' && (needs.validate.outputs.passed == 'true' || needs['validate-repair'].result == 'success')
+    needs: [preflight, implement, validate, build-new-branch]
+    # always() keeps this job reachable when the branch build is skipped for an EOL, so
+    # the preflight result is asserted explicitly. Without it a rejected dispatch input
+    # would still reach checkout, with an empty ref.
+    if: always() && needs.preflight.result == 'success' && needs.validate.outputs.passed == 'true' && (needs['build-new-branch'].result == 'success' || needs['build-new-branch'].result == 'skipped')
     runs-on: ubuntu-latest
     timeout-minutes: 130
     permissions:
@@ -381,7 +288,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          action_key="$(jq -r .actionKey autorelease-run/implementation-plan.json)"
+          action_key="$(jq -r .actionKey autorelease-run/autorelease-plan.json)"
           branch="autorelease/$(./autorelease/control.py action-filename "$action_key" --suffix '')"
           gh auth setup-git
           git push origin "HEAD:refs/heads/$branch"
@@ -409,8 +316,8 @@ jobs:
           actual="$(gh pr view "${{ steps.pr.outputs.number }}" --json headRefOid --jq .headRefOid)"
           test "$actual" = "$expected"
           test "$(git rev-parse HEAD)" = "$expected"
-          admitted_head="$(jq -r .preconditions.phpBinHead autorelease-run/implementation-plan.json)"
-          admitted_policy="$(jq -r .preconditions.supportPolicyDigest autorelease-run/implementation-plan.json)"
+          admitted_head="$(jq -r .preconditions.phpBinHead autorelease-run/autorelease-plan.json)"
+          admitted_policy="$(jq -r .preconditions.supportPolicyDigest autorelease-run/autorelease-plan.json)"
           git fetch origin main
           current_head="$(git rev-parse origin/main)"
           current_policy="sha256:$(git show origin/main:support-policy.json | shasum -a 256 | awk '{print $1}')"
@@ -443,19 +350,18 @@ jobs:
           test "$(git rev-parse "${{ steps.merged.outputs.commit }}^{tree}")" = "$(jq -r .tree autorelease-run/validation.json)"
           git checkout -B "autorelease/readiness-${{ github.run_id }}" origin/main
           base="$(git rev-parse HEAD)"
-          action_key="$(jq -r .actionKey autorelease-run/implementation-plan.json)"
+          action_key="$(jq -r .actionKey autorelease-run/autorelease-plan.json)"
           filename="$(./autorelease/control.py action-filename "$action_key")"
           mkdir -p autorelease-events
           jq -n \
             --arg actionKey "$action_key" \
-            --arg classification "$(jq -r .action autorelease-run/implementation-plan.json)" \
+            --arg classification "$(jq -r .action autorelease-run/autorelease-plan.json)" \
             --arg phpBinCommit "${{ steps.merged.outputs.commit }}" \
             --arg planDigest "$(jq -r .planDigest autorelease-run/sealed/patch-manifest.json)" \
             --arg policyDigest "$(./autorelease/control.py digest support-policy.json)" \
             --arg policyInvariantsDigest "$(./autorelease/control.py digest autorelease/policy-invariants.json)" \
             --arg evidenceManifestDigest "$(jq -r .manifestDigest autorelease-run/evidence/evidence-manifest.json)" \
             --argjson evidenceDigests "$(jq '[.captures[].digest]' autorelease-run/evidence/evidence-manifest.json)" \
-            --argjson instructionDigests "$(jq .agentContract.instructionDigests autorelease-run/implementation-plan.json)" \
             '{
               schemaVersion:1,
               actionKey:$actionKey,
@@ -467,8 +373,7 @@ jobs:
               supportPolicyDigest:$policyDigest,
               policyInvariantsDigest:$policyInvariantsDigest,
               evidenceManifestDigest:$evidenceManifestDigest,
-              evidenceDigests:$evidenceDigests,
-              instructionDigests:$instructionDigests
+              evidenceDigests:$evidenceDigests
             }' > "autorelease-events/$filename"
           jq -n \
             --arg commit "${{ steps.merged.outputs.commit }}" \
@@ -513,3 +418,75 @@ jobs:
           test "$(git diff --name-only "${{ steps.readiness.outputs.base_sha }}" "$actual")" = "${{ steps.readiness.outputs.record }}"
           test "sha256:$(git show "$actual:${{ steps.readiness.outputs.record }}" | shasum -a 256 | awk '{print $1}')" = "${{ steps.readiness.outputs.digest }}"
           gh pr merge "${{ steps.readiness.outputs.number }}" --squash --delete-branch
+
+  # Any failed phase stops here with one deduplicated owner issue on the action key.
+  # A new branch whose build fails the exact module comparison carries that module
+  # diff, so the owner can correct expected-modules/<branch>.txt by pull request.
+  notify-failure:
+    name: Notify actionable implementation failure
+    needs: [preflight, implement, validate, build-new-branch, merge]
+    if: always() && needs.preflight.result == 'success' && (needs.implement.result == 'failure' || needs.validate.result == 'failure' || needs['build-new-branch'].result == 'failure' || needs.merge.result == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      # Only a failed branch build retains a module comparison; every other failure
+      # keeps the generic summary below.
+      - name: Download the module comparison
+        if: needs['build-new-branch'].result == 'failure'
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: new-branch-build-${{ github.run_id }}
+          path: new-branch-build
+      - name: Create a structured event keyed on the admitted action
+        env:
+          ACTION_KEY: ${{ needs.implement.outputs.action_key }}
+          VERSION: ${{ needs.implement.outputs.version }}
+          BUILD_RESULT: ${{ needs['build-new-branch'].result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # An implement job that failed before exposing its key still reports, under
+          # a key namespaced to this run.
+          if [[ -z "$ACTION_KEY" ]]; then
+            ACTION_KEY="implementation-failure:${{ github.run_id }}"
+          else
+            ./autorelease/control.py action-filename "$ACTION_KEY" > /dev/null
+          fi
+          if [[ "$BUILD_RESULT" == "failure" && -s new-branch-build/module-diff.txt ]]; then
+            state=needs_human
+            # The issue body is Markdown; the fence is built from octal escapes so the
+            # format string holds no backquotes for the shell to misread.
+            fence="$(printf '\140\140\140')"
+            summary="$(printf 'The first build of PHP %s failed the exact module comparison against the copied module list, so nothing was merged. Correct expected-modules/%s.txt by pull request; the next watcher run retries the branch.\n\n%stext\n%s\n%s\n\nRun: %s' \
+              "$VERSION" "${VERSION%.*}" "$fence" "$(head -n 200 new-branch-build/module-diff.txt)" "$fence" "$RUN_URL")"
+            fingerprint="module-diff:$(shasum -a 256 new-branch-build/module-diff.txt | awk '{print $1}')"
+          else
+            state=blocked
+            summary="Autorelease implementation of $ACTION_KEY failed before merging anything: $RUN_URL"
+            fingerprint="implementation-failure:$ACTION_KEY"
+          fi
+          jq -n \
+            --arg actionKey "$ACTION_KEY" \
+            --arg state "$state" \
+            --arg summary "$summary" \
+            --arg failureFingerprint "$fingerprint" \
+            '{actionKey:$actionKey,state:$state,severity:"critical",humanActionRequired:true,summary:$summary,failureFingerprint:$failureFingerprint}' \
+            > event.json
+      - name: Notify owner
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/notify-autorelease \
+            --event event.json \
+            --state notification-state.json \
+            --output notification.json \
+            --backend github \
+            --repo "${{ github.repository }}" \
+            --owner "${{ vars.AUTORELEASE_OWNER }}"

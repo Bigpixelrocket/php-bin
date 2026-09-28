@@ -110,7 +110,7 @@ try:
         input_value={
             "github_owned_allowed": True,
             "verified_allowed": False,
-            "patterns_allowed": ["jdx/mise-action@*", "openai/codex-action@*"],
+            "patterns_allowed": ["jdx/mise-action@*"],
         },
     )
     gh(

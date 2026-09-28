@@ -28,10 +28,6 @@ ACTION_KEY_RE = re.compile(
     r"repair:\d+\.\d+\.\d+:[0-9a-f]{8,64}|"
     r"(?:source_unhealthy|health_failed|policy_failure|auth_failure):[0-9a-f]{8,64})$"
 )
-COMPLETION_EVIDENCE_REF_RE = re.compile(
-    r"^(evidence\[\d+\]|preconditions\.(?:phpBinHead|misePhpHead|supportPolicyDigest)|"
-    r"researchSources\[\d+\])$"
-)
 STABLE_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[1-9]\d*)?$")
 PROTECTED_PATHS = pathlib.Path(__file__).with_name("protected-paths.json")
 try:
@@ -99,11 +95,6 @@ def contained_path(root: pathlib.Path, value: Any, label: str) -> pathlib.Path:
     resolved = (resolved_root / pathlib.Path(*relative.parts)).resolve()
     require(resolved.is_relative_to(resolved_root), f"unsafe {label}: {value}")
     return resolved
-
-
-def instruction_digest(path: pathlib.Path) -> str:
-    require(path.is_file(), f"instruction file does not exist: {path}")
-    return sha256_file(path)
 
 
 def resolve_json_pointer(document: Any, pointer: str) -> Any:

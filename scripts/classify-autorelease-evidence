@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""Classify one retained watcher capture into exactly one autorelease plan."""
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from autorelease.control import main
+
+raise SystemExit(main(["classify", *sys.argv[1:]]))

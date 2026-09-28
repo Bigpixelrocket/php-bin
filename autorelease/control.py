@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 """Deterministic autorelease controls.
 
-This module deliberately does not classify PHP releases or lifecycle state.
-It validates authority, evidence, state transitions, and immutable effects
-selected by Codex.
+No model takes part in any decision. Captured evidence is classified by fixed
+rules, every classified plan is admitted by an independent check, and lifecycle
+edits, state transitions, and immutable release effects are all computed here.
 
 It is the stable import surface for the package behind it, so every name the
 workflows, scripts, verifier, and tests already use stays importable from here:
 
-- `_validation` — digests, canonical JSON, path containment, and the regular
+- `_validation`: digests, canonical JSON, path containment, and the regular
   expressions that fix the shape of every identifier.
-- `_evidence` — the opaque capture client and the readers that re-derive a
+- `_evidence`: the opaque capture client and the readers that re-derive a
   cited capture's identity.
-- `_state` — the event, release, and watcher state machines, including the one
+- `_state`: the event, release, and watcher state machines, including the one
   routing table the watcher follows.
-- `_admission` — the three gates model-authored work passes: the plan, the
-  sealed patch, and the merge.
+- `_classifier`: the priority rules that turn one capture into exactly one
+  plan, and the reviewed reader of the supported-versions page.
+- `_admission`: the three independent gates a plan and its repository change
+  pass: the plan, the sealed patch, and the merge.
+- `_implementation`: the deterministic repository edits of an admitted
+  lifecycle plan.
 """
 
 from __future__ import annotations
@@ -38,7 +42,8 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from autorelease._admission import (  # noqa: E402
-    PROHIBITED_AGENT_AUTHORITY,
+    PLAN_ACTIONS,
+    PLAN_FIELDS,
     RECIPE_INPUT_PATHS,
     REQUIRED_PLAN_CHECKS,
     _validate_plan_shape,
@@ -47,14 +52,24 @@ from autorelease._admission import (  # noqa: E402
     git,
     recipe_identity,
     seal_patch,
-    validate_completion_assessment,
     validate_plan,
     validate_recipe_rebuild_evidence,
     validate_release_is_newest_patch,
     validate_stable_release_evidence,
     validate_support_policy,
-    validate_task_contract,
     verify_merge,
+)
+from autorelease._classifier import (  # noqa: E402
+    SourceFormatError,
+    SupportRow,
+    branch_of,
+    classify_evidence,
+    parse_supported_versions,
+    version_key,
+)
+from autorelease._implementation import (  # noqa: E402
+    apply_lifecycle_plan,
+    render_support_policy,
 )
 from autorelease._evidence import (  # noqa: E402
     BRANCH_FEED_CAPTURE_RE,
@@ -95,7 +110,6 @@ from autorelease._state import (  # noqa: E402
     release_recipe_identity,
     release_transition,
     retained_notification_issue,
-    retry_decision,
     route_watch_action,
     transition_event,
     unrecorded_published_release,
@@ -105,7 +119,6 @@ from autorelease._state import (  # noqa: E402
 from autorelease._validation import (  # noqa: E402
     ACTION_KEY_RE,
     COMMIT_SHA_RE,
-    COMPLETION_EVIDENCE_REF_RE,
     PROTECTED_PATHS,
     PROTECTED_PATTERNS,
     ROOT,
@@ -116,7 +129,6 @@ from autorelease._validation import (  # noqa: E402
     _archive_member_name,
     canonical_json,
     contained_path,
-    instruction_digest,
     load_json,
     path_is_allowed,
     path_is_protected,
@@ -143,8 +155,8 @@ def project_release_identity(body: bytes) -> bytes:
     other field stays covered by the digest, and the capture client retains the
     unprojected bytes beside the digested body. A body that is not a GitHub
     releases array is returned unchanged so an unexpected source format still
-    registers as changed evidence. This projects identity only: classifying
-    lifecycle state from a body remains forbidden (verify.py check A11).
+    registers as changed evidence. This projects identity only; the classifier
+    reads release state from the stored projection, never from these rules.
     """
     try:
         releases = json.loads(body)
@@ -174,13 +186,14 @@ def strip_supported_versions_date_presentation(body: bytes) -> bytes:
     marker whose coordinates and label move daily, and relative-age table
     cells that restate the adjacent absolute dates as time since or until
     now. A digest covering them wakes the watcher every day with no
-    lifecycle consequence, forcing a model call and an evidence-state PR on
+    lifecycle consequence, forcing a classification and an evidence-state PR on
     otherwise quiet days. The projection empties only those two renderings;
     branch rows and their absolute support dates stay covered, and the
     capture client retains the unprojected bytes beside the digested body.
     A body without the markers is returned unchanged so an unexpected page
     format still registers as changed evidence. This projects identity
-    only: classifying lifecycle state from a body remains forbidden
+    only: lifecycle state is read from the stored body by the reviewed
+    parser in `_classifier`, which fails closed on any other page shape
     (verify.py check A11).
     """
     body = re.sub(rb'<g class="today">.*?</g>', b'<g class="today"></g>', body, flags=re.DOTALL)
@@ -190,7 +203,8 @@ def strip_supported_versions_date_presentation(body: bytes) -> bytes:
 # Which sources are authoritative is a reviewed decision rather than a client detail, so
 # the registry stays in this surface and is handed to the capture client. autorelease/
 # verify.py check A11 reads this file to prove the raw sources are still fetched as
-# opaque bytes and never classified into lifecycle state. Two reviewed identity
+# opaque bytes; lifecycle state is read afterwards, from the stored capture, by the
+# reviewed parser in `_classifier`. Two reviewed identity
 # projections exist: the GitHub releases digests must not cover per-asset download
 # counters or draft releases (visible only to some tokens), and the supported-versions
 # digest must not cover the page's renderings of the capture date. None of these carry
@@ -285,6 +299,14 @@ def due_recipe_rebuild(manifest_path: pathlib.Path, root: pathlib.Path, commit: 
     return pending_recipe_rebuild(captured_php_bin_releases(manifest_path), recipe_identities(root, commit))
 
 
+def load_event_records(directory: pathlib.Path) -> list[dict[str, Any]]:
+    """Load every durable event record, failing closed on a missing directory or bad file."""
+    require(directory.is_dir(), f"events directory is missing: {directory}")
+    records = [load_json(path) for path in sorted(directory.glob("*.json"))]
+    require(all(isinstance(record, dict) for record in records), "event record must be an object")
+    return records
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -292,9 +314,16 @@ def main(argv: list[str] | None = None) -> int:
     digest_parser = subparsers.add_parser("digest")
     digest_parser.add_argument("path", type=pathlib.Path)
 
-    contract_parser = subparsers.add_parser("validate-contract")
-    contract_parser.add_argument("--contract", required=True, type=pathlib.Path)
-    contract_parser.add_argument("--assessment", required=True, type=pathlib.Path)
+    classify_parser = subparsers.add_parser("classify")
+    classify_parser.add_argument("--manifest", required=True, type=pathlib.Path)
+    classify_parser.add_argument("--preconditions", required=True, type=pathlib.Path)
+    classify_parser.add_argument("--events", required=True, type=pathlib.Path)
+    classify_parser.add_argument("--output", required=True, type=pathlib.Path)
+
+    apply_parser = subparsers.add_parser("apply-lifecycle")
+    apply_parser.add_argument("--plan", required=True, type=pathlib.Path)
+    apply_parser.add_argument("--manifest", required=True, type=pathlib.Path)
+    apply_parser.add_argument("--repo", required=True, type=pathlib.Path)
 
     capture_parser = subparsers.add_parser("capture-evidence")
     capture_parser.add_argument("--output", required=True, type=pathlib.Path)
@@ -345,11 +374,20 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "digest":
             print(sha256_file(args.path))
-        elif args.command == "validate-contract":
-            contract = load_json(args.contract)
-            assessment = load_json(args.assessment)
-            validate_completion_assessment(assessment, contract, assessment.get("instructionDigests"))
-            print(json.dumps({"valid": True}))
+        elif args.command == "classify":
+            plan = classify_evidence(
+                args.manifest,
+                load_json(args.preconditions),
+                load_event_records(args.events),
+                validate_support_policy(ROOT)["maintainedBranches"],
+            )
+            write_json(args.output, plan)
+            print(json.dumps({"action": plan["action"], "actionKey": plan["actionKey"]}))
+        elif args.command == "apply-lifecycle":
+            plan = load_json(args.plan)
+            manifest = load_json(args.manifest)
+            require(isinstance(plan, dict) and isinstance(manifest, dict), "plan and manifest must be objects")
+            print(json.dumps({"changed": apply_lifecycle_plan(args.repo, plan, manifest)}))
         elif args.command == "capture-evidence":
             print(
                 json.dumps(

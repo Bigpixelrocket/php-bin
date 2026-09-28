@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import copy
 import datetime as dt
 import hashlib
 import json
@@ -23,17 +22,16 @@ from autorelease.control import (
     action_filename,
     audit_reconstruction,
     canonical_json,
-    instruction_digest,
+    classify_evidence,
+    manifest_digest,
     mutation_allowed,
     notification_decision,
     path_is_protected,
     release_transition,
-    retry_decision,
     seal_patch,
     sha256_bytes,
     sha256_file,
     transition_event,
-    validate_completion_assessment,
     validate_plan,
     verify_merge,
     watch_decision,
@@ -43,34 +41,9 @@ from autorelease.control import (
 PHP_ROOT = pathlib.Path(__file__).resolve().parents[1]
 PIN_RE = re.compile(r"^\s*uses:\s*[^#\s]+@([0-9a-f]{40})(?:\s*#.*)?$", re.MULTILINE)
 UNPINNED_RE = re.compile(r"^\s*uses:\s*[^#\s]+@(?![0-9a-f]{40}(?:\s|$))[^#\s]+", re.MULTILINE)
-CODEX_ACTION = "openai/codex-action@"
-CANONICAL_CODEX_CONFIG = re.compile(
-    r'cp\s+"?\.codex/\S+\.config\.toml"?\s+"\$RUNNER_TEMP/codex-home/config\.toml"'
-)
-# Markers of the lifecycle classifier the deterministic controls must never grow. A02
-# proves the controls stay deterministic by behavior; A04 and A11 back that with the
-# absence of any parser, so they must read the whole control package rather than the
-# facade alone — otherwise moving a parser into a submodule would satisfy both.
-FORBIDDEN_CLASSIFIER_MARKERS = ("BeautifulSoup", "support_table_to_events", "classify_php_release")
-
-
-def control_package_source() -> str:
-    """Return every deterministic control module's text as one searchable string.
-
-    `verify.py` is excluded because it is the harness, not a control: it names the
-    forbidden markers to assert their absence and would otherwise fail on itself.
-    """
-    # rglob, not glob: sub-packaging the controls is exactly the kind of move that
-    # made this scan necessary, and a nested module must not fall out of it.
-    modules = sorted(
-        path for path in (PHP_ROOT / "autorelease").rglob("*.py") if path.name != "verify.py"
-    )
-    assert_true(
-        {"control.py", "_admission.py", "_evidence.py", "_state.py", "_validation.py"}
-        <= {path.name for path in modules},
-        "the control package no longer exposes the modules the absence checks scan",
-    )
-    return "\n".join(path.read_text() for path in modules)
+# Any Action published by this owner, or any reference to its credential, would bring a
+# model back into a pipeline that is deterministic by design (A07).
+MODEL_ACTION_PREFIX = "openai/"
 
 
 def run(*args: str, cwd: pathlib.Path, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -122,10 +95,10 @@ def operator_gate_calls(run: str) -> list[str]:
 
 
 def credential_sites(node: Any, path: str) -> list[str]:
-    """Return every path in a parsed workflow whose keys or values name the OpenAI credential.
+    """Return every path in a parsed workflow whose keys or values name a model credential.
 
-    Both spellings reach an agent: `openai-api-key` as an action input and
-    `OPENAI_API_KEY` as an environment name. Either can be attached at the
+    Both spellings once reached an agent: `openai-api-key` as an action input and
+    `OPENAI_API_KEY` as an environment name. Either could be attached at the
     workflow, job, or step level, or interpolated straight into a command, so
     the whole parsed document is walked rather than one level of it.
     """
@@ -178,162 +151,137 @@ def init_repo(path: pathlib.Path, files: dict[str, str] | None = None) -> str:
     return exact_head(path)
 
 
-def fixture_contract(phase: str = "investigation") -> dict[str, Any]:
-    return {
-        "contractVersion": 1,
-        "phase": phase,
-        "goal": f"Complete the {phase} fixture goal.",
-        "actionKey": "new_patch:8.5.9",
-        "preconditions": {},
-        "allowedAuthority": ["read_repository"] if phase == "investigation" else ["workspace_write_admitted_paths"],
-        "nonGoals": ["irreversible_github_effect"],
-        "completionCriteria": [
-            {
-                "id": "goal-correct",
-                "requirement": "Goal remains correct.",
-                "evidenceRequired": "Exact evidence reference.",
-            },
-            {
-                "id": "work-complete",
-                "requirement": "All phase work is complete.",
-                "evidenceRequired": "Exact evidence reference.",
-            },
-        ],
-        "stopConditions": ["changed_precondition", "protected_change"],
+FIXTURE_HEADS = {"phpBinHead": "a" * 40, "misePhpHead": "b" * 40}
+FIXTURE_POLICY_DIGEST = "sha256:" + "c" * 64
+# A supported-versions page in the reviewed table shape; `rows` maps each branch to
+# its row class and security support end.
+SUPPORT_ROW = (
+    '<tr class="{state}">\n<td>\n<a href="/downloads.php?version={branch}">{branch}</a>\n</td>\n'
+    "<td>1 Jan 2024</td>\n<td class=\"collapse-phone\"></td>\n<td>1 Jan 2025</td>\n"
+    '<td class="collapse-phone"></td>\n<td>{until}</td>\n<td class="collapse-phone"></td>\n'
+    "<td>Notes</td>\n</tr>\n"
+)
+
+
+def support_page(rows: dict[str, tuple[str, str]]) -> bytes:
+    body = "".join(
+        SUPPORT_ROW.format(state=state, branch=branch, until=until) for branch, (state, until) in rows.items()
+    )
+    return (
+        '<table class="standard">\n<thead>\n<tr>\n<th>Branch</th>\n<th colspan="2">Initial Release</th>\n'
+        '<th colspan="2">Active Support Until</th>\n<th colspan="2">Security Support Until</th>\n'
+        '<th colspan="2">Notes</th>\n</tr>\n</thead>\n<tbody>\n' + body + "</tbody>\n</table>\n"
+    ).encode()
+
+
+def fixture_capture(
+    directory: pathlib.Path,
+    *,
+    branch_feeds: dict[str, str],
+    aggregate: str,
+    page: bytes,
+    releases: list[dict[str, Any]],
+    rebuild: str = "",
+    incomplete: list[str] | None = None,
+) -> pathlib.Path:
+    """Write one watcher capture set in the retained artifact layout and return its manifest.
+
+    `directory` plays `autorelease-run/`: the manifest lives in `evidence/` and the
+    watch decision beside it, exactly where the classifier and admission read them.
+    """
+    bodies = {
+        "php_supported_versions": page,
+        "php_release_feed": canonical_json({aggregate.split(".")[0]: {"version": aggregate}}),
+        **{
+            f"php_release_feed_{branch}": canonical_json({"version": version})
+            for branch, version in branch_feeds.items()
+        },
+        "php_source_tags": canonical_json([]),
+        "php_bin_releases": canonical_json(releases),
+        "php_bin_state": canonical_json({"sha": "a" * 40}),
+        "mise_php_releases": canonical_json([]),
+        "mise_php_state": canonical_json({"sha": "b" * 40}),
     }
-
-
-def assessment(contract: dict[str, Any], digests: dict[str, str], status: str = "passed") -> dict[str, Any]:
-    passed = status == "passed"
-    return {
-        "contractVersion": 1,
-        "instructionDigests": digests,
-        "phaseStatus": "complete" if passed else "blocked",
-        "criteria": [
+    raw = directory / "evidence/raw"
+    raw.mkdir(parents=True)
+    captures = []
+    for capture_id, body in bodies.items():
+        (raw / f"{capture_id}.body").write_bytes(body)
+        captures.append(
             {
-                "id": item["id"],
-                "status": status,
-                "evidence": ["evidence[0]"] if passed else [],
+                "captureId": capture_id,
+                "status": 200,
+                "digest": sha256_bytes(body),
+                "bodyPath": f"raw/{capture_id}.body",
             }
-            for item in contract["completionCriteria"]
-        ],
-        "goNoGo": "go" if passed else "no_go",
-        "unresolved": [] if passed else ["fixture unresolved"],
-        "summary": "Fixture assessment.",
+        )
+    manifest = {
+        "schemaVersion": 1,
+        "capturedAt": "2026-09-28T00:00:00Z",
+        "captures": captures,
+        "manifestDigest": manifest_digest(captures),
     }
+    manifest_path = directory / "evidence/evidence-manifest.json"
+    manifest_path.write_bytes(canonical_json(manifest))
+    decision = {
+        "schemaVersion": 1,
+        "trigger": "evidence_changed",
+        "manifestDigest": manifest["manifestDigest"],
+        "incompleteActions": sorted(incomplete or []),
+        "action": "none",
+        "actionKey": "",
+        "rebuildActionKey": rebuild,
+        "classify": True,
+    }
+    (directory / "watch-decision.json").write_bytes(canonical_json(decision))
+    return manifest_path
+
+
+def classify_fixture(manifest_path: pathlib.Path, events: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    return classify_evidence(
+        manifest_path,
+        {**FIXTURE_HEADS, "supportPolicyDigest": FIXTURE_POLICY_DIGEST},
+        events or [],
+        ["8.4", "8.5"],
+    )
+
+
+def admit(plan: dict[str, Any], manifest_path: pathlib.Path, pending_rebuild: str | None = None) -> dict[str, Any]:
+    return validate_plan(plan, manifest_path, FIXTURE_HEADS, FIXTURE_POLICY_DIGEST, set(), pending_rebuild)
+
+
+MAINTAINED_PAGE = {"8.4": ("stable", "31 Dec 2028"), "8.5": ("stable", "31 Dec 2029")}
+PUBLISHED = [{"tag_name": "8.5.9", "draft": False, "prerelease": False}, {"tag_name": "8.4.20"}]
 
 
 def fixture_admission_inputs(directory: pathlib.Path, action: str = "new_patch") -> dict[str, Any]:
-    shared = PHP_ROOT / ".github/codex/autorelease/shared.md"
-    phase = PHP_ROOT / ".github/codex/autorelease/investigation.md"
-    event_path = directory / "event-contract.json"
-    contract = fixture_contract()
-    event_path.write_bytes(canonical_json(contract))
-    digests = {
-        "shared": instruction_digest(shared),
-        "phaseTemplate": instruction_digest(phase),
-        "eventContract": instruction_digest(event_path),
-    }
-    raw = directory / "raw"
-    raw.mkdir()
-    release_versions = {"new_patch": "8.5.9", "new_branch": "8.6.0"}
-    release_version = release_versions.get(action, "8.5.9")
-    # A rebuild is evidenced by the published release it supersedes, not by a feed.
-    capture_id = "php_bin_releases" if action == "recipe_rebuild" else "php_release_feed"
-    body = (
-        canonical_json([{"tag_name": release_version, "draft": False, "prerelease": False}])
-        if action == "recipe_rebuild"
-        else canonical_json({"release": {"version": release_version, "stable": True}})
+    """Classify one synthetic capture whose evidence calls for `action`."""
+    feeds = {"8.4": "8.4.20", "8.5": "8.5.9"}
+    page = dict(MAINTAINED_PAGE)
+    aggregate = "8.5.9"
+    rebuild = ""
+    if action == "new_patch":
+        feeds["8.5"] = aggregate = "8.5.10"
+    elif action == "new_branch":
+        page["8.6"] = ("stable", "31 Dec 2030")
+        aggregate = "8.6.0"
+    elif action == "branch_eol":
+        page["8.4"] = ("eol", "31 Dec 2026")
+    elif action == "recipe_rebuild":
+        rebuild = "recipe_rebuild:8.5.9:1"
+    manifest_path = fixture_capture(
+        directory, branch_feeds=feeds, aggregate=aggregate, page=support_page(page), releases=PUBLISHED, rebuild=rebuild
     )
-    (raw / "release.body").write_bytes(body)
-    manifest_path = directory / "evidence-manifest.json"
-    manifest = {
-        "schemaVersion": 1,
-        "captures": [
-            {
-                "captureId": capture_id,
-                "digest": sha256_bytes(body),
-                "bodyPath": "raw/release.body",
-                "status": 200,
-            }
-        ],
-    }
-    manifest_path.write_bytes(canonical_json(manifest))
-    action_keys = {
-        "new_patch": "new_patch:8.5.9",
-        "new_branch": "new_branch:8.6",
-        "branch_eol": "branch_eol:8.2:2026-12-31",
-        "recipe_rebuild": "recipe_rebuild:8.5.9:1",
-    }
-    release_intent = (
-        {"version": release_version, "sourceIdentifier": "php_release_feed"}
-        if action in {"new_patch", "new_branch"}
-        else {"version": f"{release_version}-1", "sourceIdentifier": "php_bin_releases"}
-        if action == "recipe_rebuild"
-        else None
-    )
-    no_edit = action in {"new_patch", "recipe_rebuild"}
-    plan = {
-        "schemaVersion": 1,
-        "actionKey": action_keys[action],
-        "action": action,
-        "agentContract": {"contractVersion": 1, "instructionDigests": digests},
-        "evidence": [
-            {
-                "captureId": capture_id,
-                "digest": sha256_bytes(body),
-                "claim": f"Fixture supports {action}",
-                "locator": {
-                    "kind": "json_pointer",
-                    "value": "/0/tag_name" if action == "recipe_rebuild" else "/release/version",
-                },
-            }
-        ],
-        "researchSources": [],
-        "repositories": ["php-bin"],
-        "preconditions": {
-            "phpBinHead": "a" * 40,
-            "misePhpHead": "b" * 40,
-            "supportPolicyDigest": "sha256:" + "c" * 64,
-        },
-        "editsRequired": not no_edit,
-        "allowedPaths": {"php-bin": [] if no_edit else ["expected-modules/*.txt"]},
-        "requiredChecks": ["Script checks"],
-        "releaseIntent": release_intent,
-        "agentOperations": [],
-        "budgets": {"maxModelCalls": 1, "maxRetries": 1, "timeoutMinutes": 30},
-        "notification": {"suggestedSeverity": "info", "summary": "fixture", "humanActionRequired": False},
-        "risk": "routine" if no_edit else "lifecycle",
-        "completionAssessment": assessment(contract, digests),
-        "summary": "Evidence-bound fixture.",
-    }
     return {
-        "contract": contract,
-        "eventPath": event_path,
-        "digests": digests,
         "manifestPath": manifest_path,
-        "manifest": manifest,
-        "plan": plan,
-        "shared": shared,
-        "phase": phase,
+        "plan": classify_fixture(manifest_path),
         # The watcher's deterministic selection, which a rebuild plan must name exactly.
-        "pendingRebuild": action_keys[action] if action == "recipe_rebuild" else None,
+        "pendingRebuild": rebuild or None,
     }
 
 
 def admit_fixture(inputs: dict[str, Any]) -> dict[str, Any]:
-    return validate_plan(
-        inputs["plan"],
-        inputs["manifestPath"],
-        inputs["contract"],
-        inputs["shared"],
-        inputs["phase"],
-        inputs["eventPath"],
-        {"phpBinHead": "a" * 40, "misePhpHead": "b" * 40},
-        "sha256:" + "c" * 64,
-        set(),
-        inputs["pendingRebuild"],
-    )
+    return admit(inputs["plan"], inputs["manifestPath"], inputs["pendingRebuild"])
 
 
 class Verifier:
@@ -373,32 +321,22 @@ class Verifier:
         )
 
     def a00(self, directory: pathlib.Path) -> list[str]:
-        contract = fixture_contract()
-        digests = {"shared": "sha256:" + "a" * 64, "phaseTemplate": "sha256:" + "b" * 64, "eventContract": "sha256:" + "c" * 64}
-        good = assessment(contract, digests)
-        validate_completion_assessment(good, contract, digests)
-        for mutation in ("failed", "unresolved", "changed-precondition", "protected-change", "out-of-scope"):
-            bad = copy.deepcopy(good)
-            if mutation == "failed":
-                bad["criteria"][0] = {"id": "goal-correct", "status": "failed", "evidence": []}
-            elif mutation == "unresolved":
-                bad["unresolved"] = ["unresolved"]
-            elif mutation == "changed-precondition":
-                bad["instructionDigests"]["eventContract"] = "sha256:" + "d" * 64
-            elif mutation == "protected-change":
-                bad["goNoGo"] = "go"
-                bad["phaseStatus"] = "blocked"
-            else:
-                bad["criteria"].append({"id": "extra", "status": "passed", "evidence": ["x"]})
-            assert_reject(lambda bad=bad: validate_completion_assessment(bad, contract, digests))
-        (directory / "contract.json").write_bytes(canonical_json(contract))
-        (directory / "assessment.json").write_bytes(canonical_json(good))
-        return ["contract.json", "assessment.json"]
+        """The classifier is a pure function of the capture: same inputs, same plan bytes."""
+        first = fixture_admission_inputs(directory / "first")
+        second = fixture_admission_inputs(directory / "second")
+        assert_true(
+            canonical_json(first["plan"]) == canonical_json(second["plan"]),
+            "the classifier produced different plans from identical captures",
+        )
+        admission = admit_fixture(first)
+        (directory / "plan.json").write_bytes(canonical_json(first["plan"]))
+        (directory / "admission.json").write_bytes(canonical_json(admission))
+        return ["plan.json", "admission.json"]
 
     def a01(self, directory: pathlib.Path) -> list[str]:
         manifest = {"manifestDigest": "sha256:" + "a" * 64, "captures": [{"status": 200}]}
         result = watch_decision(manifest, manifest, [{"actionKey": "new_patch:8.5.8", "state": "complete"}], {"healthy": True})
-        assert_true(result["trigger"] == "quiet" and result["modelCall"] is False, "quiet run woke a model")
+        assert_true(result["trigger"] == "quiet" and result["classify"] is False, "quiet run woke the classifier")
         assert_true(notification_decision({"state": "complete"}, {"fingerprint": notification_decision({"state": "complete"}, None)["fingerprint"]})["action"] == "none", "quiet replay mutated notification")
         (directory / "decision.json").write_bytes(canonical_json(result))
         return ["decision.json"]
@@ -407,30 +345,29 @@ class Verifier:
         inputs = fixture_admission_inputs(directory)
         result = admit_fixture(inputs)
         (directory / "admission.json").write_bytes(canonical_json(result))
-        return ["evidence-manifest.json", "admission.json"]
+        return ["evidence/evidence-manifest.json", "admission.json"]
 
     def a03(self, directory: pathlib.Path) -> list[str]:
-        missing_dir = directory / "missing"
-        missing_dir.mkdir()
-        inputs = fixture_admission_inputs(missing_dir)
-        (missing_dir / "raw/release.body").unlink()
-        assert_reject(lambda: admit_fixture(inputs), "missing")
-        altered_dir = directory / "altered"
-        altered_dir.mkdir()
-        inputs2 = fixture_admission_inputs(altered_dir)
-        (altered_dir / "raw/release.body").write_text("altered")
-        assert_reject(lambda: admit_fixture(inputs2), "digest mismatch")
-        # Evidence that proves the version exists but also names a later patch on the
-        # same branch is stale: publishing it would ship an intermediate release.
-        superseded_dir = directory / "superseded"
-        superseded_dir.mkdir()
-        inputs3 = fixture_admission_inputs(superseded_dir)
-        body = canonical_json({"release": {"version": "8.5.9", "stable": True}, "8": {"version": "8.5.10"}})
-        (superseded_dir / "raw/release.body").write_bytes(body)
-        inputs3["manifest"]["captures"][0]["digest"] = sha256_bytes(body)
-        inputs3["manifestPath"].write_bytes(canonical_json(inputs3["manifest"]))
-        inputs3["plan"]["evidence"][0]["digest"] = sha256_bytes(body)
-        assert_reject(lambda: admit_fixture(inputs3), "superseded")
+        missing = fixture_admission_inputs(directory / "missing")
+        (missing["manifestPath"].parent / "raw/php_release_feed_8.5.body").unlink()
+        assert_reject(lambda: admit_fixture(missing), "missing")
+        altered = fixture_admission_inputs(directory / "altered")
+        (altered["manifestPath"].parent / "raw/php_release_feed_8.5.body").write_text("altered")
+        assert_reject(lambda: admit_fixture(altered), "digest mismatch")
+        # Evidence that proves the version exists while another captured feed names a
+        # later patch on the same branch is stale: publishing it would ship an
+        # intermediate release. The classifier waits; a plan that insists is rejected.
+        proposed = fixture_admission_inputs(directory / "proposed")
+        manifest_path = fixture_capture(
+            directory / "superseded",
+            branch_feeds={"8.4": "8.4.20", "8.5": "8.5.10"},
+            aggregate="8.5.11",
+            page=support_page(MAINTAINED_PAGE),
+            releases=PUBLISHED,
+        )
+        assert_true(classify_fixture(manifest_path)["action"] == "no_change", "the classifier proposed a superseded patch")
+        # The same 8.5.10 plan, cited against a capture that also names 8.5.11.
+        assert_reject(lambda: admit(proposed["plan"], manifest_path), "superseded")
         fingerprint = sha256_bytes(b"bad-evidence-rejection")
         (directory / "fingerprint.txt").write_text(fingerprint + "\n")
         return ["fingerprint.txt"]
@@ -438,29 +375,34 @@ class Verifier:
     def a04(self, directory: pathlib.Path) -> list[str]:
         actions = {}
         for action in ("new_patch", "new_branch", "branch_eol", "recipe_rebuild"):
-            target = directory / action
-            target.mkdir()
-            inputs = fixture_admission_inputs(target, action)
+            inputs = fixture_admission_inputs(directory / action, action)
+            assert_true(inputs["plan"]["action"] == action, f"the classifier did not classify {action}")
             admit_fixture(inputs)
             actions[action] = inputs["plan"]["actionKey"]
-        # The rebuild is selected deterministically, so the agent can only confirm it.
+        # The rebuild is selected deterministically, so the classifier can only confirm it.
         for pending in (None, "recipe_rebuild:8.5.9:2"):
             assert_reject(
                 lambda pending=pending: admit_fixture({**inputs, "pendingRebuild": pending}),
                 "not the selected rebuild",
             )
-        source = control_package_source()
+        # A due patch outranks a due rebuild.
+        both = fixture_capture(
+            directory / "patch-and-rebuild",
+            branch_feeds={"8.4": "8.4.21", "8.5": "8.5.9"},
+            aggregate="8.5.9",
+            page=support_page(MAINTAINED_PAGE),
+            releases=PUBLISHED,
+            rebuild="recipe_rebuild:8.5.9:1",
+        )
         assert_true(
-            not any(item in source for item in FORBIDDEN_CLASSIFIER_MARKERS),
-            "deterministic control contains lifecycle classifier",
+            classify_fixture(both)["actionKey"] == "new_patch:8.4.21",
+            "a due rebuild was classified ahead of a due patch",
         )
         (directory / "classifications.json").write_bytes(canonical_json(actions))
         return ["classifications.json"]
 
     def a05(self, directory: pathlib.Path) -> list[str]:
-        target = directory / "admission"
-        target.mkdir()
-        inputs = fixture_admission_inputs(target)
+        inputs = fixture_admission_inputs(directory / "admission")
         admit_fixture(inputs)
         assert_true(inputs["plan"]["editsRequired"] is False, "no-edit patch requested implementation")
         assets = directory / "assets"
@@ -473,106 +415,65 @@ class Verifier:
         return ["transaction.json"]
 
     def a06(self, directory: pathlib.Path) -> list[str]:
-        event = {"attemptCount": 1, "failureFingerprint": "fp"}
-        first = retry_decision(event, "fp", 2)
-        exhausted = retry_decision({**event, "attemptCount": 2}, "fp", 2)
-        repeated = retry_decision({**event, "lastRejectionRepeated": True}, "fp", 2)
-        assert_true(first["recallAgent"], "bounded repair was not allowed")
-        assert_true(not exhausted["recallAgent"] and not repeated["recallAgent"], "exhausted identical failure recalled agent")
+        """A failed check stops the run with retained logs; nothing retries or repairs it."""
         workflows = {
             "php-bin": PHP_ROOT / ".github/workflows/autorelease-implement.yml",
             "mise-php": self.mise_root / ".github/workflows/autorelease-consumer.yml",
         }
         for name, path in workflows.items():
             document = load_workflow(path)
-            steps = workflow_steps(document)
+            jobs = document.get("jobs", {})
             assert_true(
-                any("authoritative-checks.log" in (step.get("run") or "") for _, _, step in steps),
+                not {"repair", "validate-repair"} & set(jobs),
+                f"{name} still has a repair phase",
+            )
+            validation = jobs.get("validate", {})
+            steps = [step for step in validation.get("steps") or [] if isinstance(step, dict)]
+            assert_true(
+                any("authoritative-checks.log" in (step.get("run") or "") for step in steps),
                 f"{name} does not retain deterministic failure logs",
-            )
-            repair_agents = [
-                step
-                for job_name, _, step in steps
-                if job_name == "repair" and str(step.get("uses") or "").startswith(CODEX_ACTION)
-            ]
-            assert_true(
-                len(repair_agents) == 1,
-                f"{name} does not bound the repair phase to one agent invocation",
-            )
-            validation = document.get("jobs", {}).get("validate-repair", {})
-            assert_true(
-                "repair" in (validation.get("needs") or []),
-                f"{name} does not validate repaired bytes in a job that follows the repair",
             )
             assert_true(
                 any(
-                    "sealed-repair" in (step.get("run") or "")
-                    and "./scripts/test.sh" in (step.get("run") or "")
-                    for step in validation.get("steps") or []
+                    "status != 'passed'" in str(step.get("if") or "") and "exit 1" in (step.get("run") or "")
+                    for step in steps
                 ),
-                f"{name} does not cleanly validate repaired bytes",
+                f"{name} does not fail the run on a failed authoritative check",
             )
+        notify = load_workflow(workflows["php-bin"]).get("jobs", {}).get("notify-failure", {})
         assert_true(
-            'network_access = false' in (PHP_ROOT / ".codex/repair.config.toml").read_text()
-            and 'network_access = false' in (self.mise_root / ".codex/repair.config.toml").read_text(),
-            "repair network access is not disabled",
+            (notify.get("permissions") or {}).get("issues") == "write"
+            and any("notify-autorelease" in (step.get("run") or "") for step in notify.get("steps") or []),
+            "a failed php-bin implementation does not raise the owner issue",
         )
-        evidence = {
-            "first": first,
-            "exhausted": exhausted,
-            "repeated": repeated,
-            "phpWorkflowDigest": sha256_file(PHP_ROOT / ".github/workflows/autorelease-implement.yml"),
-            "miseWorkflowDigest": sha256_file(self.mise_root / ".github/workflows/autorelease-consumer.yml"),
-        }
-        (directory / "retry.json").write_bytes(canonical_json(evidence))
-        return ["retry.json"]
+        evidence = {name: sha256_file(path) for name, path in workflows.items()}
+        (directory / "no-repair.json").write_bytes(canonical_json(evidence))
+        return ["no-repair.json"]
 
     def a07(self, directory: pathlib.Path) -> list[str]:
-        # Every reviewed agent invocation, keyed by the workflow and job that may
-        # start it, with the sandbox that bounds its network and write authority.
-        reviewed_sandboxes = {
-            ("autorelease-watch.yml", "investigate"): "read-only",
-            ("autorelease-implement.yml", "implement"): "workspace-write",
-            ("autorelease-implement.yml", "repair"): "workspace-write",
-        }
-        observed_sandboxes = {}
-        for name in ("autorelease-watch.yml", "autorelease-implement.yml"):
-            steps = workflow_steps(load_workflow(PHP_ROOT / ".github/workflows" / name))
-            for job_name, index, step in steps:
-                if not str(step.get("uses") or "").startswith(CODEX_ACTION):
-                    continue
-                inputs = step.get("with") or {}
-                observed_sandboxes[(name, job_name)] = inputs.get("sandbox")
-                assert_true(
-                    not any(
-                        item.startswith("--profile")
-                        for item in json.loads(inputs.get("codex-args") or "[]")
-                    ),
-                    f"{name}:{job_name} selects a named profile instead of the canonical config",
-                )
-                assert_true(
-                    any(
-                        other_job == job_name
-                        and other_index < index
-                        and CANONICAL_CODEX_CONFIG.search(other.get("run") or "")
-                        for other_job, other_index, other in steps
-                    ),
-                    f"{name}:{job_name} starts the agent without loading its canonical config",
-                )
-        assert_true(
-            observed_sandboxes == reviewed_sandboxes,
-            "investigation and implementation agents are not bound to their reviewed sandboxes",
-        )
-        assert_true('network_access = false' in (PHP_ROOT / ".codex/implementation.config.toml").read_text(), "implementation network is not disabled")
-        assert_true('allowed_domains = ["php.net", "github.com", "docs.github.com"]' in (PHP_ROOT / ".codex/investigation.config.toml").read_text(), "investigation allowlist changed")
-        (directory / "boundary.txt").write_text("investigation=allowlisted-web-only\nimplementation=offline\nshell-network=disabled-by-sandbox\n")
-        return ["boundary.txt"]
+        """No workflow in either repository invokes a model or can read a model credential."""
+        observed = {}
+        for name, root in {"php-bin": PHP_ROOT, "mise-php": self.mise_root}.items():
+            for path in sorted((root / ".github/workflows").glob("*.yml")):
+                document = load_workflow(path)
+                actions = [
+                    str(step.get("uses") or "")
+                    for _job, _index, step in workflow_steps(document)
+                    if str(step.get("uses") or "").startswith(MODEL_ACTION_PREFIX)
+                ]
+                sites = credential_sites(document, path.name)
+                assert_true(not actions, f"{name}/{path.name} invokes a model action: {actions}")
+                assert_true(not sites, f"{name}/{path.name} names a model credential: {sites}")
+                observed[f"{name}/{path.name}"] = sha256_file(path)
+            for leftover in (".codex", ".github/codex", ".github/codex-action-contract.json"):
+                assert_true(not (root / leftover).exists(), f"{name} still carries {leftover}")
+        (directory / "workflows.json").write_bytes(canonical_json(observed))
+        return ["workflows.json"]
 
     def a08(self, directory: pathlib.Path) -> list[str]:
         protected_classes = [
             ".github/workflows/evil.yml",
-            ".github/codex/autorelease/shared.md",
-            "schemas/agent-task-contract.schema.json",
+            "schemas/autorelease-plan.schema.json",
             "autorelease/control.py",
             "autorelease/policy-invariants.json",
             "unadmitted.txt",
@@ -584,20 +485,11 @@ class Verifier:
             target = repo / path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("unsafe\n")
-            contract = fixture_contract("implementation")
-            contract_path = directory / f"contract-{index}.json"
-            contract_path.write_bytes(canonical_json(contract))
-            digests = {"shared": "sha256:" + "a" * 64, "phaseTemplate": "sha256:" + "b" * 64, "eventContract": sha256_file(contract_path)}
-            plan = {
-                "actionKey": "repair:8.5.9:deadbeef",
-                "agentContract": {"instructionDigests": digests},
-                "allowedPaths": {"php-bin": ["safe.txt"]},
-            }
-            result = assessment(contract, digests)
+            plan = {"actionKey": "new_branch:8.6", "allowedPaths": {"php-bin": ["safe.txt"]}}
             expected = "unadmitted path" if path == "unadmitted.txt" else "protected path"
             assert_reject(
-                lambda repo=repo, base=base, plan=plan, result=result, contract=contract, index=index: seal_patch(
-                    repo, base, plan, result, contract, directory / f"sealed-{index}"
+                lambda repo=repo, base=base, plan=plan, index=index: seal_patch(
+                    repo, base, plan, directory / f"sealed-{index}"
                 ),
                 expected,
             )
@@ -658,7 +550,7 @@ class Verifier:
         assert_true(quiet.returncode != 0, "mise-php names a record file for a quiet run")
         # mise-php's byte-parity gate fails closed on the first step of every consumer
         # run when a shared file drifts, and only a human can re-sync its protected copy.
-        # A shared file that either repository lets an agent rewrite is therefore a
+        # A shared file that either repository lets automation rewrite is therefore a
         # cross-repository stall, and neither repository's own tests can see it: each
         # checks the manifest against its own pattern list alone. The verdicts come from
         # mise-php's own admission module so a rewritten matcher still has to answer.
@@ -708,22 +600,30 @@ class Verifier:
         return ["eol-policy.txt"]
 
     def a11(self, directory: pathlib.Path) -> list[str]:
-        inputs = fixture_admission_inputs(directory)
-        body_path = directory / "raw/release.body"
-        body = b'{\n  "release": { "stable": true, "version": "8.5.9" }\n}\n'
-        body_path.write_bytes(body)
-        inputs["manifest"]["captures"][0]["digest"] = sha256_bytes(body)
-        inputs["manifestPath"].write_bytes(canonical_json(inputs["manifest"]))
-        inputs["plan"]["evidence"][0]["digest"] = sha256_bytes(body)
+        """An unrecognised lifecycle page is an owner issue, never a guess."""
+        inputs = fixture_admission_inputs(directory / "reviewed")
         admit_fixture(inputs)
+        redesigned = fixture_capture(
+            directory / "redesigned",
+            branch_feeds={"8.4": "8.4.20", "8.5": "8.5.10"},
+            aggregate="8.5.10",
+            page=b"<main><h1>Supported Versions</h1><ul><li>8.5</li></ul></main>\n",
+            releases=PUBLISHED,
+        )
+        plan = classify_fixture(redesigned)
+        assert_true(
+            plan["action"] == "blocked" and plan["actionKey"].startswith("source_unhealthy:"),
+            "an unrecognised lifecycle page did not stop classification",
+        )
+        assert_true(
+            plan["editsRequired"] is False and plan["releaseIntent"] is None,
+            "a blocked plan authorizes work",
+        )
+        admit(plan, redesigned)
         registry = (PHP_ROOT / "autorelease/control.py").read_text()
         assert_true("supported-versions.php" in registry, "the authoritative source registry left the control surface")
-        source = control_package_source()
-        assert_true(
-            not any(item in source for item in FORBIDDEN_CLASSIFIER_MARKERS),
-            "source-format handling became a lifecycle parser",
-        )
-        return ["evidence-manifest.json"]
+        (directory / "blocked-plan.json").write_bytes(canonical_json(plan))
+        return ["blocked-plan.json"]
 
     def a12(self, directory: pathlib.Path) -> list[str]:
         repo = directory / "repo"
@@ -754,51 +654,23 @@ class Verifier:
         for path in workflows:
             body = path.read_text()
             assert_true(not UNPINNED_RE.search(body), f"workflow has unpinned Action: {path}")
-        codex_contracts = {}
-        for name, root in {"php-bin": PHP_ROOT, "mise-php": self.mise_root}.items():
-            result = run("./scripts/validate-codex-action-inputs", "--json", cwd=root)
-            codex_contracts[name] = json.loads(result.stdout)
-        assert_true(
-            codex_contracts["php-bin"]["commit"] == codex_contracts["mise-php"]["commit"]
-            and codex_contracts["php-bin"]["metadataDigest"] == codex_contracts["mise-php"]["metadataDigest"],
-            "repositories do not share the same reviewed Codex Action contract",
-        )
-        assert_true(
-            codex_contracts["php-bin"]["codexVersion"] == codex_contracts["mise-php"]["codexVersion"],
-            "repositories do not pin the same reviewed Codex CLI version",
-        )
-        (directory / "codex-action-inputs.json").write_bytes(canonical_json(codex_contracts))
         pins = json.loads((PHP_ROOT / ".github/autorelease-pins.json").read_text())
-        assert_true(
-            pins["actions"]["openai/codex-action"] == codex_contracts["php-bin"]["commit"],
-            "Codex Action pin is not bound to the reviewed input contract",
-        )
         e2e = PHP_ROOT / ".github/workflows/autorelease-e2e.yml"
-        canary_schema_steps = [
-            step
-            for job_name, _, step in workflow_steps(load_workflow(e2e))
-            if job_name == "agent-canary" and "canary/schema.json" in (step.get("run") or "")
-        ]
-        assert_true(
-            len(canary_schema_steps) == 1,
-            "the credentialed agent canary does not build its output schema in one step",
-        )
-        # The canary schema is generated, so the generator is rendered here and
-        # the resulting schema is asserted instead of its source formatting.
-        program = re.search(r"'([^']+)'\s*>\s*canary/schema\.json", canary_schema_steps[0]["run"])
-        assert_true(program is not None, "the credentialed agent canary schema is not built by one jq program")
-        canary_schema = json.loads(
-            run("jq", "-n", "--arg", "nonce", "fixture-nonce", program.group(1), cwd=PHP_ROOT).stdout
-        )
-        assert_true(
-            canary_schema.get("additionalProperties") is False
-            and canary_schema.get("properties", {}).get("status") == {"type": "string", "const": "passed"}
-            and canary_schema.get("properties", {}).get("nonce") == {"type": "string", "const": "fixture-nonce"},
-            "credentialed agent canary schema does not bind status and nonce to exact strings",
-        )
         assert_true(
             pins["workflows"][".github/workflows/autorelease-e2e.yml"] == sha256_file(e2e),
             "reviewed production-parity workflow digest changed",
+        )
+        assert_true(
+            not any(action.startswith(MODEL_ACTION_PREFIX) for action in pins["actions"]),
+            "a model Action is still pinned",
+        )
+        e2e_document = load_workflow(e2e)
+        # YAML 1.1 reads the bare `on` key as the boolean true.
+        triggers = e2e_document.get("on") or e2e_document.get("true") or {}
+        suites = triggers.get("workflow_dispatch", {}).get("inputs", {}).get("suite", {})
+        assert_true(
+            suites.get("options") == ["production-parity", "notification-canary", "live-canary"],
+            "the e2e suites are not the reviewed deterministic set",
         )
         watch_document = load_workflow(PHP_ROOT / ".github/workflows/autorelease-watch.yml")
         workflow_permissions = watch_document.get("permissions", {})
@@ -807,21 +679,7 @@ class Verifier:
         assert_true(
             isinstance(investigate_permissions, dict)
             and investigate_permissions.get("contents") == "read",
-            "runtime investigation does not have resolved read-only contents permission",
-        )
-        # The release transaction runs no agent, so no part of it may carry the
-        # credential: not a workflow, job, or step environment, not an input,
-        # and not an interpolation inside a command body.
-        release_credential_sites = sorted(
-            set(
-                credential_sites(
-                    load_workflow(PHP_ROOT / ".github/workflows/autorelease-publish.yml"), "autorelease-publish"
-                )
-            )
-        )
-        assert_true(
-            not release_credential_sites,
-            f"the release transaction can read the OpenAI credential: {release_credential_sites}",
+            "runtime classification does not have resolved read-only contents permission",
         )
         admin = PHP_ROOT / "docs/autorelease-admin-evidence.json"
         assert_true(admin.is_file(), "redacted administrator evidence is missing")
@@ -829,15 +687,9 @@ class Verifier:
         assert_true(evidence.get("canary", {}).get("removed") is True, "admin canary was not removed")
         assert_true(evidence.get("protectionRestored") is True, "fixture bypass protection was not restored")
         assert_true(evidence.get("immutableReleasesEnabled") is True, "immutable releases were not enabled")
-        agent_canary_environment = evidence.get("agentCanaryEnvironment", {})
-        assert_true(
-            agent_canary_environment.get("name") == "php-autorelease-canary"
-            and agent_canary_environment.get("protectedBranchesOnly") is True
-            and agent_canary_environment.get("administratorBypass") is False,
-            "credentialed agent canary environment is not protected",
-        )
         shutil.copy(admin, directory / admin.name)
-        return [admin.name, "codex-action-inputs.json"]
+        (directory / "pins.json").write_bytes(canonical_json(pins))
+        return [admin.name, "pins.json"]
 
     def a14(self, directory: pathlib.Path) -> list[str]:
         assets = directory / "assets"
@@ -866,7 +718,7 @@ class Verifier:
         event = {"actionKey": "new_patch:8.5.8", "state": "complete", "finalResult": "passed"}
         first = notification_decision(event, None)
         replay = notification_decision(event, {"fingerprint": first["fingerprint"]})
-        assert_true(not decision["modelCall"] and replay["action"] == "none", "completed replay caused side effect")
+        assert_true(not decision["classify"] and replay["action"] == "none", "completed replay caused side effect")
         assert_reject(lambda: transition_event({"state": "complete"}, "released", [{"digest": "x"}]))
         (directory / "replay.json").write_bytes(canonical_json({"watch": decision, "notification": replay}))
         return ["replay.json"]
@@ -932,14 +784,16 @@ class Verifier:
             "release effects are not gated by the live operator state",
         )
         mise_steps = workflow_steps(load_workflow(self.mise_root / ".github/workflows/autorelease-consumer.yml"))
+        # The compare job binds the synchronization plan to the operator commit and state;
+        # the merge job re-reads both at merge time and refuses on any change.
         operator_bound_jobs = {
             job_name
             for job_name, _, step in mise_steps
-            if "phpBinOperatorCommit" in (step.get("run") or "")
-            and "operatorState" in (step.get("run") or "")
+            if ("phpBinOperatorCommit" in (step.get("run") or "") and "operatorState" in (step.get("run") or ""))
+            or ("--operator-commit" in (step.get("run") or "") and "--operator-state" in (step.get("run") or ""))
         }
         assert_true(
-            {"investigate", "merge-and-record-readiness"} <= operator_bound_jobs,
+            {"compare", "merge-and-record-readiness"} <= operator_bound_jobs,
             "mise synchronization is not bound to the php-bin operator control",
         )
         event = {"actionKey": "new_patch:8.5.9", "state": "release_requested", "history": []}
@@ -984,14 +838,14 @@ class Verifier:
         assert_true(exact_head(PHP_ROOT) == self.php_sha, "php-bin checkout does not match --php-bin-sha")
         assert_true(exact_head(self.mise_root) == self.mise_sha, "mise-php checkout does not match --mise-php-sha")
         checks = [
-            ("A00", "Agent goal and completion contract", self.a00),
+            ("A00", "Deterministic classification", self.a00),
             ("A01", "Quiet run", self.a01),
             ("A02", "Evidence-bound plan", self.a02),
             ("A03", "Bad evidence rejection", self.a03),
-            ("A04", "Agent classification fixtures", self.a04),
+            ("A04", "Classification fixtures", self.a04),
             ("A05", "No-edit release", self.a05),
-            ("A06", "Bounded repair", self.a06),
-            ("A07", "Network separation", self.a07),
+            ("A06", "Failure stops without repair", self.a06),
+            ("A07", "No model invocation", self.a07),
             ("A08", "Forbidden diff", self.a08),
             ("A09", "New branch coordination", self.a09),
             ("A10", "EOL behavior", self.a10),
@@ -1022,23 +876,18 @@ class Verifier:
             PHP_ROOT / "autorelease/protected-paths.json",
             self.mise_root / "support-snapshot.json",
         ]
-        instruction_roots = {"php-bin": PHP_ROOT, "mise-php": self.mise_root}
-        instruction_names = ("shared.md", "investigation.md", "implementation.md", "repair.md")
-        instruction_digests = {
-            f"{repo}/.github/codex/autorelease/{name}": sha256_file(
-                root / ".github/codex/autorelease" / name
-            )
-            for repo, root in instruction_roots.items()
-            for name in instruction_names
+        control_digests = {
+            f"autorelease/{path.name}": sha256_file(path)
+            for path in sorted((PHP_ROOT / "autorelease").glob("_*.py"))
         }
         report = {
             "schemaVersion": 1,
-            "verifierVersion": "1.0.0",
+            "verifierVersion": "2.0.0",
             "startedAt": self.started.isoformat(),
             "finishedAt": finished.isoformat(),
             "repositories": {"php-bin": self.php_sha, "mise-php": self.mise_sha},
             "actionPins": pins,
-            "instructionDigests": instruction_digests,
+            "controlDigests": control_digests,
             "configurationDigests": {path.name: sha256_file(path) for path in configuration_paths},
             "tests": self.results,
             "result": "passed" if all(item["result"] == "passed" for item in self.results) else "failed",
