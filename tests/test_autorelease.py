@@ -2149,6 +2149,14 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertIn("./scripts/capture-autorelease-evidence --output release-run/evidence", recapture["run"])
         self.assertIn("./autorelease/control.py validate-recaptured-evidence", recapture["run"])
         self.assertIn('test "$is_draft" = "false"', recapture["run"])
+        # The re-downloaded plan is bound to the dispatched transaction, as in `release`.
+        for bound in (
+            'test "$(jq -r .actionKey admitted-run/autorelease-plan.json)" = "$ACTION_KEY"',
+            'test "$(jq -r .releaseIntent.version admitted-run/autorelease-plan.json)" = "$VERSION"',
+            'test "$(jq -r .preconditions.phpBinHead admitted-run/autorelease-plan.json)" = "$EXACT_COMMIT"',
+        ):
+            self.assertLess(recapture["run"].index(bound), recapture["run"].index("capture-autorelease-evidence"))
+        self.assertEqual("${{ needs.preflight.outputs.action_key }}", recapture["env"]["ACTION_KEY"])
         self.assertNotIn("if", recapture)
 
         # Every artifact a rerun could upload again is named per attempt.

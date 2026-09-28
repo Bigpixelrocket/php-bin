@@ -156,7 +156,9 @@ only after the one before succeeded:
 3. `publish` resumes the handed-over transaction. While the release is still a
    draft it recaptures and revalidates the admitted evidence, supersession
    included, because a rerun of the failed jobs reuses the release job's
-   handoff without repeating that job's recapture. It then re-reads the draft
+   handoff without repeating that job's recapture. Evidence that moved stops
+   the run with the verified draft left in place, and the next admitted
+   dispatch reuses that draft. It then re-reads the draft
    once more, records `publishing`, and only then makes the release public. A
    run that stops between the publication and its record is therefore still
    known to be possibly live, and reports a warning rather than a failed

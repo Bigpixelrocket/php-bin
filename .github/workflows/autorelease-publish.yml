@@ -521,6 +521,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
+          ACTION_KEY: ${{ needs.preflight.outputs.action_key }}
           INVESTIGATION_RUN_ID: ${{ needs.preflight.outputs.investigation_run_id }}
         run: |
           is_draft="$(gh release view "$VERSION" --repo "${{ github.repository }}" --json isDraft --jq .isDraft)"
@@ -528,6 +529,9 @@ jobs:
             gh run download "$INVESTIGATION_RUN_ID" \
               --name "autorelease-investigation-$INVESTIGATION_RUN_ID" \
               --dir admitted-run
+            test "$(jq -r .actionKey admitted-run/autorelease-plan.json)" = "$ACTION_KEY"
+            test "$(jq -r .releaseIntent.version admitted-run/autorelease-plan.json)" = "$VERSION"
+            test "$(jq -r .preconditions.phpBinHead admitted-run/autorelease-plan.json)" = "$EXACT_COMMIT"
             ./scripts/capture-autorelease-evidence --output release-run/evidence
             ./autorelease/control.py validate-recaptured-evidence \
               --plan admitted-run/autorelease-plan.json \
