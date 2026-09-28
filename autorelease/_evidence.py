@@ -11,6 +11,7 @@ stays a reviewed decision rather than a client detail.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import re
 import secrets
@@ -318,6 +319,14 @@ class EvidenceSource:
     # EDGE_CACHE_BYPASS_PARAMETER. Only the fetch changes: `url` stays the
     # canonical address the manifest records.
     bypass_edge_cache: bool = False
+    # Read a GitHub list endpoint page by page; see `PAGINATED_CAPTURE_MAX_PAGES`.
+    paginate: bool = False
+
+
+# A paginated capture reads at most this many pages. A list that is still full on the
+# last page makes the capture fail as unhealthy rather than silently truncate it, so
+# evidence identity never depends on where a limit happened to cut.
+PAGINATED_CAPTURE_MAX_PAGES = 20
 
 
 def fetch_url(source: EvidenceSource) -> str:
@@ -330,6 +339,26 @@ def fetch_url(source: EvidenceSource) -> str:
         return source.url
     separator = "&" if urllib.parse.urlparse(source.url).query else "?"
     return f"{source.url}{separator}{EDGE_CACHE_BYPASS_PARAMETER}={secrets.token_hex(16)}"
+
+
+def page_url(url: str, page: int) -> str:
+    """Return the address of one page of a paginated list endpoint."""
+    separator = "&" if urllib.parse.urlparse(url).query else "?"
+    return f"{url}{separator}page={page}"
+
+
+def page_size(source: EvidenceSource) -> int:
+    """Return the page size a paginated source requests in its own canonical URL.
+
+    The size is read from the URL rather than assumed, so a short page is recognised
+    as the last one whatever size the registry asks for.
+    """
+    values = urllib.parse.parse_qs(urllib.parse.urlparse(source.url).query).get("per_page", [])
+    require(
+        len(values) == 1 and values[0].isdigit() and int(values[0]) > 0,
+        f"paginated source has no page size: {source.capture_id}",
+    )
+    return int(values[0])
 
 
 def require_edge_cache_miss(source: EvidenceSource, headers: Any) -> None:
@@ -345,6 +374,72 @@ def require_edge_cache_miss(source: EvidenceSource, headers: Any) -> None:
     status = str(headers.get(EDGE_CACHE_STATUS_HEADER) or "").strip().upper()
     if status == "HIT":
         raise EdgeCacheHit(f"edge cache served a bypassing fetch: {source.capture_id}")
+
+
+def _fetch(opener: Any, source: EvidenceSource, url: Callable[[], str], headers: dict[str, str]) -> tuple[int, Any, bytes]:
+    """Fetch one address with bounded retries and return its status, headers, and body.
+
+    A retryable failure (a timeout, a 408 or 429, a 5xx, or a connection error) is tried
+    three times in all; any other failure, including a rejected body, is raised at once.
+    `url` is called per attempt, so a cache-bypassing source gets a fresh address each time.
+    """
+    last_error: Exception | None = None
+    for attempt in range(3):
+        if attempt:
+            time.sleep(2**attempt)
+        try:
+            request = urllib.request.Request(url(), headers=headers)
+            with opener.open(request, timeout=30) as response:
+                require_edge_cache_miss(source, response.headers)
+                body = response.read(source.max_bytes + 1)
+                require(len(body) <= source.max_bytes, f"capture too large: {source.capture_id}")
+                return response.status, response.headers, body
+        except ControlError:
+            raise
+        except urllib.error.HTTPError as error:
+            last_error = error
+            if error.code not in {408, 429} and not 500 <= error.code < 600:
+                raise
+        except (OSError, urllib.error.URLError) as error:
+            last_error = error
+    assert last_error is not None
+    raise last_error
+
+
+def _fetch_source(opener: Any, source: EvidenceSource, headers: dict[str, str]) -> tuple[int, Any, bytes]:
+    """Fetch a source's whole body: one response, or every page of a paginated list.
+
+    Pages are requested in order until one comes back shorter than the page size, and
+    their arrays are concatenated in that order into one canonical JSON array, so the
+    body names every item exactly as the endpoint listed it and nothing about where the
+    pages were split. A first page that is not a JSON array is returned unchanged, so an
+    unexpected source format still registers as changed evidence; a later page that is
+    not one, an unhealthy page, too many pages, or too many bytes fails the capture.
+    The status and headers recorded are the first page's.
+    """
+    if not source.paginate:
+        return _fetch(opener, source, lambda: fetch_url(source), headers)
+    size = page_size(source)
+    items: list[Any] = []
+    first: tuple[int, Any] | None = None
+    for page in range(1, PAGINATED_CAPTURE_MAX_PAGES + 1):
+        status, response_headers, body = _fetch(opener, source, lambda: page_url(fetch_url(source), page), headers)
+        try:
+            listed = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            listed = None
+        if not isinstance(listed, list):
+            require(page == 1, f"paginated capture page {page} is not an array: {source.capture_id}")
+            return status, response_headers, body
+        require(status == 200, f"paginated capture page {page} is unhealthy: {source.capture_id}")
+        if first is None:
+            first = (status, response_headers)
+        items.extend(listed)
+        if len(listed) < size:
+            combined = canonical_json(items)
+            require(len(combined) <= source.max_bytes, f"capture too large: {source.capture_id}")
+            return first[0], first[1], combined
+    raise ControlError(f"capture exceeds {PAGINATED_CAPTURE_MAX_PAGES} pages: {source.capture_id}")
 
 
 def capture_evidence(
@@ -371,57 +466,41 @@ def capture_evidence(
         if token and urllib.parse.urlparse(source.url).hostname == "api.github.com":
             headers["Authorization"] = f"Bearer {token}"
         last_error: Exception | None = None
-        for attempt in range(3):
-            if attempt:
-                time.sleep(2**attempt)
-            try:
-                request = urllib.request.Request(fetch_url(source), headers=headers)
-                with opener.open(request, timeout=30) as response:
-                    require_edge_cache_miss(source, response.headers)
-                    body = response.read(source.max_bytes + 1)
-                    require(len(body) <= source.max_bytes, f"capture too large: {source.capture_id}")
-                    stored = source.normalize(body) if source.normalize else body
-                    body_path = pathlib.Path("raw") / f"{source.capture_id}.body"
-                    destination = output_dir / body_path
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    destination.write_bytes(stored)
-                    raw_path = destination.parent / f"{source.capture_id}.body.raw"
-                    if stored != body:
-                        # The projection is what admission and recapture verify, so
-                        # the digest covers the stored body; the unprojected bytes
-                        # stay retrievable for audit but carry no identity.
-                        raw_path.write_bytes(body)
-                    else:
-                        # A reused output directory must not retain a raw artifact
-                        # from an earlier capture the manifest no longer describes.
-                        raw_path.unlink(missing_ok=True)
-                    captures.append(
-                        {
-                            "captureId": source.capture_id,
-                            "url": source.url,
-                            "retrievedAt": utc_now(),
-                            "status": response.status,
-                            "contentType": response.headers.get("Content-Type"),
-                            "etag": response.headers.get("ETag"),
-                            "lastModified": response.headers.get("Last-Modified"),
-                            # Diagnostic only, outside evidence identity: shows which
-                            # edge answered when a feed later looks stale.
-                            "edgeCache": response.headers.get(EDGE_CACHE_STATUS_HEADER),
-                            "digest": sha256_bytes(stored),
-                            "bodyPath": body_path.as_posix(),
-                        }
-                    )
-                    last_error = None
-                    break
-            except ControlError as error:
-                last_error = error
-                break
-            except urllib.error.HTTPError as error:
-                last_error = error
-                if error.code not in {408, 429} and not 500 <= error.code < 600:
-                    break
-            except (OSError, urllib.error.URLError) as error:
-                last_error = error
+        try:
+            status, response_headers, body = _fetch_source(opener, source, headers)
+            stored = source.normalize(body) if source.normalize else body
+            body_path = pathlib.Path("raw") / f"{source.capture_id}.body"
+            destination = output_dir / body_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(stored)
+            raw_path = destination.parent / f"{source.capture_id}.body.raw"
+            if stored != body:
+                # The projection is what admission and recapture verify, so
+                # the digest covers the stored body; the unprojected bytes
+                # stay retrievable for audit but carry no identity.
+                raw_path.write_bytes(body)
+            else:
+                # A reused output directory must not retain a raw artifact
+                # from an earlier capture the manifest no longer describes.
+                raw_path.unlink(missing_ok=True)
+            captures.append(
+                {
+                    "captureId": source.capture_id,
+                    "url": source.url,
+                    "retrievedAt": utc_now(),
+                    "status": status,
+                    "contentType": response_headers.get("Content-Type"),
+                    "etag": response_headers.get("ETag"),
+                    "lastModified": response_headers.get("Last-Modified"),
+                    # Diagnostic only, outside evidence identity: shows which
+                    # edge answered when a feed later looks stale.
+                    "edgeCache": response_headers.get(EDGE_CACHE_STATUS_HEADER),
+                    "digest": sha256_bytes(stored),
+                    "bodyPath": body_path.as_posix(),
+                }
+            )
+        except (ControlError, OSError, urllib.error.URLError) as error:
+            last_error = error
         if last_error is not None:
             body_path = pathlib.Path("raw") / f"{source.capture_id}.body"
             destination = output_dir / body_path

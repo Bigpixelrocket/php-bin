@@ -50,11 +50,15 @@ LEGAL_EVENT_TRANSITIONS = {
     "needs_human": {"detected", "php_bin_ready", "mise_ready", "release_requested", "blocked"},
     "complete": set(),
 }
+# `publishing` is recorded after the draft bytes are verified once more and before the
+# release is made public, so a run that stops between the publication and the record
+# of `published` is still known to have possibly gone live.
 LEGAL_RELEASE_TRANSITIONS = {
     "requested": "built",
     "built": "draft_created",
     "draft_created": "draft_verified",
-    "draft_verified": "published",
+    "draft_verified": "publishing",
+    "publishing": "published",
     "published": "public_verified",
     "public_verified": "complete",
 }
@@ -113,12 +117,22 @@ def release_transition(
     assets_dir: pathlib.Path,
     expected_assets: dict[str, str],
 ) -> dict[str, Any]:
+    """Advance a release transaction by its single legal next state.
+
+    The asset set is fixed by the first transition: every later one must present the
+    same digests, so a transaction handed from one job to the next can never continue
+    with different bytes. Every state from `draft_verified` on also re-reads the local
+    assets against those digests.
+    """
     current = transaction.get("state", "requested")
     require(LEGAL_RELEASE_TRANSITIONS.get(current) == target, f"illegal release transition: {current} -> {target}")
     published = transaction.get("publishedAssets", {})
     if published:
         require(published == expected_assets, "published asset inconsistency")
-    if target in {"draft_verified", "published", "public_verified", "complete"}:
+    recorded = transaction.get("assetDigests")
+    if recorded:
+        require(recorded == expected_assets, "release asset set changed during the transaction")
+    if target in {"draft_verified", "publishing", "published", "public_verified", "complete"}:
         for name, digest in expected_assets.items():
             path = assets_dir / name
             require(path.is_file(), f"release asset is missing: {name}")
@@ -212,6 +226,7 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
         transaction = report.get("transaction")
         version = ""
         released = False
+        recorded = False
         if transaction is not None:
             require(isinstance(transaction, dict), "release transaction state must be an object")
             version = transaction.get("version")
@@ -221,6 +236,11 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
             )
             released = transaction.get("released")
             require(isinstance(released, bool), "release transaction released flag is invalid")
+            # State retained before the record flag existed carries none, which reads as
+            # a record that was not written.
+            recorded = transaction.get("recorded", False)
+            require(isinstance(recorded, bool), "release transaction recorded flag is invalid")
+            require(released or not recorded, "an unreleased transaction cannot have a recorded event")
         # A publish job only succeeds after recording a released transaction, so a
         # green run without one is inconsistent state, not a failed release.
         require(
@@ -244,6 +264,19 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
                 f"PHP {version} published",
                 f"The immutable PHP {version} release for macOS arm64 is live and fresh public "
                 f"installs of it were verified: https://github.com/{repository}/releases/tag/{version}.",
+                run_url=run_url,
+            )
+        if released and recorded:
+            # The release job reconciles an existing release even when the fresh build
+            # fails, so a run can finish the release and its record and still fail.
+            return _email(
+                "release_complete_run_failed",
+                f"PHP {version} published and recorded; run failed",
+                f"The PHP {version} release is live and its durable event record was completed, "
+                f"but the publish run still finished with conclusion '{conclusion}'. That happens "
+                "when the release was reconciled from its existing assets while another job, such "
+                "as the fresh build that reconciliation did not need, failed. The release itself "
+                "needs nothing; check the run if the failure recurs.",
                 run_url=run_url,
             )
         if released:
@@ -669,9 +702,22 @@ def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:
         return routed("none", "no_admitted_plan")
     if action == WATCH_RECOVERY_ACTION:
         return routed("none", "recovery_routed_by_recovery_route")
+    if action in WATCH_PUBLISH_ACTIONS and record_action_key and action_key == record_action_key:
+        # The ledger this plan was admitted against is the one missing this record,
+        # so the release it selects is already public.
+        notify = "lifecycle" if action in WATCH_LIFECYCLE_NOTIFICATION_ACTIONS else "none"
+        return routed("none", "release_published_pending_record", notify)
     if recovery_merged and action in {"branch_eol", "no_change"}:
         # Both routes commit against an untouched base, which the recovered record just moved.
         return routed("none", "record_write_deferred_by_recovery")
+    if recovery_merged and (
+        action in WATCH_PUBLISH_ACTIONS or (edits_required and action in WATCH_LIFECYCLE_NOTIFICATION_ACTIONS)
+    ):
+        # The plan was admitted against the main the recovered record just moved. The
+        # publish recapture binds `php_bin_state`, and an implementation seals against
+        # the admitted base, so either would fail this run. The next run re-admits the
+        # same work against the moved main.
+        return routed("none", "dispatch_deferred_by_recovery")
     if action == "no_change" and evidence_recorded:
         return routed("none", "evidence_state_already_recorded")
     if action in {"blocked", "needs_human"}:
@@ -685,10 +731,6 @@ def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:
             return routed("dispatch_implementation", "admitted_plan_requires_edits", notify)
         raise ControlError(f"no deterministic implementation exists for action: {action}")
     if action in WATCH_PUBLISH_ACTIONS:
-        if record_action_key and action_key == record_action_key:
-            # The ledger this plan was admitted against is the one missing this record,
-            # so the release it selects is already public.
-            return routed("none", "release_published_pending_record", notify)
         return routed("dispatch_publish", "publish_admitted_release", notify)
     if action == "branch_eol":
         return routed("complete_branch_eol", "complete_admitted_eol", notify)

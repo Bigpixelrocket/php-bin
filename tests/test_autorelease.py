@@ -306,6 +306,78 @@ class AutoreleaseControlTests(unittest.TestCase):
         # Evidence identity covers the body alone, so the fetch address never moves it.
         self.assertEqual(direct["manifestDigest"], bypassed["manifestDigest"])
 
+    def test_paginated_capture_reads_every_page_and_digests_the_same_identity(self):
+        def release(tag, draft=False):
+            return {"tag_name": tag, "draft": draft, "assets": [{"name": "a", "download_count": 3}]}
+
+        def capture(pages, per_page=2, max_pages=None):
+            responses = []
+            for page in pages:
+                response = mock.MagicMock(status=200, headers={"ETag": "first"})
+                response.read.return_value = page if isinstance(page, bytes) else json.dumps(page).encode()
+                context = mock.MagicMock()
+                context.__enter__.return_value = response
+                responses.append(context)
+            opener = mock.MagicMock()
+            opener.open.side_effect = responses
+            source = EvidenceSource(
+                "php_bin_releases",
+                f"https://api.github.com/repos/bigpixelrocket/php-bin/releases?per_page={per_page}",
+                1_000_000,
+                normalize=project_release_identity,
+                paginate=True,
+            )
+            patches = [mock.patch("autorelease._evidence.urllib.request.build_opener", return_value=opener)]
+            if max_pages is not None:
+                patches.append(mock.patch("autorelease._evidence.PAGINATED_CAPTURE_MAX_PAGES", max_pages))
+            with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as stack:
+                for patch in patches:
+                    stack.enter_context(patch)
+                manifest = capture_evidence(pathlib.Path(tmp), [source])
+                entry = manifest["captures"][0]
+                stored = (pathlib.Path(tmp) / entry["bodyPath"]).read_bytes()
+            requested = [call.args[0].full_url for call in opener.open.call_args_list]
+            return entry, stored, requested
+
+        # Pages are read in order until a short one, and the items concatenate in order.
+        entry, stored, requested = capture(
+            [[release("8.5.9-2"), release("8.5.9-1")], [release("8.5.9"), release("8.4.26")], [release("8.3.35")]]
+        )
+        self.assertEqual(200, entry["status"])
+        self.assertEqual("first", entry["etag"])
+        self.assertEqual(["8.5.9-2", "8.5.9-1", "8.5.9", "8.4.26", "8.3.35"], [item["tag_name"] for item in json.loads(stored)])
+        base = "https://api.github.com/repos/bigpixelrocket/php-bin/releases?per_page=2&page="
+        self.assertEqual([base + "1", base + "2", base + "3"], requested)
+        # A full last page is followed by one empty page, never assumed to be the end.
+        _entry, exact, requested = capture([[release("8.5.9"), release("8.4.26")], []])
+        self.assertEqual(2, len(requested))
+        self.assertEqual(2, len(json.loads(exact)))
+        # Page boundaries carry no identity: a token that also sees a draft reads the
+        # same releases split differently and digests the same projection.
+        with_draft, _stored, _requested = capture(
+            [[release("8.5.10", draft=True), release("8.5.9")], [release("8.4.26")]]
+        )
+        without_draft, _stored, _requested = capture([[release("8.5.9"), release("8.4.26")], []])
+        self.assertEqual(without_draft["digest"], with_draft["digest"])
+        # A first page that is not a list is kept as it came, so the classifier blocks
+        # on the unexpected shape instead of the capture guessing.
+        entry, stored, requested = capture([b'{"message": "moved"}'])
+        self.assertEqual((200, b'{"message": "moved"}', 1), (entry["status"], stored, len(requested)))
+        # A later page that is not a list, or a list still full at the page limit,
+        # fails the capture rather than truncating it.
+        broken, _stored, _requested = capture([[release("8.5.9"), release("8.4.26")], b"{}"])
+        self.assertEqual((0, "ControlError"), (broken["status"], broken["error"]))
+        endless, _stored, requested = capture(
+            [[release("8.5.9"), release("8.4.26")], [release("8.3.35"), release("8.2.34")]], max_pages=2
+        )
+        self.assertEqual((0, "ControlError", 2), (endless["status"], endless["error"], len(requested)))
+        # Both releases lists are paginated; the php-src tags list, which no rule
+        # reads, stays one page.
+        registry = {source.capture_id: source for source in EVIDENCE_SOURCES}
+        self.assertTrue(registry["php_bin_releases"].paginate)
+        self.assertTrue(registry["mise_php_releases"].paginate)
+        self.assertFalse(registry["php_source_tags"].paginate)
+
     def test_capture_fails_when_the_edge_serves_a_bypassing_fetch_from_cache(self):
         # A unique key cannot be a genuine hit, so a HIT means the CDN now ignores the
         # parameter; the capture must fail loudly rather than go stale silently.
@@ -1294,11 +1366,36 @@ class AutoreleaseControlTests(unittest.TestCase):
             (root / "archive").write_text("staged")
             digests = {"archive": sha256_file(root / "archive")}
             transaction = {
-                "state": "draft_verified",
+                "state": "publishing",
                 "publishedAssets": {"archive": "sha256:" + "0" * 64},
             }
-            with self.assertRaises(ControlError):
+            with self.assertRaisesRegex(ControlError, "published asset inconsistency"):
                 release_transition(transaction, "published", root, digests)
+
+    def test_publication_passes_through_a_recorded_publishing_state(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            (root / "archive").write_text("staged")
+            digests = {"archive": sha256_file(root / "archive")}
+            verified = {"state": "draft_verified", "assetDigests": digests, "history": []}
+            # The draft is never published straight from its verification: `publishing`
+            # is recorded first, so a run that stops mid-publication is known to have
+            # possibly gone live.
+            with self.assertRaisesRegex(ControlError, "illegal release transition"):
+                release_transition(verified, "published", root, digests)
+            publishing = release_transition(verified, "publishing", root, digests)
+            self.assertEqual("publishing", publishing["state"])
+            self.assertNotIn("publishedAssets", publishing)
+            published = release_transition(publishing, "published", root, digests)
+            self.assertEqual(digests, published["publishedAssets"])
+            # A transaction handed to another job cannot continue with other bytes.
+            (root / "other").write_text("rebuilt")
+            with self.assertRaisesRegex(ControlError, "asset set changed"):
+                release_transition(verified, "publishing", root, {"other": sha256_file(root / "other")})
+            # And the recorded bytes are re-read, not trusted.
+            (root / "archive").write_text("tampered")
+            with self.assertRaisesRegex(ControlError, "digest mismatch"):
+                release_transition(verified, "publishing", root, digests)
 
     def test_email_digest_selects_one_fixed_template_per_outcome(self):
         digest = "sha256:" + "a" * 64
@@ -1371,6 +1468,26 @@ class AutoreleaseControlTests(unittest.TestCase):
                     **base,
                     "workflow": "publish",
                     "conclusion": "failure",
+                    "transaction": {"released": True, "recorded": True, "version": "8.5.9"},
+                },
+                "release_complete_run_failed",
+                "durable event record was completed",
+            ),
+            (
+                {
+                    **base,
+                    "workflow": "publish",
+                    "conclusion": "failure",
+                    "transaction": {"released": True, "recorded": False, "version": "8.5.9"},
+                },
+                "release_record_pending",
+                "recovers the record",
+            ),
+            (
+                {
+                    **base,
+                    "workflow": "publish",
+                    "conclusion": "failure",
                     "transaction": {"released": False, "version": "8.5.9"},
                 },
                 "publish_failed",
@@ -1427,6 +1544,19 @@ class AutoreleaseControlTests(unittest.TestCase):
                 "workflow": "publish",
                 "conclusion": "failure",
                 "transaction": {"released": True, "version": None},
+            },
+            {
+                **base,
+                "workflow": "publish",
+                "conclusion": "failure",
+                "transaction": {"released": True, "recorded": "true", "version": "8.5.9"},
+            },
+            # An event record cannot complete for a release that never went live.
+            {
+                **base,
+                "workflow": "publish",
+                "conclusion": "failure",
+                "transaction": {"released": False, "recorded": True, "version": "8.5.9"},
             },
         )
         for report in rejected:
@@ -1564,6 +1694,34 @@ class AutoreleaseControlTests(unittest.TestCase):
         deferred_no_change = route(action="no_change", recoveryMerged=True)
         self.assertEqual("none", deferred_no_change["route"])
         self.assertEqual("record_write_deferred_by_recovery", deferred_no_change["reason"])
+        # A recovery merge also moves the main a publish or implementation plan was
+        # admitted against: the publish recapture binds `php_bin_state` and the
+        # implementation seals against the admitted base, so both wait for the next run.
+        for deferred in (
+            {"action": "new_patch", "actionKey": "new_patch:8.5.10"},
+            {"action": "recipe_rebuild", "actionKey": "recipe_rebuild:8.5.9:2"},
+            {"action": "new_branch", "actionKey": "new_branch:8.6"},
+            {"action": "new_branch", "actionKey": "new_branch:8.6", "editsRequired": True},
+        ):
+            with self.subTest(deferred=deferred):
+                decision = route(recordActionKey="new_patch:8.5.9", recoveryMerged=True, **deferred)
+                self.assertEqual("none", decision["route"])
+                self.assertEqual("dispatch_deferred_by_recovery", decision["reason"])
+                self.assertEqual("recover_record", decision["recoveryRoute"])
+        # Without a recovery merge the same plans dispatch as before.
+        self.assertEqual("dispatch_publish", route(action="new_patch", recordActionKey="new_patch:8.5.9")["route"])
+        # Routes that write nothing still run beside a recovery.
+        self.assertEqual("notify_blocked", route(action="blocked", recoveryMerged=True)["route"])
+        # A plan for the very release just recovered stays a published release.
+        self.assertEqual(
+            "release_published_pending_record",
+            route(
+                action="new_patch", actionKey="new_patch:8.5.9", recordActionKey="new_patch:8.5.9", recoveryMerged=True
+            )["reason"],
+        )
+        # An unroutable edit still fails loudly rather than hiding behind a deferral.
+        with self.assertRaises(ControlError):
+            route_watch_action({"action": "repair", "editsRequired": True, "recoveryMerged": True})
         self.assertEqual(
             "evidence_state_already_recorded",
             route(action="no_change", evidenceAlreadyRecorded=True)["reason"],
@@ -1684,6 +1842,7 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertTrue(path_is_protected("scripts/apply-autorelease-plan"))
         self.assertTrue(path_is_protected("autorelease/_classifier.py"))
         self.assertTrue(path_is_protected("scripts/dispatch-pr-checks"))
+        self.assertTrue(path_is_protected("scripts/merge-record-pr"))
         self.assertTrue(path_is_protected("autorelease-events/new-branch.json"))
         self.assertTrue(path_is_protected("autorelease-state/last-evidence.json"))
         self.assertFalse(path_is_protected("support-policy.json"))
@@ -1727,16 +1886,24 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertIn('"repos/$repository/check-runs"', dispatcher)
         self.assertIn('"repos/$repository/statuses/$head_sha"', dispatcher)
         self.assertIn("Exact-head validator passed", dispatcher)
-        for workflow in (
-            "autorelease-watch.yml",
-            "autorelease-implement.yml",
-            "autorelease-publish.yml",
+        # Every single-record PR merges through one gate, which dispatches the checks.
+        merger = (root / "scripts/merge-record-pr").read_text()
+        self.assertIn('"$script_dir/dispatch-pr-checks"', merger)
+        self.assertIn('"$script_dir/assert-admission-checks"', merger)
+        self.assertIn('gh pr merge "$pr_number" --repo "$repository" --squash --delete-branch', merger)
+        for workflow, merges in (
+            ("autorelease-watch.yml", 3),
+            ("autorelease-implement.yml", 1),
+            ("autorelease-publish.yml", 1),
         ):
             body = (root / ".github/workflows" / workflow).read_text()
-            self.assertIn("./scripts/dispatch-pr-checks", body)
+            self.assertEqual(merges, body.count("./scripts/merge-record-pr"), workflow)
             self.assertNotIn("gh pr checks", body)
             self.assertIn("checks: write", body)
             self.assertIn("statuses: write", body)
+        # The sealed lifecycle patch is not a single record, so it keeps its own gate.
+        implement = (root / ".github/workflows/autorelease-implement.yml").read_text()
+        self.assertIn("./scripts/dispatch-pr-checks", implement)
 
         release = (root / ".github/workflows/autorelease-publish.yml").read_text()
         self.assertIn("validate-recaptured-evidence", release)
@@ -1829,30 +1996,95 @@ class AutoreleaseControlTests(unittest.TestCase):
             names.index("Verify the staged bytes the build reported"),
             names.index("Initialize release transaction and event"),
         )
+        # Any failed job after the build reports, including one that failed after the
+        # release went live.
+        notify_if = " ".join(jobs["notify-failure"]["if"].split())
+        self.assertTrue(notify_if.startswith("always() && needs.preflight.result == 'success' && ("), notify_if)
+        for job in ("release", "verify-draft", "publish", "verify-public", "finalize"):
+            self.assertIn(f"['{job}'].result == 'failure'" if "-" in job else f".{job}.result == 'failure'", notify_if)
         self.assertEqual(
-            "always() && needs.preflight.result == 'success' && needs.release.result == 'failure'",
-            jobs["notify-failure"]["if"],
+            {"preflight", "release", "verify-draft", "publish", "verify-public", "finalize"},
+            set(jobs["notify-failure"]["needs"]),
         )
 
-        # The release job still runs the built binary to verify installs, so
-        # those steps and mise itself may hold no token, and mise may not
-        # restore a cached binary another job could have saved.
-        mise = [step for step in release["steps"] if str(step.get("uses") or "").startswith("jdx/mise-action@")]
-        self.assertEqual([{"github_token": "", "cache": False}], [step.get("with") for step in mise])
-        mise_index = release["steps"].index(mise[0])
+        # The built binary runs only in two read-only jobs with no environment, and
+        # mise there may not restore a cached binary another job could have saved.
+        binary_jobs = {job for job, _, step in steps if "mise exec" in (step.get("run") or "")}
+        self.assertEqual({"verify-draft", "verify-public"}, binary_jobs)
+        for job in binary_jobs:
+            self.assertEqual({"contents": "read"}, jobs[job]["permissions"], job)
+            self.assertNotIn("environment", jobs[job], job)
+            self.assertEqual("${{ github.token }}", jobs[job]["env"]["GITHUB_TOKEN"], job)
+            mise = [step for step in jobs[job]["steps"] if str(step.get("uses") or "").startswith("jdx/mise-action@")]
+            self.assertEqual([{"github_token": "${{ github.token }}", "cache": False}], [step.get("with") for step in mise])
+        # Every job that holds the publish environment is write-scoped and never
+        # installs mise or runs the binary.
+        write_jobs = {job for job, body in jobs.items() if "environment" in body}
+        self.assertEqual({"release", "publish", "finalize"}, write_jobs)
+        for job in write_jobs:
+            self.assertEqual("php-autorelease-publish", jobs[job]["environment"])
+            self.assertNotIn("permissions", jobs[job], job)
+            for step in jobs[job]["steps"]:
+                self.assertFalse(str(step.get("uses") or "").startswith("jdx/mise-action@"), job)
+                self.assertIsNone(re.search(r"^\s*mise ", step.get("run") or "", re.MULTILINE), job)
+
+        # The jobs run strictly in order, each only after the one before succeeded.
+        self.assertEqual({"preflight", "release"}, set(jobs["verify-draft"]["needs"]))
+        self.assertEqual("${{ !cancelled() && needs.release.result == 'success' }}", jobs["verify-draft"]["if"])
+        self.assertEqual({"preflight", "release", "verify-draft"}, set(jobs["publish"]["needs"]))
         self.assertEqual(
-            'test -z "${MISE_GITHUB_TOKEN:-}"',
-            release["steps"][mise_index + 1]["run"],
+            "${{ !cancelled() && needs.release.result == 'success' && needs['verify-draft'].result == 'success' }}",
+            jobs["publish"]["if"],
         )
-        self.assertNotIn("github.token", json.dumps(release.get("env") or {}))
-        binary_steps = [step for step in release["steps"] if "mise exec" in (step.get("run") or "")]
-        self.assertEqual(2, len(binary_steps))
-        for step in binary_steps:
-            self.assertNotIn("github.token", json.dumps(step))
-            self.assertTrue(
-                step["run"].startswith('test -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}${MISE_GITHUB_TOKEN:-}"\n'),
-                step["name"],
+        self.assertEqual({"preflight", "release", "publish"}, set(jobs["verify-public"]["needs"]))
+        self.assertEqual("${{ !cancelled() && needs.publish.result == 'success' }}", jobs["verify-public"]["if"])
+        self.assertEqual({"preflight", "publish", "verify-public"}, set(jobs["finalize"]["needs"]))
+        self.assertEqual(
+            "${{ !cancelled() && needs.publish.result == 'success' && needs['verify-public'].result == 'success' }}",
+            jobs["finalize"]["if"],
+        )
+
+        # Each handoff is fetched by the ID its producer reported, and every file in it
+        # is checked against the digests that producer reported.
+        handoffs = {
+            ("verify-draft", "Download the draft bytes"): "release",
+            ("publish", "Download the verified draft transaction"): "release",
+            ("finalize", "Download the published transaction"): "publish",
+        }
+        for (job, name), producer in handoffs.items():
+            names = [step.get("name") for step in jobs[job]["steps"]]
+            download = jobs[job]["steps"][names.index(name)]
+            self.assertEqual(
+                f"${{{{ needs.{producer}.outputs.handoff_artifact_id }}}}", download["with"]["artifact-ids"], job
             )
+            self.assertEqual("error", download["with"]["digest-mismatch"], job)
+            check = jobs[job]["steps"][names.index(name) + 1]
+            self.assertIn("find release-", check["run"], job)
+            for value in check["env"].values():
+                self.assertTrue(value.startswith(f"${{{{ needs.{producer}.outputs."), job)
+        # Publication re-reads the draft once more before the irreversible step.
+        publish_names = [step.get("name") for step in jobs["publish"]["steps"]]
+        publication = jobs["publish"]["steps"][publish_names.index("Publish unchanged draft and verify public bytes")]
+        self.assertIn("for target in publishing published public_verified complete; do", publication["run"])
+        # A run that stops mid-publication is a possibly live release, not a failed one.
+        live = jobs["publish"]["steps"][publish_names.index("Record whether the immutable release is live")]
+        self.assertEqual("always()", live["if"])
+        self.assertIn("published|public_verified|complete) released=true ;;", live["run"])
+        self.assertIn("publishing)\n", live["run"])
+
+        # Every artifact a rerun could upload again is named per attempt.
+        for job, _, step in steps:
+            if str(step.get("uses") or "").startswith("actions/upload-artifact@"):
+                self.assertTrue(step["with"]["name"].endswith("-${{ github.run_attempt }}"), step["with"]["name"])
+        # The state artifact is replaced within an attempt: the record job refines it.
+        state_uploads = [
+            (job, step)
+            for job, _, step in steps
+            if str(step.get("with", {}).get("name", "")).startswith("release-transaction-state-")
+        ]
+        self.assertEqual(["publish", "finalize"], [job for job, _ in state_uploads])
+        for _, step in state_uploads:
+            self.assertIs(True, step["with"]["overwrite"])
 
     def test_protected_controls_pass_owner_authored_changes_before_bot_exemptions(self):
         # The owner short-circuit must sit after the no-protected-path exit and
@@ -1906,11 +2138,16 @@ class AutoreleaseControlTests(unittest.TestCase):
         # wrapping its arguments onto the next line.
         folded = re.sub(r"\\\n[^\S\n]*", " ", recovery)
         calls = re.findall(r"^\s*gh\s+pr\s+(?:merge|close)\s.*$", folded, re.MULTILINE)
-        self.assertEqual(2, len(calls))
+        self.assertEqual(1, len(calls))
         for call in calls:
             self.assertIn('--repo "${{ github.repository }}"', call)
+        # The merge itself goes through the shared gate, which always names the repository.
+        self.assertIn("./scripts/merge-record-pr", recovery)
+        merger = (root / "scripts/merge-record-pr").read_text()
+        self.assertEqual(1, len(re.findall(r"gh pr merge ", merger)))
+        self.assertIn('gh pr merge "$pr_number" --repo "$repository"', merger)
         # A published release downgrades the publish alarm from critical to warning.
-        self.assertIn("release-transaction-state-${{ github.run_id }}", release)
+        self.assertIn('--name "release-transaction-state-${{ github.run_id }}-$attempt"', release)
         self.assertIn("jq -r .released release-state/transaction-state.json", release)
 
     def test_the_jq_built_recovery_record_validates_as_a_completed_event(self):
@@ -2052,6 +2289,45 @@ class AutoreleaseControlTests(unittest.TestCase):
                 seal_patch(repo, "--help", plan, sealed)
             with self.assertRaisesRegex(ControlError, "exact commit SHA"):
                 verify_merge(repo, "--help", manifest, {"Script checks": "success"}, {}, {})
+            # Passing checks prove nothing when the required one was never reported.
+            for checks in ({"Other check": "success"}, {"Script checks": "failure"}, {}):
+                with self.subTest(checks=checks), self.assertRaises(ControlError):
+                    verify_merge(repo, head, manifest, checks, {}, {})
+
+    def test_sealed_patch_keeps_the_exact_bytes_git_wrote(self):
+        def git_in(repo, *arguments):
+            return subprocess.run(
+                ["git", *arguments], cwd=repo, check=True, text=True, stdout=subprocess.PIPE
+            ).stdout.strip()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = pathlib.Path(temporary) / "repo"
+            repo.mkdir()
+            git_in(repo, "init", "-q")
+            git_in(repo, "config", "user.name", "Fixture")
+            git_in(repo, "config", "user.email", "fixture@invalid")
+            git_in(repo, "config", "core.autocrlf", "false")
+            (repo / "allowed.txt").write_bytes(b"line one\r\nline two\r\n")
+            git_in(repo, "add", "allowed.txt")
+            git_in(repo, "commit", "-q", "-m", "baseline")
+            base = git_in(repo, "rev-parse", "HEAD")
+            (repo / "allowed.txt").write_bytes(b"line one\r\nline 2\r\n")
+            (repo / "added.txt").write_bytes("caf\u00e9\n".encode())
+            plan = {"actionKey": "new_branch:8.6", "allowedPaths": {"php-bin": ["allowed.txt", "added.txt"]}}
+            sealed = pathlib.Path(temporary) / "sealed"
+            manifest = seal_patch(repo, base, plan, sealed)
+            patch = (sealed / "sealed.patch").read_bytes()
+            self.assertEqual(manifest["patchDigest"], sha256_bytes(patch))
+            # Text decoding would have folded these carriage returns into newlines.
+            self.assertIn(b"+line 2\r\n", patch)
+            self.assertIn("+caf\u00e9\n".encode(), patch)
+            clean = pathlib.Path(temporary) / "clean"
+            subprocess.run(["git", "clone", "-q", str(repo), str(clean)], check=True)
+            git_in(clean, "config", "core.autocrlf", "false")
+            git_in(clean, "checkout", "-q", base)
+            subprocess.run(["git", "apply", "--index", str(sealed / "sealed.patch")], cwd=clean, check=True)
+            for entry in manifest["files"]:
+                self.assertEqual(entry["digest"], sha256_file(clean / entry["path"]), entry["path"])
 
 
 if __name__ == "__main__":

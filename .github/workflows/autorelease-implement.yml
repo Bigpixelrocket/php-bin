@@ -420,19 +420,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ./scripts/dispatch-pr-checks \
+          ./scripts/merge-record-pr \
             --pr "${{ steps.readiness.outputs.number }}" \
-            --check "Script checks" \
-            --output autorelease-run/readiness-checks.json
-          ./scripts/assert-admission-checks --checks autorelease-run/readiness-checks.json
-          actual="$(gh pr view "${{ steps.readiness.outputs.number }}" --json headRefOid --jq .headRefOid)"
-          test "$actual" = "${{ steps.readiness.outputs.head_sha }}"
-          git fetch origin main
-          test "$(git rev-parse origin/main)" = "${{ steps.readiness.outputs.base_sha }}"
-          test "$(git rev-list --parents -n 1 "$actual")" = "$actual ${{ steps.readiness.outputs.base_sha }}"
-          test "$(git diff --name-only "${{ steps.readiness.outputs.base_sha }}" "$actual")" = "${{ steps.readiness.outputs.record }}"
-          test "sha256:$(git show "$actual:${{ steps.readiness.outputs.record }}" | shasum -a 256 | awk '{print $1}')" = "${{ steps.readiness.outputs.digest }}"
-          gh pr merge "${{ steps.readiness.outputs.number }}" --squash --delete-branch
+            --base "${{ steps.readiness.outputs.base_sha }}" \
+            --head "${{ steps.readiness.outputs.head_sha }}" \
+            --record "${{ steps.readiness.outputs.record }}" \
+            --digest "${{ steps.readiness.outputs.digest }}" \
+            --checks-output autorelease-run/readiness-checks.json
 
   # Any failed phase stops here with one deduplicated owner issue on the action key.
   # A new branch whose build fails the exact module comparison carries that module

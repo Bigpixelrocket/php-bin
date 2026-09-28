@@ -34,6 +34,7 @@ jobs:
       EMAIL_FROM: ${{ vars.AUTORELEASE_EMAIL_FROM }}
       EMAIL_TO: ${{ vars.AUTORELEASE_EMAIL_TO }}
       RUN_ID: ${{ github.event.workflow_run.id }}
+      RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
       RUN_URL: ${{ github.event.workflow_run.html_url }}
       RUN_NAME: ${{ github.event.workflow_run.name }}
       RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
@@ -59,14 +60,21 @@ jobs:
         if: steps.gate.outputs.configured == 'true'
         run: |
           mkdir -p email-run/state
+          [[ "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
           case "$RUN_NAME" in
             "PHP autorelease watcher")
               echo "workflow=watcher" >> "$GITHUB_OUTPUT"
-              artifact="autorelease-investigation-$RUN_ID"
+              artifacts=("autorelease-investigation-$RUN_ID")
               ;;
             "Autorelease publish transaction")
               echo "workflow=publish" >> "$GITHUB_OUTPUT"
-              artifact="release-transaction-state-$RUN_ID"
+              # Each attempt retains its own state, and a rerun of only the failed
+              # jobs keeps the state an earlier attempt retained, so the newest
+              # attempt that retained one describes the run.
+              artifacts=()
+              for ((attempt = RUN_ATTEMPT; attempt > 0; attempt--)); do
+                artifacts+=("release-transaction-state-$RUN_ID-$attempt")
+              done
               ;;
             *)
               echo "unrouted triggering workflow: $RUN_NAME" >&2
@@ -75,10 +83,13 @@ jobs:
           esac
           # A run that crashed before retaining its state has no artifact; the
           # renderer then only accepts that absence for the failure templates.
-          if ! gh run download "$RUN_ID" --repo "${{ github.repository }}" \
-            --name "$artifact" --dir email-run/state; then
+          for artifact in "${artifacts[@]}"; do
+            if gh run download "$RUN_ID" --repo "${{ github.repository }}" \
+              --name "$artifact" --dir email-run/state; then
+              break
+            fi
             echo "No retained state artifact exists for $artifact."
-          fi
+          done
       - name: Render the deterministic digest
         if: steps.gate.outputs.configured == 'true'
         run: |

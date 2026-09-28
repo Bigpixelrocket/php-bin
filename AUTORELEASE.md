@@ -32,11 +32,12 @@ aggregate feed. That branch feed is bound even when uncited, so a release on
 another branch never stops this one, while any change to this branch's feed,
 the repository state, or other cited context still does. The publish job also
 reruns the supersession check on the recaptured feeds.
-The GitHub releases captures digest a projected body with per-asset download
-counters and draft releases removed, so public downloads never register as
-changed evidence, and the read-only watcher and the publish job's write token
-digest the same list; the unprojected bytes are retained beside the digested
-body. The watcher compares
+The GitHub releases captures read every page of the list and digest a
+projected body with per-asset download counters and draft releases removed, so
+public downloads never register as changed evidence, and the read-only watcher
+and the publish job's write token digest the same list however the pages
+split; the unprojected bytes are retained beside the digested body. The
+watcher compares
 only opaque digests and incomplete-event state. An unchanged healthy day is
 quiet: nothing is classified and nothing causes an issue, repository, tag,
 asset, or release mutation.
@@ -100,8 +101,8 @@ protected: `scripts/` gates such as `test.sh`, `lib.sh`, `build.sh`,
 `.spc-sha256`, `tests/`, `autorelease/**`, `schemas/**`, and
 `.github/workflows/**`. The *product* is what an admitted lifecycle plan may
 write: `support-policy.json` and `expected-modules/`, beside the reviewed
-recipe paths `patches/`, `stages/`, `craft.yml`, and `extensions.txt` that
-change only through a reviewed pull request. Automation may change what is
+recipe paths `patches/` and `stages/` that change only through a reviewed pull
+request. Automation may change what is
 built, never what decides whether the build was correct, so the protected
 tests are the standing control on every product change. `mise-php` draws the
 same line over its own paths; its `AUTORELEASE.md` owns that list.
@@ -133,18 +134,39 @@ assets with a fresh build, and never overwrites, deletes, or retags a published
 release. A first release on a new PHP branch also requires exact-commit
 `php_bin_ready` and `mise_ready` records.
 
-The build never runs beside the write token. StaticPHP resolves most sources
-through the GitHub API and runs third-party build scripts, so the publish
-workflow builds, gates, and packages the exact commit in a separate job whose
-token can only read contents; that token authenticates StaticPHP's API calls,
-which anonymous shared runners would lose to rate limits. The release job holds
-the write token, accepts only that job's artifact, and checks its service
-digest, exact file set, and the archive and `SHA256SUMS` digests the build
-reported before any transition. Reconciling an existing release reuses the
-release's own assets, so it discards the build and still runs when the build
-failed. The release job still runs the built binary to verify the draft and
-public installs, so those steps hold no token, and its mise setup gets no
-token and restores no cache.
+The build and the built binary never run beside the write token. StaticPHP
+resolves most sources through the GitHub API and runs third-party build
+scripts, so the publish workflow builds, gates, and packages the exact commit
+in a separate job whose token can only read contents; that token authenticates
+StaticPHP's API calls, which anonymous shared runners would lose to rate
+limits. The transaction itself runs in three write-scoped jobs, in order, each
+only after the one before succeeded:
+
+1. `release` accepts only the build job's artifact, and checks its service
+   digest, exact file set, and the archive and `SHA256SUMS` digests the build
+   reported before any transition. Reconciling an existing release reuses the
+   release's own assets, so it discards the build and still runs when the build
+   failed. It advances to a verified draft, downloads the draft (only the write
+   token can see one), and hands the draft bytes, the transaction, and the
+   event record to the next jobs as one artifact, by ID and digests.
+2. `verify-draft`, a job whose token can only read contents and that holds no
+   environment, installs the handed-over draft bytes through a temporary local
+   release server.
+3. `publish` resumes the handed-over transaction, re-reads the draft once more,
+   records `publishing`, and only then makes the release public. A run that
+   stops between the publication and its record is therefore still known to be
+   possibly live, and reports a warning rather than a failed release.
+4. `verify-public`, read-only like `verify-draft`, runs fresh public
+   exact-version and branch-shorthand installs.
+5. `finalize` completes the durable event record through an exact-SHA pull
+   request.
+
+Both install jobs pass their read-only token to `mise-php`, whose GitHub API
+reads would otherwise be rate limited, and restore no mise cache. Every
+artifact a job retains is named per run attempt, so rerunning a failed job
+never collides with what an earlier attempt kept, and the transaction state
+the failure notification and the email digest read is taken from the newest
+attempt that retained one.
 
 Validation deliberately runs the repository's own scripts at the sealed
 commit: `autorelease-implement.yml`, and `autorelease-consumer.yml` in
@@ -153,6 +175,11 @@ commit: `autorelease-implement.yml`, and `autorelease-consumer.yml` in
 themselves are protected paths: a patch that touched `autorelease/**`,
 `tests/`, or any gate script is rejected at sealing and never reaches
 validation, so the code under test can never be the code doing the testing.
+
+A published release whose event record is missing is recovered by the watcher
+beside the admitted plan. When that recovery merges, it moves the main the plan
+was admitted against, so a plan that would publish, implement an edit, or write
+a record against that base waits for the next run instead of failing this one.
 
 Failures use one deduplicated issue per action key, assigned to the username in
 `AUTORELEASE_OWNER`. Only a meaningful state, evidence, fingerprint, required
@@ -224,9 +251,9 @@ watcher decides which one is due:
   patches take priority in the classifier.
 - Selection has no skip: a version whose rebuild keeps failing is selected
   again on every run and holds back the rebuilds ordered after it until the
-  recipe is fixed. The `php_bin_releases` capture reads the newest 100
-  releases, so a version whose releases all fall beyond that page is not
-  considered for a rebuild.
+  recipe is fixed. The `php_bin_releases` capture reads every page of the
+  releases list, up to 20 pages of 100, and fails as unhealthy rather than
+  truncate a longer list.
 
 ## Unattended lifecycle
 
@@ -238,8 +265,7 @@ validators, and policy files all accept any `<major>.<minor>`, so PHP `8.6`,
 When upstream evidence first shows a new branch, `autorelease-implement.yml`
 runs `scripts/apply-autorelease-plan`: it copies the newest maintained
 branch's `expected-modules/<branch>.txt` byte for byte (the only per-branch
-recipe input; `stages/`, `patches/`, and `craft.yml` are shared by every
-branch) and regenerates `support-policy.json` with the branch added, bound to
+recipe input; `stages/` and `patches/` are shared by every branch) and regenerates `support-policy.json` with the branch added, bound to
 the plan's evidence digests and action key and accepted at the capture time.
 The sealed edit is validated in a clean checkout, and the branch's first
 release is then built for real at the validated commit. Only an exact module

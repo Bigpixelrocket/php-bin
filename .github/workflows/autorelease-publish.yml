@@ -129,42 +129,40 @@ jobs:
           retention-days: 90
           include-hidden-files: true
 
-  # Only this job may see draft releases, so it alone decides whether an
-  # existing release is reconciled; that path reuses the release's own assets
-  # and never needs the build. The job therefore runs even when the build
-  # failed, so a draft left by an earlier run can still be completed, and a
-  # fresh release stops at "Require the isolated build" before any effect.
+
+  # The release transaction runs in three write-scoped jobs, and nothing the built
+  # binary could touch reaches any of them. This first one alone decides whether an
+  # existing release is reconciled: only the write token can see a draft, and that
+  # path reuses the release's own assets and never needs the build. It therefore runs
+  # even when the build failed, so a draft left by an earlier run can still be
+  # completed, while a fresh release stops at "Require the isolated build" before any
+  # effect. It ends at a verified draft and hands the draft bytes, the transaction, and
+  # the event over by artifact ID and digest.
   release:
+    name: Stage and verify the draft
     needs: [preflight, build]
     if: ${{ !cancelled() && needs.preflight.result == 'success' }}
-    runs-on: macos-26
-    timeout-minutes: 150
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     environment: php-autorelease-publish
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
       EXACT_COMMIT: ${{ needs.preflight.outputs.exact_commit }}
       ACTION_KEY: ${{ needs.preflight.outputs.action_key }}
       INVESTIGATION_RUN_ID: ${{ needs.preflight.outputs.investigation_run_id }}
+    outputs:
+      mise_commit: ${{ steps.plugin.outputs.commit }}
+      handoff_artifact_id: ${{ steps.handoff.outputs.artifact-id }}
+      transaction_digest: ${{ steps.handoff_digests.outputs.transaction_digest }}
+      event_digest: ${{ steps.handoff_digests.outputs.event_digest }}
+      archive_digest: ${{ steps.handoff_digests.outputs.archive_digest }}
+      checksums_digest: ${{ steps.handoff_digests.outputs.checksums_digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.preflight.outputs.exact_commit }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          repository: bigpixelrocket/mise-php
-          path: mise-php
-          persist-credentials: false
-      # mise installs no tools here, so it needs no token. Without one it also
-      # exports none into the steps that run the built binary, and without the
-      # cache it never runs a mise binary another job could have saved.
-      - uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4
-        with:
-          github_token: ""
-          cache: false
-      - name: Confirm mise holds no token
-        run: test -z "${MISE_GITHUB_TOKEN:-}"
       - name: Download admitted plan and retained evidence
         env:
           GH_TOKEN: ${{ github.token }}
@@ -187,11 +185,6 @@ jobs:
           gh api "repos/${{ github.repository }}/contents/.github/autorelease-operator.json?ref=main" \
             --jq .content | base64 --decode > release-run/current-operator.json
           ./autorelease/control.py operator-gate --operator-file release-run/current-operator.json --require-enabled
-          mise_commit="$(jq -r .sha admitted-run/evidence/raw/mise_php_state.body)"
-          [[ "$mise_commit" =~ ^[0-9a-f]{40}$ ]]
-          git -C mise-php fetch origin "$mise_commit"
-          git -C mise-php checkout --detach "$mise_commit"
-          test "$(git -C mise-php rev-parse HEAD)" = "$mise_commit"
       - name: Re-capture authoritative evidence
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -201,10 +194,13 @@ jobs:
             --plan admitted-run/autorelease-plan.json \
             --admitted-manifest admitted-run/evidence/evidence-manifest.json \
             --current-manifest release-run/evidence/evidence-manifest.json
-      - name: Verify cross-repository readiness when required
+      - name: Select the mise-php commit installs are verified with
+        id: plugin
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          mise_commit="$(jq -r .sha admitted-run/evidence/raw/mise_php_state.body)"
+          [[ "$mise_commit" =~ ^[0-9a-f]{40}$ ]]
           action="$(jq -r .action admitted-run/autorelease-plan.json)"
           if [[ "$action" == "new_branch" ]]; then
             filename="$(./autorelease/control.py action-filename "$ACTION_KEY")"
@@ -223,15 +219,14 @@ jobs:
             # it. The plugin is then verified at exactly the commit readiness validated.
             ready_commit="$(jq -r .misePhpCommit release-run/mise-readiness.json)"
             [[ "$ready_commit" =~ ^[0-9a-f]{40}$ ]]
-            ancestry="$(gh api "repos/bigpixelrocket/mise-php/compare/$ready_commit...$(git -C mise-php rev-parse HEAD)" --jq .status)"
+            ancestry="$(gh api "repos/bigpixelrocket/mise-php/compare/$ready_commit...$mise_commit" --jq .status)"
             [[ "$ancestry" == "identical" || "$ancestry" == "ahead" ]]
-            git -C mise-php fetch origin "$ready_commit"
-            git -C mise-php checkout --detach "$ready_commit"
-            test "$(git -C mise-php rev-parse HEAD)" = "$ready_commit"
+            mise_commit="$ready_commit"
             gh api "repos/${{ github.repository }}/contents/support-policy.json?ref=$policy_commit" \
               --jq .content | base64 --decode > release-run/readiness-policy.json
             test "sha256:$(shasum -a 256 release-run/readiness-policy.json | awk '{print $1}')" = "$(jq -r .policyDigest release-run/mise-readiness.json)"
           fi
+          echo "commit=$mise_commit" >> "$GITHUB_OUTPUT"
       - name: Reconcile existing immutable release assets
         id: existing
         env:
@@ -333,20 +328,120 @@ jobs:
               --output release-run/next.json
             mv release-run/next.json release-run/transaction.json
           done
-      # Only the write token can read a draft, so the download is its own step
-      # and the steps that run the built binary hold no token.
+      # Only the write token can read a draft, so this job downloads it and hands the
+      # exact draft bytes to the read-only job that installs them.
       - name: Download the draft assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir "$RUNNER_TEMP/draft-assets"
-          gh release download "$VERSION" --repo "${{ github.repository }}" --dir "$RUNNER_TEMP/draft-assets"
+          mkdir -p release-handoff/draft
+          gh release download "$VERSION" --repo "${{ github.repository }}" --dir release-handoff/draft
+          archive="php-$VERSION-cli-macos-aarch64.tar.gz"
+          test "$(find release-handoff/draft -mindepth 1 -print | LC_ALL=C sort | paste -sd ' ' -)" \
+            = "release-handoff/draft/SHA256SUMS release-handoff/draft/$archive"
+          for name in "$archive" SHA256SUMS; do
+            test "sha256:$(shasum -a 256 "release-handoff/draft/$name" | awk '{print $1}')" \
+              = "$(jq -r --arg name "$name" '.assetDigests[$name]' release-run/transaction.json)"
+          done
+          test "$(jq -r .state release-run/transaction.json)" = "draft_verified"
+          cp release-run/transaction.json release-run/event.json release-handoff/
+      - name: Record the handed-over digests
+        id: handoff_digests
+        run: |
+          archive="php-$VERSION-cli-macos-aarch64.tar.gz"
+          {
+            echo "transaction_digest=sha256:$(shasum -a 256 release-handoff/transaction.json | awk '{print $1}')"
+            echo "event_digest=sha256:$(shasum -a 256 release-handoff/event.json | awk '{print $1}')"
+            echo "archive_digest=sha256:$(shasum -a 256 "release-handoff/draft/$archive" | awk '{print $1}')"
+            echo "checksums_digest=sha256:$(shasum -a 256 release-handoff/draft/SHA256SUMS | awk '{print $1}')"
+          } >> "$GITHUB_OUTPUT"
+      - name: Hand the verified draft to the next jobs
+        id: handoff
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-draft-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-handoff/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Record release failure diagnostic
+        if: failure()
+        run: |
+          mkdir -p release-run
+          jq -n \
+            --arg actionKey "$ACTION_KEY" \
+            --arg version "$VERSION" \
+            --arg exactCommit "$EXACT_COMMIT" \
+            --arg investigationRunId "$INVESTIGATION_RUN_ID" \
+            --arg releaseRunId "${{ github.run_id }}" \
+            --arg runUrl "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            '{schemaVersion:1,actionKey:$actionKey,version:$version,exactCommit:$exactCommit,investigationRunId:$investigationRunId,releaseRunId:$releaseRunId,state:"failed",runUrl:$runUrl}' \
+            > release-run/failure.json
+      - name: Retain transaction and exact staging bytes
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-transaction-${{ needs.preflight.outputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .artifacts/
+            release-run/
+          if-no-files-found: error
+          retention-days: 90
+          include-hidden-files: true
+
+  # The built binary runs only in the two install checks, each in a job whose token
+  # can only read contents and that holds no environment. The token authenticates the
+  # plugin's GitHub API reads, which anonymous shared runners lose to rate limits.
+  verify-draft:
+    name: Verify the draft through a temporary install
+    needs: [preflight, release]
+    if: ${{ !cancelled() && needs.release.result == 'success' }}
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.preflight.outputs.exact_commit }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: bigpixelrocket/mise-php
+          ref: ${{ needs.release.outputs.mise_commit }}
+          path: mise-php
+          persist-credentials: false
+      # mise installs no tools here. Without the cache it never runs a mise binary
+      # another job could have saved.
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          github_token: ${{ github.token }}
+          cache: false
+      - name: Download the draft bytes
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.release.outputs.handoff_artifact_id }}
+          path: release-handoff
+          digest-mismatch: error
+      - name: Verify the draft bytes the release job reported
+        env:
+          ARCHIVE_DIGEST: ${{ needs.release.outputs.archive_digest }}
+          CHECKSUMS_DIGEST: ${{ needs.release.outputs.checksums_digest }}
+        run: |
+          archive="php-$VERSION-cli-macos-aarch64.tar.gz"
+          test "$(find release-handoff/draft -mindepth 1 -print | LC_ALL=C sort | paste -sd ' ' -)" \
+            = "release-handoff/draft/SHA256SUMS release-handoff/draft/$archive"
+          test "sha256:$(shasum -a 256 "release-handoff/draft/$archive" | awk '{print $1}')" = "$ARCHIVE_DIGEST"
+          test "sha256:$(shasum -a 256 release-handoff/draft/SHA256SUMS | awk '{print $1}')" = "$CHECKSUMS_DIGEST"
+          ./scripts/validate-autorelease-archive --archive "release-handoff/draft/$archive" --version "$VERSION"
       - name: Verify draft installation through temporary artifact path
         run: |
-          test -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}${MISE_GITHUB_TOKEN:-}"
-          temporary="$RUNNER_TEMP/draft-assets"
+          temporary="$RUNNER_TEMP/draft-install"
+          mkdir -p "$temporary"
           port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
-          ./scripts/serve-autorelease-artifact --port "$port" --assets "$temporary" --version "$VERSION" &
+          ./scripts/serve-autorelease-artifact --port "$port" --assets release-handoff/draft --version "$VERSION" &
           server_pid="$!"
           trap 'kill "$server_pid" 2>/dev/null || true' EXIT
           ready=false
@@ -370,6 +465,54 @@ jobs:
           kill "$server_pid"
           wait "$server_pid" || true
           trap - EXIT
+
+  # Publication resumes the transaction the release job handed over, only after the
+  # draft install passed. It re-reads the draft once more (`publishing`) immediately
+  # before the irreversible publication.
+  publish:
+    name: Publish the verified draft
+    needs: [preflight, release, verify-draft]
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs['verify-draft'].result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: php-autorelease-publish
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      EXACT_COMMIT: ${{ needs.preflight.outputs.exact_commit }}
+    outputs:
+      handoff_artifact_id: ${{ steps.handoff.outputs.artifact-id }}
+      transaction_digest: ${{ steps.handoff_digests.outputs.transaction_digest }}
+      event_digest: ${{ steps.handoff_digests.outputs.event_digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.preflight.outputs.exact_commit }}
+          persist-credentials: false
+      - name: Download the verified draft transaction
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.release.outputs.handoff_artifact_id }}
+          path: release-handoff
+          digest-mismatch: error
+      - name: Verify the handed-over transaction
+        env:
+          TRANSACTION_DIGEST: ${{ needs.release.outputs.transaction_digest }}
+          EVENT_DIGEST: ${{ needs.release.outputs.event_digest }}
+          ARCHIVE_DIGEST: ${{ needs.release.outputs.archive_digest }}
+          CHECKSUMS_DIGEST: ${{ needs.release.outputs.checksums_digest }}
+        run: |
+          archive="php-$VERSION-cli-macos-aarch64.tar.gz"
+          test "$(find release-handoff -type f -print | LC_ALL=C sort | paste -sd ' ' -)" \
+            = "release-handoff/draft/SHA256SUMS release-handoff/draft/$archive release-handoff/event.json release-handoff/transaction.json"
+          test "sha256:$(shasum -a 256 release-handoff/transaction.json | awk '{print $1}')" = "$TRANSACTION_DIGEST"
+          test "sha256:$(shasum -a 256 release-handoff/event.json | awk '{print $1}')" = "$EVENT_DIGEST"
+          test "sha256:$(shasum -a 256 "release-handoff/draft/$archive" | awk '{print $1}')" = "$ARCHIVE_DIGEST"
+          test "sha256:$(shasum -a 256 release-handoff/draft/SHA256SUMS | awk '{print $1}')" = "$CHECKSUMS_DIGEST"
+          test "$(jq -r .state release-handoff/transaction.json)" = "draft_verified"
+          test "$(jq -r .version release-handoff/transaction.json)" = "$VERSION"
+          test "$(jq -r .commit release-handoff/transaction.json)" = "$EXACT_COMMIT"
+          mkdir -p release-run
+          cp release-handoff/transaction.json release-handoff/event.json release-run/
       - name: Publish unchanged draft and verify public bytes
         env:
           GH_TOKEN: ${{ github.token }}
@@ -377,11 +520,11 @@ jobs:
           gh api "repos/${{ github.repository }}/contents/.github/autorelease-operator.json?ref=main" \
             --jq .content | base64 --decode > release-run/current-operator.json
           ./autorelease/control.py operator-gate --operator-file release-run/current-operator.json --require-enabled
-          for target in published public_verified complete; do
+          for target in publishing published public_verified complete; do
             ./scripts/publish-release \
               --transaction release-run/transaction.json \
               --target "$target" \
-              --assets .artifacts \
+              --assets release-handoff/draft \
               --version "$VERSION" \
               --commit "$EXACT_COMMIT" \
               --backend github \
@@ -402,27 +545,85 @@ jobs:
           test "$verified" = "true"
       - name: Record whether the immutable release is live
         if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p release-run
           released=false
           if [[ -f release-run/transaction.json ]]; then
             case "$(jq -r .state release-run/transaction.json)" in
               published|public_verified|complete) released=true ;;
+              # The run stopped between publication and its record, so the release
+              # counts as live unless GitHub positively reports it is still a draft.
+              publishing)
+                released=true
+                if [[ "$(gh release view "$VERSION" --repo "${{ github.repository }}" --json isDraft --jq .isDraft 2>/dev/null)" == "true" ]]; then
+                  released=false
+                fi
+                ;;
             esac
           fi
           jq -n --argjson released "$released" --arg version "$VERSION" \
-            '{schemaVersion:1,released:$released,version:$version}' > release-run/transaction-state.json
+            '{schemaVersion:1,released:$released,recorded:false,version:$version}' > release-run/transaction-state.json
       - name: Retain the transaction state for triage
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: release-transaction-state-${{ github.run_id }}
+          name: release-transaction-state-${{ github.run_id }}-${{ github.run_attempt }}
           path: release-run/transaction-state.json
           if-no-files-found: error
           retention-days: 90
+          overwrite: true
+      - name: Record the handed-over digests
+        id: handoff_digests
+        run: |
+          mkdir -p release-published
+          cp release-run/transaction.json release-run/event.json release-published/
+          {
+            echo "transaction_digest=sha256:$(shasum -a 256 release-published/transaction.json | awk '{print $1}')"
+            echo "event_digest=sha256:$(shasum -a 256 release-published/event.json | awk '{print $1}')"
+          } >> "$GITHUB_OUTPUT"
+      - name: Hand the published transaction to the next jobs
+        id: handoff
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-published-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-published/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Retain the publication record
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-publication-${{ needs.preflight.outputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-run/
+          if-no-files-found: error
+          retention-days: 90
+
+  verify-public:
+    name: Verify fresh public installs
+    needs: [preflight, release, publish]
+    if: ${{ !cancelled() && needs.publish.result == 'success' }}
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: bigpixelrocket/mise-php
+          ref: ${{ needs.release.outputs.mise_commit }}
+          path: mise-php
+          persist-credentials: false
+      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        with:
+          github_token: ${{ github.token }}
+          cache: false
       - name: Verify fresh public exact-version and branch-shorthand installs
         run: |
-          test -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}${MISE_GITHUB_TOKEN:-}"
           unset MISE_PHP_API_BASE_URL
           temporary="$(mktemp -d)"
           export MISE_DATA_DIR="$temporary/data"
@@ -437,6 +638,44 @@ jobs:
           mise install "php@$branch"
           mise exec "php@$VERSION" -- php -v
           mise exec "php@$branch" -- php -v
+
+  finalize:
+    name: Record the verified release
+    needs: [preflight, publish, verify-public]
+    if: ${{ !cancelled() && needs.publish.result == 'success' && needs['verify-public'].result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    environment: php-autorelease-publish
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      EXACT_COMMIT: ${{ needs.preflight.outputs.exact_commit }}
+      ACTION_KEY: ${{ needs.preflight.outputs.action_key }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.preflight.outputs.exact_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download the published transaction
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.publish.outputs.handoff_artifact_id }}
+          path: release-published
+          digest-mismatch: error
+      - name: Verify the handed-over transaction
+        env:
+          TRANSACTION_DIGEST: ${{ needs.publish.outputs.transaction_digest }}
+          EVENT_DIGEST: ${{ needs.publish.outputs.event_digest }}
+        run: |
+          test "$(find release-published -type f -print | LC_ALL=C sort | paste -sd ' ' -)" \
+            = "release-published/event.json release-published/transaction.json"
+          test "sha256:$(shasum -a 256 release-published/transaction.json | awk '{print $1}')" = "$TRANSACTION_DIGEST"
+          test "sha256:$(shasum -a 256 release-published/event.json | awk '{print $1}')" = "$EVENT_DIGEST"
+          test "$(jq -r .state release-published/transaction.json)" = "complete"
+          test "$(jq -r .version release-published/transaction.json)" = "$VERSION"
+          test "$(jq -r .actionKey release-published/event.json)" = "$ACTION_KEY"
+          mkdir -p release-run
+          cp release-published/transaction.json release-published/event.json release-run/
       - name: Complete durable event
         run: |
           jq -n --arg version "$VERSION" --argjson assets "$(jq .assetDigests release-run/transaction.json)" \
@@ -477,28 +716,25 @@ jobs:
           url="$(gh pr create --base main --head "autorelease/event-${{ github.run_id }}" \
             --title "chore: complete $ACTION_KEY" \
             --body "Durable event record for the immutable verified release transaction.")"
-          echo "number=${url##*/}" >> "$GITHUB_OUTPUT"
-          echo "base_sha=$base" >> "$GITHUB_OUTPUT"
-          echo "head_sha=$head" >> "$GITHUB_OUTPUT"
-          echo "record=$record" >> "$GITHUB_OUTPUT"
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          {
+            echo "number=${url##*/}"
+            echo "base_sha=$base"
+            echo "head_sha=$head"
+            echo "record=$record"
+            echo "digest=$digest"
+          } >> "$GITHUB_OUTPUT"
       - name: Validate and merge final event record
+        id: merge
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ./scripts/dispatch-pr-checks \
+          ./scripts/merge-record-pr \
             --pr "${{ steps.event_pr.outputs.number }}" \
-            --check "Script checks" \
-            --output release-run/event-checks.json
-          ./scripts/assert-admission-checks --checks release-run/event-checks.json
-          actual="$(gh pr view "${{ steps.event_pr.outputs.number }}" --json headRefOid --jq .headRefOid)"
-          test "$actual" = "${{ steps.event_pr.outputs.head_sha }}"
-          git fetch origin main
-          test "$(git rev-parse origin/main)" = "${{ steps.event_pr.outputs.base_sha }}"
-          test "$(git rev-list --parents -n 1 "$actual")" = "$actual ${{ steps.event_pr.outputs.base_sha }}"
-          test "$(git diff --name-only "${{ steps.event_pr.outputs.base_sha }}" "$actual")" = "${{ steps.event_pr.outputs.record }}"
-          test "sha256:$(git show "$actual:${{ steps.event_pr.outputs.record }}" | shasum -a 256 | awk '{print $1}')" = "${{ steps.event_pr.outputs.digest }}"
-          gh pr merge "${{ steps.event_pr.outputs.number }}" --squash --delete-branch
+            --base "${{ steps.event_pr.outputs.base_sha }}" \
+            --head "${{ steps.event_pr.outputs.head_sha }}" \
+            --record "${{ steps.event_pr.outputs.record }}" \
+            --digest "${{ steps.event_pr.outputs.digest }}" \
+            --checks-output release-run/event-checks.json
       - name: Notify owner of completed release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -510,40 +746,51 @@ jobs:
             --backend github \
             --repo "${{ github.repository }}" \
             --owner "${{ vars.AUTORELEASE_OWNER }}"
-      - name: Record release failure diagnostic
-        if: failure()
+      # This job only runs after publication, so the release is live either way; the
+      # state now also says whether its event record reached main.
+      - name: Record whether the event record merged
+        if: always()
+        env:
+          MERGE_OUTCOME: ${{ steps.merge.outcome }}
         run: |
           mkdir -p release-run
-          jq -n \
-            --arg actionKey "$ACTION_KEY" \
-            --arg version "$VERSION" \
-            --arg exactCommit "$EXACT_COMMIT" \
-            --arg investigationRunId "$INVESTIGATION_RUN_ID" \
-            --arg releaseRunId "${{ github.run_id }}" \
-            --arg runUrl "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            '{schemaVersion:1,actionKey:$actionKey,version:$version,exactCommit:$exactCommit,investigationRunId:$investigationRunId,releaseRunId:$releaseRunId,state:"failed",runUrl:$runUrl}' \
-            > release-run/failure.json
-      - name: Retain transaction and exact staging bytes
+          recorded=false
+          if [[ "$MERGE_OUTCOME" == "success" ]]; then
+            recorded=true
+          fi
+          jq -n --argjson recorded "$recorded" --arg version "$VERSION" \
+            '{schemaVersion:1,released:true,recorded:$recorded,version:$version}' > release-run/transaction-state.json
+      - name: Retain the transaction state for triage
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: release-transaction-${{ needs.preflight.outputs.version }}-${{ github.run_id }}
-          path: |
-            .artifacts/
-            release-run/
+          name: release-transaction-state-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-run/transaction-state.json
           if-no-files-found: error
           retention-days: 90
-          include-hidden-files: true
+          overwrite: true
+      - name: Retain the event record
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-record-${{ needs.preflight.outputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-run/
+          if-no-files-found: error
+          retention-days: 90
 
   notify-failure:
     name: Notify actionable release failure
-    needs: [preflight, release]
+    needs: [preflight, release, verify-draft, publish, verify-public, finalize]
     # A skipped release already keeps this job quiet when preflight rejects the
-    # dispatch, but the preflight result is asserted anyway so the gate survives
-    # a later change to the release job's own condition. A failed build reaches
-    # this job through the release job, which fails before any effect unless it
-    # completes an existing release.
-    if: always() && needs.preflight.result == 'success' && needs.release.result == 'failure'
+    # dispatch, but the preflight result is asserted anyway so the gate survives a
+    # later change to the release job's own condition. A failed build reaches this
+    # job through the release job, which fails before any effect unless it completes
+    # an existing release.
+    if: >-
+      always() && needs.preflight.result == 'success' && (
+      needs.release.result == 'failure' || needs['verify-draft'].result == 'failure' ||
+      needs.publish.result == 'failure' || needs['verify-public'].result == 'failure' ||
+      needs.finalize.result == 'failure')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -554,13 +801,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      # A run that fails before the state is retained keeps the critical default below.
+      # A rerun of the failed jobs keeps the state an earlier attempt retained, so the
+      # newest attempt that retained one is read. A run that failed before any attempt
+      # retained state keeps the critical default below.
       - name: Download the retained transaction state
-        continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: release-transaction-state-${{ github.run_id }}
-          path: release-state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          attempt="${{ github.run_attempt }}"
+          while (( attempt > 0 )); do
+            if gh run download "${{ github.run_id }}" --repo "${{ github.repository }}" \
+              --name "release-transaction-state-${{ github.run_id }}-$attempt" --dir release-state; then
+              break
+            fi
+            attempt=$((attempt - 1))
+          done
       - name: Create a structured event keyed on the transaction state
         env:
           ACTION_KEY: ${{ needs.preflight.outputs.action_key }}
@@ -570,10 +825,17 @@ jobs:
           # A live release is not a critical failure: the watcher files the missing
           # event record on its own. Only an unpublished release stops the pipeline.
           released=false
+          recorded=false
           if [[ -f release-state/transaction-state.json ]]; then
             released="$(jq -r .released release-state/transaction-state.json)"
+            recorded="$(jq -r '.recorded // false' release-state/transaction-state.json)"
           fi
-          if [[ "$released" == "true" ]]; then
+          if [[ "$released" == "true" && "$recorded" == "true" ]]; then
+            state=released
+            severity=warning
+            summary="PHP $VERSION was published and its event record is complete, but a job of the publish run failed: $RUN_URL"
+            fingerprint="release-run-failed-after-record:$ACTION_KEY"
+          elif [[ "$released" == "true" ]]; then
             state=released
             severity=warning
             summary="PHP $VERSION was published; its event record is pending and the watcher will recover it: $RUN_URL"
