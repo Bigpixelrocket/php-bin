@@ -241,6 +241,11 @@ jobs:
             # under the check that found it; that is the diff the owner acts on.
             grep -E '^(Checking |Missing modules:|Unexpected modules:|  [-+] |Built shared extensions differ)' \
               new-branch-build/build.log > new-branch-build/module-diff.txt || true
+            # Only a module comparison that named missing or unexpected modules is a
+            # module-list problem; any other build failure keeps the generic report.
+            if ! grep -qE '^(Missing modules:|Unexpected modules:)' new-branch-build/module-diff.txt; then
+              rm -f new-branch-build/module-diff.txt
+            fi
             exit "$status"
           fi
       - name: Retain the module comparison
@@ -291,7 +296,14 @@ jobs:
           action_key="$(jq -r .actionKey autorelease-run/autorelease-plan.json)"
           branch="autorelease/$(./autorelease/control.py action-filename "$action_key" --suffix '')"
           gh auth setup-git
-          git push origin "HEAD:refs/heads/$branch"
+          # A retry after a failed merge validates a new commit that does not descend
+          # from the earlier attempt, so the automation branch is replaced under a lease
+          # and any open PR on it is reused; the exact-SHA gates below still bind the
+          # merge to this run's validated commit.
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            git fetch origin "$branch:refs/remotes/origin/$branch"
+          fi
+          git push --force-with-lease origin "HEAD:refs/heads/$branch"
           existing="$(gh pr list --head "$branch" --state open --json number --jq '.[0].number // empty')"
           if [[ -z "$existing" ]]; then
             url="$(gh pr create --base main --head "$branch" --title "chore: $action_key" \
@@ -469,7 +481,9 @@ jobs:
             fingerprint="module-diff:$(shasum -a 256 new-branch-build/module-diff.txt | awk '{print $1}')"
           else
             state=blocked
-            summary="Autorelease implementation of $ACTION_KEY failed before merging anything: $RUN_URL"
+            # The merge job can fail after the lifecycle edit merged, so this summary
+            # claims nothing about main; the next watcher run classifies what landed.
+            summary="Autorelease implementation of $ACTION_KEY failed: $RUN_URL"
             fingerprint="implementation-failure:$ACTION_KEY"
           fi
           jq -n \

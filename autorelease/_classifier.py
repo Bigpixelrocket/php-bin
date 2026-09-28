@@ -398,15 +398,21 @@ class _Classifier:
         return version
 
     def aggregate_version(self, major: str) -> str | None:
-        """Return the newest stable version the aggregate feed names for one major, if any."""
+        """Return the newest stable version the aggregate feed names for one major, if any.
+
+        Only a major the feed does not list yet is None. An entry without a stable
+        version is a feed whose shape changed, which blocks rather than reads as silence.
+        """
         document = self.capture.json_body("php_release_feed")
         if not isinstance(document, dict):
             raise SourceFormatError("php_release_feed", "body is not an object")
-        entry = document.get(major)
+        if major not in document:
+            return None
+        entry = document[major]
         version = entry.get("version") if isinstance(entry, dict) else None
-        if isinstance(version, str) and _STABLE_PATCH_RE.fullmatch(version):
-            return version
-        return None
+        if not isinstance(version, str) or not _STABLE_PATCH_RE.fullmatch(version):
+            raise SourceFormatError("php_release_feed", f"major {major} names no stable version")
+        return version
 
     def superseded_by(self, version: str) -> str | None:
         """Return a later patch on the same branch that a captured feed names, if any."""
@@ -576,14 +582,17 @@ class _Classifier:
         ]
         contradictions = sorted(set(vanished + misclassified + unmaintained_older), key=version_key)
         if contradictions:
-            item, _value = self.capture.pointer(
+            item, page_digest = self.capture.pointer(
                 "evidence_manifest",
                 f"/captures/{self.capture.index['php_supported_versions']}/digest",
                 "The supported-versions capture contradicts the accepted support policy.",
             )
+            # The key binds the page body and the contradiction, never the manifest file's
+            # own hash, which changes with every capture: the same unresolved
+            # contradiction must refresh one owner issue rather than open one a day.
             return self.stop(
                 "needs_human",
-                f"policy_failure:{_short_digest(['lifecycle', contradictions, item['digest']])}",
+                f"policy_failure:{_short_digest(['lifecycle', contradictions, page_digest])}",
                 [item],
                 "The supported-versions page contradicts the accepted support policy for PHP "
                 f"{', '.join(contradictions)}: a maintained branch has no support row, is not yet "

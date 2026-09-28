@@ -230,6 +230,11 @@ class ClassifierTests(unittest.TestCase):
             self.assertTrue(plan["notification"]["humanActionRequired"])
             self.admit(plan, manifest)
             self.assertEqual("notify_blocked", route_watch_action(plan)["route"])
+            # The same contradiction on a later capture refreshes the same owner issue,
+            # although the manifest file (and its own digest) differs.
+            later = self.capture(rows=rows, releases=[*PUBLISHED, {"tag_name": "8.4.20-1"}])
+            self.assertNotEqual(sha256_file(manifest), sha256_file(later))
+            self.assertEqual(plan["actionKey"], self.classify(later)["actionKey"])
 
     def test_an_unrecognised_lifecycle_page_blocks_instead_of_guessing(self):
         first = self.capture(raw_page=b"<main>We moved the table.</main>")
@@ -244,6 +249,18 @@ class ClassifierTests(unittest.TestCase):
         # A feed that names another branch is just as unreadable.
         wrong = self.capture(feeds={"8.4": "8.5.9", "8.5": "8.5.9"})
         self.assertEqual("blocked", self.classify(wrong)["action"])
+        # So is an aggregate feed whose major entry lost its stable version: a new
+        # branch it would prove must not read as a quiet day.
+        rows = {**MAINTAINED, "8.6": ("stable", "31 Dec 2030")}
+        shapeless = self.capture(rows=rows, aggregate="8.6.0")
+        body = shapeless.parent / "raw/php_release_feed.body"
+        body.write_bytes(canonical_json({"8": {"announcement": True}}))
+        document = json.loads(shapeless.read_text())
+        for item in document["captures"]:
+            if item["captureId"] == "php_release_feed":
+                item["digest"] = sha256_bytes(body.read_bytes())
+        shapeless.write_bytes(canonical_json(document))
+        self.assertEqual("blocked", self.classify(shapeless)["action"])
 
     def test_unhealthy_or_failed_capture_blocks_everything(self):
         manifest = self.capture(feeds={"8.4": "8.4.21", "8.5": "8.5.9"})
@@ -507,6 +524,18 @@ class WorkflowWiringTests(unittest.TestCase):
             text = path.read_text().lower()
             self.assertNotIn("openai", text, path.name)
             self.assertNotIn("codex", text, path.name)
+
+    def test_only_a_named_module_mismatch_asks_for_a_module_list_fix(self):
+        implement = (ROOT / ".github/workflows/autorelease-implement.yml").read_text()
+        self.assertIn("grep -qE '^(Missing modules:|Unexpected modules:)' new-branch-build/module-diff.txt", implement)
+        self.assertIn("rm -f new-branch-build/module-diff.txt", implement)
+        self.assertIn("-s new-branch-build/module-diff.txt", implement)
+
+    def test_new_branch_publication_verifies_the_plugin_at_the_readiness_commit(self):
+        publish = (ROOT / ".github/workflows/autorelease-publish.yml").read_text()
+        self.assertIn('compare/$ready_commit...$(git -C mise-php rev-parse HEAD)', publish)
+        self.assertIn('git -C mise-php checkout --detach "$ready_commit"', publish)
+        self.assertNotIn('.misePhpCommit release-run/mise-readiness.json)" = "$(git -C mise-php rev-parse HEAD)"', publish)
 
     def test_module_diff_extraction_matches_the_comparison_output(self):
         implement = (ROOT / ".github/workflows/autorelease-implement.yml").read_text()

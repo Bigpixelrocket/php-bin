@@ -257,7 +257,11 @@ event records then merge on their own: `autorelease-events/`, `autorelease-state
 `readiness/` sit outside CODEOWNERS precisely so their exact-SHA automation
 PRs satisfy branch protection without a reviewer, while every protected
 control still cannot. Publication waits only on machine facts — matching
-`php_bin_ready` and `mise_ready` records at exact commits.
+`php_bin_ready` and `mise_ready` records at exact commits. The `mise_ready`
+record names the mise-php synchronization commit it validated, and the record
+itself merges on top of it, so the publish job requires the captured mise-php
+`main` to contain that commit and verifies installs with the plugin checked
+out at exactly it.
 
 Retirement is the mirror image and equally unattended. A maintained branch
 whose supported-versions row is marked end of life becomes

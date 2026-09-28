@@ -218,7 +218,16 @@ jobs:
             test "$(jq -r .policyDigest release-run/mise-readiness.json)" = "$(jq -r .supportPolicyDigest "$event")"
             test "$(jq -r .policyInvariantsDigest release-run/mise-readiness.json)" = "$(jq -r .policyInvariantsDigest "$event")"
             policy_commit="$(jq -r .phpBinPolicyCommit release-run/mise-readiness.json)"
-            test "$(jq -r .misePhpCommit release-run/mise-readiness.json)" = "$(git -C mise-php rev-parse HEAD)"
+            # mise-php merges its readiness record on top of the synchronization commit
+            # the record names, so the captured main is that commit or a descendant of
+            # it. The plugin is then verified at exactly the commit readiness validated.
+            ready_commit="$(jq -r .misePhpCommit release-run/mise-readiness.json)"
+            [[ "$ready_commit" =~ ^[0-9a-f]{40}$ ]]
+            ancestry="$(gh api "repos/bigpixelrocket/mise-php/compare/$ready_commit...$(git -C mise-php rev-parse HEAD)" --jq .status)"
+            [[ "$ancestry" == "identical" || "$ancestry" == "ahead" ]]
+            git -C mise-php fetch origin "$ready_commit"
+            git -C mise-php checkout --detach "$ready_commit"
+            test "$(git -C mise-php rev-parse HEAD)" = "$ready_commit"
             gh api "repos/${{ github.repository }}/contents/support-policy.json?ref=$policy_commit" \
               --jq .content | base64 --decode > release-run/readiness-policy.json
             test "sha256:$(shasum -a 256 release-run/readiness-policy.json | awk '{print $1}')" = "$(jq -r .policyDigest release-run/mise-readiness.json)"
