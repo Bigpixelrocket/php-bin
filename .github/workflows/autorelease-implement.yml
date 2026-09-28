@@ -350,7 +350,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh pr merge "${{ steps.pr.outputs.number }}" --squash --delete-branch
+          # The branch can be replaced by a later attempt, so the merge itself is bound
+          # to this run's validated commit.
+          gh pr merge "${{ steps.pr.outputs.number }}" --squash --delete-branch \
+            --match-head-commit "$(jq -r .headSha autorelease-run/validation.json)"
           echo "commit=$(gh pr view "${{ steps.pr.outputs.number }}" --json mergeCommit --jq .mergeCommit.oid)" >> "$GITHUB_OUTPUT"
       - name: Commit deterministic php_bin_ready event record
         id: readiness

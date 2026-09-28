@@ -235,6 +235,10 @@ class ClassifierTests(unittest.TestCase):
             later = self.capture(rows=rows, releases=[*PUBLISHED, {"tag_name": "8.4.20-1"}])
             self.assertNotEqual(sha256_file(manifest), sha256_file(later))
             self.assertEqual(plan["actionKey"], self.classify(later)["actionKey"])
+        # An unrelated row changing on the page keeps the same contradiction's key.
+        missing = self.classify(self.capture(rows={"8.5": MAINTAINED["8.5"]}))
+        moved = self.classify(self.capture(rows={"8.5": ("security", "31 Dec 2029")}))
+        self.assertEqual(missing["actionKey"], moved["actionKey"])
 
     def test_an_unrecognised_lifecycle_page_blocks_instead_of_guessing(self):
         first = self.capture(raw_page=b"<main>We moved the table.</main>")
@@ -256,6 +260,13 @@ class ClassifierTests(unittest.TestCase):
         body = shapeless.parent / "raw/php_release_feed.body"
         body.write_bytes(canonical_json({"8": {"announcement": True}}))
         document = json.loads(shapeless.read_text())
+        for item in document["captures"]:
+            if item["captureId"] == "php_release_feed":
+                item["digest"] = sha256_bytes(body.read_bytes())
+        shapeless.write_bytes(canonical_json(document))
+        self.assertEqual("blocked", self.classify(shapeless)["action"])
+        # An entry naming another major's release is just as unreadable.
+        body.write_bytes(canonical_json({"8": {"version": "9.0.0"}}))
         for item in document["captures"]:
             if item["captureId"] == "php_release_feed":
                 item["digest"] = sha256_bytes(body.read_bytes())
@@ -530,6 +541,9 @@ class WorkflowWiringTests(unittest.TestCase):
         self.assertIn("grep -qE '^(Missing modules:|Unexpected modules:)' new-branch-build/module-diff.txt", implement)
         self.assertIn("rm -f new-branch-build/module-diff.txt", implement)
         self.assertIn("-s new-branch-build/module-diff.txt", implement)
+        # A later attempt can replace the automation branch, so the merge is bound to
+        # the validated commit.
+        self.assertIn('--match-head-commit "$(jq -r .headSha autorelease-run/validation.json)"', implement)
 
     def test_new_branch_publication_verifies_the_plugin_at_the_readiness_commit(self):
         publish = (ROOT / ".github/workflows/autorelease-publish.yml").read_text()

@@ -401,7 +401,8 @@ class _Classifier:
         """Return the newest stable version the aggregate feed names for one major, if any.
 
         Only a major the feed does not list yet is None. An entry without a stable
-        version is a feed whose shape changed, which blocks rather than reads as silence.
+        release of that major is a feed whose shape changed, which blocks rather than
+        reads as silence.
         """
         document = self.capture.json_body("php_release_feed")
         if not isinstance(document, dict):
@@ -410,8 +411,9 @@ class _Classifier:
             return None
         entry = document[major]
         version = entry.get("version") if isinstance(entry, dict) else None
-        if not isinstance(version, str) or not _STABLE_PATCH_RE.fullmatch(version):
-            raise SourceFormatError("php_release_feed", f"major {major} names no stable version")
+        stable = isinstance(version, str) and bool(_STABLE_PATCH_RE.fullmatch(version))
+        if not stable or not version.startswith(f"{major}."):
+            raise SourceFormatError("php_release_feed", f"major {major} names no stable {major}.x version")
         return version
 
     def superseded_by(self, version: str) -> str | None:
@@ -582,17 +584,18 @@ class _Classifier:
         ]
         contradictions = sorted(set(vanished + misclassified + unmaintained_older), key=version_key)
         if contradictions:
-            item, page_digest = self.capture.pointer(
+            item, _value = self.capture.pointer(
                 "evidence_manifest",
                 f"/captures/{self.capture.index['php_supported_versions']}/digest",
                 "The supported-versions capture contradicts the accepted support policy.",
             )
-            # The key binds the page body and the contradiction, never the manifest file's
-            # own hash, which changes with every capture: the same unresolved
-            # contradiction must refresh one owner issue rather than open one a day.
+            # The key names only the contradiction itself, never a digest of the page or
+            # the manifest file: the same unresolved contradiction must refresh one owner
+            # issue however often the capture or unrelated rows change.
+            identity = [["vanished", vanished], ["future", misclassified], ["unmaintained", unmaintained_older]]
             return self.stop(
                 "needs_human",
-                f"policy_failure:{_short_digest(['lifecycle', contradictions, page_digest])}",
+                f"policy_failure:{_short_digest(['lifecycle', identity])}",
                 [item],
                 "The supported-versions page contradicts the accepted support policy for PHP "
                 f"{', '.join(contradictions)}: a maintained branch has no support row, is not yet "
