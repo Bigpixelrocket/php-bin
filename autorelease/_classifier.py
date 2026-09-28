@@ -7,11 +7,15 @@ fixed order and returns one plan in `schemas/autorelease-plan.schema.json`, with
 evidence digest computed from the bytes it cites:
 
 1. Unhealthy evidence stops the run as `blocked`: nothing else can be proven from it.
-2. An incomplete event record is resumed under its own action key.
-3. Lifecycle evidence on the supported-versions page: a `new_branch`, then a
-   `branch_eol`.
-4. A `new_patch` per maintained branch, oldest branch first, for the newest stable
+2. An incomplete event record is resumed under its own action key. A lifecycle record
+   that is only waiting for mise-php readiness lets a due patch go first.
+3. A `new_patch` per maintained branch, oldest branch first, for the newest stable
    version that branch's own feed names when it is neither published nor superseded.
+   A maintained branch that never shipped a release needs a human instead: its first
+   release belongs to `new_branch`, behind the cross-repository readiness gate.
+4. Lifecycle evidence on the supported-versions page: a `new_branch`, then a
+   `branch_eol`. Patches never read that page, so an unreadable page blocks only a run
+   with no patch due.
 5. The one `recipe_rebuild` the watch decision selected.
 6. `no_change`, keyed on the manifest's embedded `manifestDigest`.
 
@@ -51,8 +55,10 @@ from ._validation import (
 
 
 # Row classes php.net assigns on supported-versions.php. A branch keeps an `eol` row for
-# a few weeks after its security support ends, which is what makes its EOL date
-# readable at all. Any other class is a page this parser was not reviewed against.
+# 28 days after its security support ends (php.net's `KEEP_EOL`), which is what makes
+# its EOL date readable at all. A watcher that misses that whole window finds the branch
+# with no row, which is a lifecycle contradiction for a human, never a guessed date.
+# Any other class is a page this parser was not reviewed against.
 SUPPORT_STATES = frozenset({"stable", "security", "eol", "future"})
 SUPPORTED_STATES = frozenset({"stable", "security"})
 SUPPORT_TABLE_HEADERS = (
@@ -635,8 +641,42 @@ class _Classifier:
             )
         return None
 
+    def waiting_lifecycle_record(self) -> bool:
+        """Tell whether the only incomplete record is lifecycle work waiting for mise-php.
+
+        A `new_branch` or `branch_eol` record at `php_bin_ready` has merged its php-bin
+        change and waits for mise-php to record readiness, which the watcher checks only
+        at dispatch time. When it is the only incomplete record nothing is half
+        published, so a patch on another branch need not wait behind it.
+        """
+        pending = self.capture.decision.get("incompleteActions") or []
+        return (
+            len(pending) == 1
+            and pending[0].partition(":")[0] in {"new_branch", "branch_eol"}
+            and self.events.get(pending[0], {}).get("state") == "php_bin_ready"
+        )
+
+    def resume_incomplete(self) -> dict[str, Any] | None:
+        """Resume the first incomplete record, unless it only waits and a patch is due."""
+        resumed = self.incomplete_event()
+        if resumed is None or resumed["action"] not in {"new_branch", "branch_eol"}:
+            return resumed
+        if not self.waiting_lifecycle_record():
+            return resumed
+        try:
+            patch = self.new_patch()
+        except SourceFormatError:
+            # A feed this run cannot read never holds back the waiting record itself.
+            return resumed
+        # A waiting new branch never ships as a plain patch: having no release yet, it
+        # stops as `needs_human` in `new_patch`, and that stop yields to the resume.
+        return patch if patch is not None and patch["action"] == "new_patch" else resumed
+
     def new_patch(self) -> dict[str, Any] | None:
         published = self.published_versions()
+        shipped = {branch_of(version) for version in published} | {
+            key.partition(":")[2] for key in self.completed if key.startswith("new_branch:")
+        }
         for branch in self.maintained:
             version = self.branch_feed_version(branch)
             if version is None and not self.capture.has(branch_feed_capture_id(branch)):
@@ -646,6 +686,22 @@ class _Classifier:
                 version = aggregate if aggregate and branch_of(aggregate) == branch else None
             if version is None or version in published:
                 continue
+            if branch not in shipped:
+                # A branch's first release is a `new_branch`, published only after the
+                # exact php_bin_ready and mise_ready records. A maintained branch with no
+                # release and no record in flight means that record went missing, so a
+                # plain patch would skip the mise-php readiness gate.
+                proof = self.feed_proof(version)
+                require(proof is not None, f"branch feed version {version} is not provable")
+                return self.stop(
+                    "needs_human",
+                    f"new_branch:{branch}",
+                    [proof],
+                    f"PHP {branch} is maintained and its feed names {version}, but no {branch} release "
+                    f"has shipped and no new_branch:{branch} record is in flight. Its first release "
+                    "must pass the cross-repository readiness gate, so an operator needs to restore "
+                    "the missing event record.",
+                )
             newest_published = max(
                 (item for item in published if branch_of(item) == branch), key=version_key, default=None
             )
@@ -709,7 +765,7 @@ class _Classifier:
         )
 
     def classify(self) -> dict[str, Any]:
-        for rule in (self.health, self.incomplete_event, self.lifecycle, self.new_patch, self.recipe_rebuild):
+        for rule in (self.health, self.resume_incomplete, self.new_patch, self.lifecycle, self.recipe_rebuild):
             try:
                 plan = rule()
             except SourceFormatError as error:

@@ -287,6 +287,87 @@ class ClassifierTests(unittest.TestCase):
         self.assertEqual("needs_human", superseded["action"])
         self.assertIn("8.5.9 supersedes it", superseded["summary"])
 
+    def test_a_due_patch_goes_before_lifecycle_work(self):
+        due = {"8.4": "8.4.21", "8.5": "8.5.9"}
+        for rows, aggregate in (
+            ({**MAINTAINED, "8.6": ("stable", "31 Dec 2030")}, "8.6.0"),  # a new branch
+            ({**MAINTAINED, "8.4": ("eol", "31 Dec 2026")}, "8.5.9"),  # a retirement
+            ({"8.5": MAINTAINED["8.5"]}, "8.5.9"),  # a lifecycle contradiction
+        ):
+            manifest = self.capture(feeds=due, rows=rows, aggregate=aggregate)
+            plan = self.classify(manifest)
+            self.assertEqual("new_patch:8.4.21", plan["actionKey"], rows)
+            self.admit(plan, manifest)
+        # Patches never read the lifecycle page, so an unreadable one blocks only a run
+        # with no patch due.
+        broken = b"<main>We moved the table.</main>"
+        manifest = self.capture(feeds=due, raw_page=broken)
+        self.assertEqual("new_patch:8.4.21", self.classify(manifest)["actionKey"])
+        self.assertEqual("blocked", self.classify(self.capture(raw_page=broken))["action"])
+
+    def test_a_lifecycle_record_waiting_for_readiness_lets_a_patch_go_first(self):
+        feeds = {"8.4": "8.4.21", "8.5": "8.5.9", "8.6": "8.6.0"}
+        branches = ("8.4", "8.5", "8.6")
+        rows = {**MAINTAINED, "8.6": ("stable", "31 Dec 2030")}
+        waiting = [{"actionKey": "new_branch:8.6", "state": "php_bin_ready"}]
+        manifest = self.capture(feeds=feeds, rows=rows, aggregate="8.6.0", incomplete=["new_branch:8.6"])
+        plan = self.classify(manifest, waiting, branches)
+        self.assertEqual("new_patch:8.4.21", plan["actionKey"])
+        self.admit(plan, manifest)
+        # The waiting branch's own first release is never a plain patch, so with no
+        # other patch due the record resumes.
+        idle = self.capture(feeds={**feeds, "8.4": "8.4.20"}, rows=rows, aggregate="8.6.0", incomplete=["new_branch:8.6"])
+        self.assertEqual("new_branch:8.6", self.classify(idle, waiting, branches)["actionKey"])
+        # Another branch's unreadable feed does not stop the record's own resume.
+        unreadable = self.capture(feeds={**feeds, "8.4": "8.5.9"}, rows=rows, aggregate="8.6.0", incomplete=["new_branch:8.6"])
+        self.assertEqual("new_branch:8.6", self.classify(unreadable, waiting, branches)["actionKey"])
+        # A record past readiness, or one beside another incomplete record, still goes first.
+        started = [{"actionKey": "new_branch:8.6", "state": "release_requested"}]
+        self.assertEqual("new_branch:8.6", self.classify(manifest, started, branches)["actionKey"])
+        both = self.capture(feeds=feeds, rows=rows, aggregate="8.6.0", incomplete=["new_branch:8.6", "new_patch:8.5.9"])
+        self.assertEqual(
+            "new_branch:8.6",
+            self.classify(both, [*waiting, {"actionKey": "new_patch:8.5.9", "state": "release_requested"}],
+                          branches)["actionKey"],
+        )
+        # A retirement waiting for mise-php readiness yields the same way.
+        eol_key = "branch_eol:8.3:2025-12-31"
+        retired = self.capture(feeds={"8.4": "8.4.21", "8.5": "8.5.9"}, incomplete=[eol_key])
+        plan = self.classify(retired, [{"actionKey": eol_key, "state": "php_bin_ready"}])
+        self.assertEqual("new_patch:8.4.21", plan["actionKey"])
+
+    def test_a_maintained_branch_that_never_shipped_is_never_a_plain_patch(self):
+        # The policy maintains 8.6 but its new_branch record is missing: its first
+        # release must not skip the mise-php readiness gate as a plain patch.
+        feeds = {"8.4": "8.4.20", "8.5": "8.5.9", "8.6": "8.6.0"}
+        rows = {**MAINTAINED, "8.6": ("stable", "31 Dec 2030")}
+        manifest = self.capture(feeds=feeds, rows=rows, aggregate="8.6.0")
+        plan = self.classify(manifest, branches=("8.4", "8.5", "8.6"))
+        self.assertEqual(("needs_human", "new_branch:8.6"), (plan["action"], plan["actionKey"]))
+        self.assertEqual("php_release_feed_8.6", plan["evidence"][0]["captureId"])
+        self.admit(plan, manifest)
+        self.assertEqual("notify_blocked", route_watch_action(plan)["route"])
+        # A completed new_branch record counts as shipped even once its release fell
+        # off the captured page.
+        shipped = self.classify(
+            self.capture(feeds={**feeds, "8.6": "8.6.1"}, rows=rows, aggregate="8.6.1"),
+            [{"actionKey": "new_branch:8.6", "state": "complete"}],
+            ("8.4", "8.5", "8.6"),
+        )
+        self.assertEqual("new_patch:8.6.1", shipped["actionKey"])
+        # Admission rejects the plain patch on its own, whatever proposed it.
+        patch = {
+            **plan,
+            "action": "new_patch",
+            "actionKey": "new_patch:8.6.0",
+            "releaseIntent": {"version": "8.6.0", "sourceIdentifier": "php_release_feed_8.6"},
+            "risk": "routine",
+            "notification": {**plan["notification"], "humanActionRequired": False, "suggestedSeverity": "info"},
+        }
+        with self.assertRaisesRegex(ControlError, "first PHP 8.6 release"):
+            self.admit(patch, manifest)
+        self.admit(patch, manifest, completed=["new_branch:8.6"])
+
     def test_inconsistent_watcher_inputs_fail_the_job(self):
         manifest = self.capture()
         with self.assertRaisesRegex(ControlError, "preconditions"):
@@ -351,7 +432,9 @@ class LifecycleEditTests(unittest.TestCase):
 
     def lifecycle_plan(self, rows, aggregate):
         feeds = {branch: f"{branch}.1" for branch in self.maintained}
-        manifest = fixture_capture(self.tmp / "run", branch_feeds=feeds, aggregate=aggregate, page=page(rows), releases=[])
+        shipped = [{"tag_name": version} for version in feeds.values()]
+        manifest = fixture_capture(self.tmp / "run", branch_feeds=feeds, aggregate=aggregate, page=page(rows),
+                                   releases=shipped)
         plan = classify_evidence(manifest, PRECONDITIONS, [], self.maintained)
         return plan, manifest
 

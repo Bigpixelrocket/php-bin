@@ -54,19 +54,29 @@ stops at the first that applies:
    own action key: a `new_branch` release, a `branch_eol` completion, a
    `new_patch`, or the selected `recipe_rebuild`. A record stopped at
    `blocked` or `needs_human`, or one no deterministic path resumes, produces
-   `needs_human`.
-3. **Lifecycle.** The captured supported-versions page is parsed by a reviewed
-   reader that accepts exactly one table shape. A supported branch the policy
-   does not maintain is a `new_branch` once the aggregate release feed names
-   its first stable release. A maintained branch whose row is marked end of
-   life is a `branch_eol` keyed on its security support end date. A maintained
-   branch with no row, or an older supported branch the policy does not
-   maintain, contradicts the policy and produces `needs_human`.
-4. **New patches.** For each maintained branch, oldest first, the version that
+   `needs_human`. One exception keeps patches moving: when the only incomplete
+   record is a `new_branch` or `branch_eol` at `php_bin_ready`, waiting for
+   `mise-php` readiness, a patch due under the next rule goes first and the
+   record resumes on a later run.
+3. **New patches.** For each maintained branch, oldest first, the version that
    branch's own feed names is a `new_patch` when it is not yet published, not
    older than what already shipped on that branch, and not superseded by a
    later patch the aggregate feed names. The plan cites exactly that branch
-   feed value.
+   feed value. A maintained branch with no shipped release is never a
+   `new_patch`: its first release belongs to `new_branch`, which waits for
+   both readiness records, so it produces `needs_human` instead. Admission
+   rejects that patch independently. New patches never read the
+   supported-versions page, so they go before lifecycle work and keep
+   shipping while that page cannot be read.
+4. **Lifecycle.** The captured supported-versions page is parsed by a reviewed
+   reader that accepts exactly one table shape. A supported branch the policy
+   does not maintain is a `new_branch` once the aggregate release feed names
+   its first stable release. A maintained branch whose row is marked end of
+   life is a `branch_eol` keyed on its security support end date. php.net
+   keeps that row for 28 days after the date; a maintained branch with no
+   row (for example, one whose window the watcher missed), or an older
+   supported branch the policy does not maintain, contradicts the policy and
+   produces `needs_human`.
 5. **Rebuilds.** The one `rebuildActionKey` the watch decision selected.
 6. **No change**, keyed on the manifest's embedded `manifestDigest`.
 
@@ -80,8 +90,9 @@ Admission (`scripts/admit-autorelease-plan`, `autorelease/_admission.py`) then
 checks the plan independently. It shares only small pure helpers with the
 classifier and re-derives every claim from the capture: the exact field set,
 the action key form, evidence digests and locators, release-feed proof and
-supersession, the rebuild selection, allowed paths, and the exact repository
-and policy preconditions.
+supersession, that a patch extends a branch that already shipped, the
+rebuild selection, allowed paths, and the exact repository and policy
+preconditions.
 
 The line between the harness and the product is deliberate. The *harness* is
 protected: `scripts/` gates such as `test.sh`, `lib.sh`, `build.sh`,
@@ -237,6 +248,9 @@ set, the run stops without merging and the owner issue for the
 `new_branch:<branch>` key states the exact missing (`-`) and unexpected (`+`)
 modules; a human corrects `expected-modules/<branch>.txt` by pull request, and
 the next watcher run retries with that list, which the edit never overwrites.
+Until then each watcher run with no patch due retries the same build and
+fails the same way; patches on maintained branches go first and never wait
+for it.
 `mise-php` then regenerates `support-snapshot.json` and `lib/policy.lua`
 from the merged policy with its own deterministic scripts. The readiness and
 event records then merge on their own: `autorelease-events/`, `autorelease-state/`, and `mise-php`'s

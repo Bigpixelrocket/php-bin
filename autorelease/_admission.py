@@ -144,6 +144,46 @@ def validate_release_is_newest_patch(
         )
 
 
+def validate_patch_extends_shipped_branch(
+    action: str,
+    release_intent: dict[str, Any] | None,
+    manifest_path: pathlib.Path,
+    completed_actions: set[str],
+) -> None:
+    """Reject a `new_patch` that would be the first release on its branch.
+
+    A branch's first release is a `new_branch`, which publishes only after exact
+    `php_bin_ready` and `mise_ready` records, so a plain patch must never stand in for
+    it. A branch has shipped when the captured php-bin releases hold a published
+    release on it, or a completed event record names a release on it.
+    """
+    if action != "new_patch":
+        return
+    require(isinstance(release_intent, dict), "stable release action has no release intent")
+    match = re.fullmatch(r"(\d+\.\d+)\.\d+", str(release_intent.get("version", "")))
+    require(bool(match), f"stable release version is invalid: {release_intent.get('version')}")
+    branch = match.group(1)
+    _capture, body = load_capture(manifest_path, "php_bin_releases")
+    try:
+        releases = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ControlError("php-bin releases capture is not valid JSON") from error
+    require(isinstance(releases, list), "php-bin releases capture is not a release array")
+    shipped = any(
+        isinstance(release, dict)
+        and not release.get("draft")
+        and not release.get("prerelease")
+        and bool(STABLE_VERSION_RE.fullmatch(str(release.get("tag_name", ""))))
+        and str(release.get("tag_name")).startswith(f"{branch}.")
+        for release in releases
+    ) or any(
+        key == f"new_branch:{branch}"
+        or bool(re.fullmatch(rf"(?:new_patch|recipe_rebuild):{re.escape(branch)}\.\d+(?::\d+)?", key))
+        for key in completed_actions
+    )
+    require(shipped, f"new_patch would be the first PHP {branch} release; only new_branch may publish it")
+
+
 def validate_recipe_rebuild_evidence(
     action: str,
     action_key: str,
@@ -460,11 +500,15 @@ def validate_plan(
     shares no decision logic with it and re-derives every claim from the capture. The
     three gates run in a fixed order: what the plan is, what state it was classified
     against, and what it asks for. A later gate reads values the earlier one proved,
-    so none of them is safe to reorder.
+    so none of them is safe to reorder. A `new_patch` must finally extend a branch that
+    already shipped, which needs the completed records the watcher supplied.
     """
     action_key = _validate_plan_shape(plan, manifest_path, completed_actions, pending_rebuild)
     _validate_plan_preconditions(plan, repo_heads, policy_digest)
     _validate_plan_actions(plan, manifest_path)
+    validate_patch_extends_shipped_branch(
+        plan.get("action", ""), plan.get("releaseIntent"), manifest_path, completed_actions or set()
+    )
     return {
         "admitted": True,
         "admittedAt": utc_now(),

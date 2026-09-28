@@ -600,14 +600,29 @@ class Verifier:
         return ["eol-policy.txt"]
 
     def a11(self, directory: pathlib.Path) -> list[str]:
-        """An unrecognised lifecycle page is an owner issue, never a guess."""
+        """An unrecognised lifecycle page is an owner issue, never a guess.
+
+        New patches never read that page, so a due patch still ships; a run with no
+        patch due stops as `blocked` rather than classify lifecycle state.
+        """
         inputs = fixture_admission_inputs(directory / "reviewed")
         admit_fixture(inputs)
-        redesigned = fixture_capture(
-            directory / "redesigned",
+        page = b"<main><h1>Supported Versions</h1><ul><li>8.5</li></ul></main>\n"
+        patch_due = fixture_capture(
+            directory / "patch-due",
             branch_feeds={"8.4": "8.4.20", "8.5": "8.5.10"},
             aggregate="8.5.10",
-            page=b"<main><h1>Supported Versions</h1><ul><li>8.5</li></ul></main>\n",
+            page=page,
+            releases=PUBLISHED,
+        )
+        patch = classify_fixture(patch_due)
+        assert_true(patch["actionKey"] == "new_patch:8.5.10", "an unreadable lifecycle page held back a due patch")
+        admit(patch, patch_due)
+        redesigned = fixture_capture(
+            directory / "redesigned",
+            branch_feeds={"8.4": "8.4.20", "8.5": "8.5.9"},
+            aggregate="8.5.9",
+            page=page,
             releases=PUBLISHED,
         )
         plan = classify_fixture(redesigned)
