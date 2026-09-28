@@ -36,7 +36,8 @@ The GitHub releases captures read every page of the list and digest a
 projected body with per-asset download counters and draft releases removed, so
 public downloads never register as changed evidence, and the read-only watcher
 and the publish job's write token digest the same list however the pages
-split; the unprojected bytes are retained beside the digested body. The
+split; the unprojected items are retained beside the digested body as one
+canonical JSON array. The
 watcher compares
 only opaque digests and incomplete-event state. An unchanged healthy day is
 quiet: nothing is classified and nothing causes an issue, repository, tag,
@@ -152,10 +153,16 @@ only after the one before succeeded:
 2. `verify-draft`, a job whose token can only read contents and that holds no
    environment, installs the handed-over draft bytes through a temporary local
    release server.
-3. `publish` resumes the handed-over transaction, re-reads the draft once more,
-   records `publishing`, and only then makes the release public. A run that
-   stops between the publication and its record is therefore still known to be
-   possibly live, and reports a warning rather than a failed release.
+3. `publish` resumes the handed-over transaction. While the release is still a
+   draft it recaptures and revalidates the admitted evidence, supersession
+   included, because a rerun of the failed jobs reuses the release job's
+   handoff without repeating that job's recapture. It then re-reads the draft
+   once more, records `publishing`, and only then makes the release public. A
+   run that stops between the publication and its record is therefore still
+   known to be possibly live, and reports a warning rather than a failed
+   release; so does a rerun that stops early after an earlier attempt already
+   published, because the recorded state asks GitHub whether the release is
+   public.
 4. `verify-public`, read-only like `verify-draft`, runs fresh public
    exact-version and branch-shorthand installs.
 5. `finalize` completes the durable event record through an exact-SHA pull

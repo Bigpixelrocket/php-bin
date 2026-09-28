@@ -415,7 +415,8 @@ def _fetch_source(opener: Any, source: EvidenceSource, headers: dict[str, str]) 
     pages were split. A first page that is not a JSON array is returned unchanged, so an
     unexpected source format still registers as changed evidence; a later page that is
     not one, an unhealthy page, too many pages, or too many bytes fails the capture.
-    The status and headers recorded are the first page's.
+    The status and headers recorded are the first page's. The retained raw body of a
+    paginated source is this canonical array, not the exact bytes of any page.
     """
     if not source.paginate:
         return _fetch(opener, source, lambda: fetch_url(source), headers)

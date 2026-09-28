@@ -153,8 +153,8 @@ def project_release_identity(body: bytes) -> bytes:
     recapture fail while a draft exists, including the draft a rebuild resumes.
     The projection drops only `assets[].download_count` and draft entries; every
     other field stays covered by the digest, and the capture client retains the
-    unprojected bytes beside the digested body. A body that is not a GitHub
-    releases array is returned unchanged so an unexpected source format still
+    unprojected list, its pages joined as one canonical array, beside the digested
+    body. A body that is not a GitHub releases array is returned unchanged so an unexpected source format still
     registers as changed evidence. This projects identity only; the classifier
     reads release state from the stored projection, never from these rules.
     """
