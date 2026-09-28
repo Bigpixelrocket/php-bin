@@ -153,8 +153,8 @@ def project_release_identity(body: bytes) -> bytes:
     recapture fail while a draft exists, including the draft a rebuild resumes.
     The projection drops only `assets[].download_count` and draft entries; every
     other field stays covered by the digest, and the capture client retains the
-    unprojected bytes beside the digested body. A body that is not a GitHub
-    releases array is returned unchanged so an unexpected source format still
+    unprojected list, its pages joined as one canonical array, beside the digested
+    body. A body that is not a GitHub releases array is returned unchanged so an unexpected source format still
     registers as changed evidence. This projects identity only; the classifier
     reads release state from the stored projection, never from these rules.
     """
@@ -210,15 +210,18 @@ def strip_supported_versions_date_presentation(body: bytes) -> bytes:
 # digest must not cover the page's renderings of the capture date. None of these carry
 # a release consequence. Every php.net source bypasses the CDN edge cache in front of
 # it, because an edge can serve a snapshot weeks old and the watcher and the publish
-# recapture reach different edges. These are the fixed
+# recapture reach different edges. Both GitHub releases lists are read page by page, so
+# rebuild selection and record recovery see every release rather than the newest 100.
+# The php-src tags list stays one page: no rule reads it, and its digest only wakes the
+# watcher. These are the fixed
 # sources; `evidence_sources` adds the per-branch release feeds the policy selects.
 EVIDENCE_SOURCES = (
     EvidenceSource("php_supported_versions", "https://www.php.net/supported-versions.php", 2_000_000, normalize=strip_supported_versions_date_presentation, bypass_edge_cache=True),
     EvidenceSource("php_release_feed", "https://www.php.net/releases/index.php?json", 5_000_000, bypass_edge_cache=True),
     EvidenceSource("php_source_tags", "https://api.github.com/repos/php/php-src/tags?per_page=100", 5_000_000),
-    EvidenceSource("php_bin_releases", "https://api.github.com/repos/bigpixelrocket/php-bin/releases?per_page=100", 10_000_000, normalize=project_release_identity),
+    EvidenceSource("php_bin_releases", "https://api.github.com/repos/bigpixelrocket/php-bin/releases?per_page=100", 20_000_000, normalize=project_release_identity, paginate=True),
     EvidenceSource("php_bin_state", "https://api.github.com/repos/bigpixelrocket/php-bin/commits/main", 2_000_000),
-    EvidenceSource("mise_php_releases", "https://api.github.com/repos/bigpixelrocket/mise-php/releases?per_page=100", 10_000_000, normalize=project_release_identity),
+    EvidenceSource("mise_php_releases", "https://api.github.com/repos/bigpixelrocket/mise-php/releases?per_page=100", 20_000_000, normalize=project_release_identity, paginate=True),
     EvidenceSource("mise_php_state", "https://api.github.com/repos/bigpixelrocket/mise-php/commits/main", 2_000_000),
 )
 

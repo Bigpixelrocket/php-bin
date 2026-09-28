@@ -12,6 +12,7 @@
 /scripts/classify-autorelease-evidence @loadinglucian
 /scripts/configure-github-autorelease @loadinglucian
 /scripts/dispatch-pr-checks @loadinglucian
+/scripts/merge-record-pr @loadinglucian
 /scripts/autorelease-event @loadinglucian
 /scripts/notify-autorelease @loadinglucian
 /scripts/seal-autorelease-patch @loadinglucian

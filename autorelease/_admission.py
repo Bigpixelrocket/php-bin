@@ -622,20 +622,28 @@ def seal_patch(
                 require(policy.get("actionKey") == plan.get("actionKey"), "support policy action key changed")
     output_dir.mkdir(parents=True, exist_ok=True)
     patch_path = output_dir / "sealed.patch"
-    tracked_patch = git(repo, "diff", "--binary", "--full-index", base, "--").stdout
-    untracked_patch_parts = []
+    # The patch is sealed as the exact bytes git wrote. Decoding it as text would
+    # translate line endings and re-encode content, so `git apply` would receive a
+    # patch other than the one whose digest the manifest records.
+    tracked = subprocess.run(
+        ["git", "diff", "--binary", "--full-index", base, "--"],
+        cwd=repo,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    patch_parts = [tracked.stdout]
     for path in git(repo, "ls-files", "--others", "--exclude-standard").stdout.splitlines():
         proc = subprocess.run(
             ["git", "diff", "--binary", "--no-index", "--", "/dev/null", path],
             cwd=repo,
             check=False,
-            text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
         require(proc.returncode in {0, 1}, f"failed to serialize untracked path: {path}")
-        untracked_patch_parts.append(proc.stdout)
-    patch_path.write_text(tracked_patch + "".join(untracked_patch_parts))
+        patch_parts.append(proc.stdout)
+    patch_path.write_bytes(b"".join(patch_parts))
     require(patch_path.stat().st_size <= 4 * 1024 * 1024, "sealed patch exceeds size limit")
     files = []
     for path in paths:
@@ -669,10 +677,22 @@ def verify_merge(
     current: dict[str, str],
     readiness: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """Admit the merge of one validated commit, or raise.
+
+    The checked-out head must be the validated SHA, a single commit on the sealed
+    base whose diff is exactly the sealed file set, byte for byte and mode for mode.
+    Every check in `REQUIRED_PLAN_CHECKS` must be reported as successful, the
+    recorded preconditions must still hold, and any readiness record must be ready.
+    """
     require(bool(COMMIT_SHA_RE.fullmatch(expected_head or "")), "expected head is not an exact commit SHA")
     actual_head = git(repo, "rev-parse", "HEAD").stdout.strip()
     require(actual_head == expected_head, "PR head does not equal validated SHA")
     require(checks and all(value == "success" for value in checks.values()), "required checks did not succeed")
+    # Every reported check passing proves nothing when a required one was never reported.
+    require(
+        all(checks.get(name) == "success" for name in REQUIRED_PLAN_CHECKS),
+        "a required check was not reported as successful",
+    )
     require(preconditions == current, "merge preconditions changed")
     base_sha = manifest.get("baseSha")
     require(bool(COMMIT_SHA_RE.fullmatch(base_sha or "")), "sealed manifest has no exact base SHA")

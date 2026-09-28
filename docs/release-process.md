@@ -20,10 +20,11 @@ full contract.
 3. The publish transaction rebuilds on macOS 26 arm64 in a separate job with a
    read-only token, verifies the exact module baseline and deployment target,
    packages the archive, and writes `SHA256SUMS`. The write-scoped release job
-   checks those bytes against the digests the build reported, creates the
-   annotated tag and draft, verifies the draft bytes through a temporary
-   install, then publishes the unchanged bytes and verifies the public install
-   through `mise-php`.
+   checks those bytes against the digests the build reported and creates the
+   annotated tag and draft. A read-only job installs the draft bytes through a
+   temporary release server, a write-scoped job then publishes the unchanged
+   bytes, and another read-only job verifies fresh public installs through
+   `mise-php`. The built binary never runs in a job that holds the write token.
 4. It advances one legal state at a time, reuses an existing release's assets
    instead of the fresh build, and never overwrites, deletes, or retags a
    published release.

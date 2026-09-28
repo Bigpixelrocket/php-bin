@@ -145,7 +145,9 @@ def github_effect(
                 "--verify-tag",
                 capture=False,
             )
-    elif target in {"draft_verified", "public_verified"}:
+    elif target in {"draft_verified", "publishing", "public_verified"}:
+        # `publishing` re-reads the draft immediately before publication, because the
+        # draft was verified by an earlier job and publication is irreversible.
         with tempfile.TemporaryDirectory(prefix="autorelease-download-") as temporary:
             gh(
                 "release",

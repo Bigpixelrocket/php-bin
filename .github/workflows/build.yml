@@ -23,8 +23,6 @@ on:
     paths:
       - .spc-version
       - .spc-sha256
-      - craft.yml
-      - extensions.txt
       - expected-modules/**
       - stages/**
       - scripts/**
