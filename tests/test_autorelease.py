@@ -2082,31 +2082,58 @@ class AutoreleaseControlTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             work = pathlib.Path(temporary)
             (work / "bin").mkdir()
-            # gh answers isDraft as the case names; an empty answer is a failed lookup.
-            (work / "bin/gh").write_text('#!/usr/bin/env bash\n[[ -n "$FAKE_IS_DRAFT" ]] || exit 1\necho "$FAKE_IS_DRAFT"\n')
-            (work / "bin/gh").chmod(0o755)
-            cases = (
-                ("complete", "", True),
-                ("publishing", "", True),
-                ("publishing", "true", False),
-                ("publishing", "false", True),
-                ("draft_verified", "false", True),
-                ("draft_verified", "true", False),
-                ("draft_verified", "", False),
-                (None, "false", True),
-                (None, "", False),
+            # gh answers isDraft as the case names (empty is a failed lookup) and serves
+            # the state artifacts the case says earlier attempts retained.
+            (work / "bin/gh").write_text(
+                '#!/usr/bin/env bash\n'
+                'case "$1 $2" in\n'
+                '  "release view") [[ -n "$FAKE_IS_DRAFT" ]] || exit 1; echo "$FAKE_IS_DRAFT" ;;\n'
+                '  "run download")\n'
+                '    while (($#)); do case "$1" in --name) name="$2"; shift 2 ;; --dir) dir="$2"; shift 2 ;; *) shift ;; esac; done\n'
+                '    source="$FAKE_PRIOR/$name.json"\n'
+                '    [[ -f "$source" ]] || exit 1\n'
+                '    mkdir -p "$dir" && cp "$source" "$dir/transaction-state.json" ;;\n'
+                '  *) exit 3 ;;\n'
+                'esac\n'
             )
-            for state, is_draft, expected in cases:
+            (work / "bin/gh").chmod(0o755)
+            prior_dir = work / "prior"
+            cases = (
+                ("complete", "", 1, {}, True),
+                ("publishing", "", 1, {}, True),
+                ("publishing", "true", 1, {}, False),
+                ("publishing", "false", 1, {}, True),
+                ("draft_verified", "false", 1, {}, True),
+                ("draft_verified", "true", 1, {}, False),
+                ("draft_verified", "", 1, {}, False),
+                (None, "false", 1, {}, True),
+                (None, "", 1, {}, False),
+                # A rerun that cannot reach GitHub keeps what an earlier attempt knew.
+                ("draft_verified", "", 3, {1: True, 2: False}, True),
+                (None, "", 2, {1: True}, True),
+                ("draft_verified", "", 2, {1: False}, False),
+                ("draft_verified", "true", 2, {}, False),
+            )
+            for index, (state, is_draft, run_attempt, prior, expected) in enumerate(cases):
                 run_dir = work / "release-run"
                 shutil.rmtree(run_dir, ignore_errors=True)
+                shutil.rmtree(prior_dir, ignore_errors=True)
+                prior_dir.mkdir()
+                for attempt, released in prior.items():
+                    (prior_dir / f"release-transaction-state-77-{attempt}.json").write_text(
+                        json.dumps({"schemaVersion": 1, "released": released, "recorded": False, "version": "8.5.9"})
+                    )
                 if state is not None:
                     run_dir.mkdir()
                     (run_dir / "transaction.json").write_text(json.dumps({"state": state}))
+                runner_temp = work / f"runner-temp-{index}"
+                runner_temp.mkdir()
                 env = {**os.environ, "PATH": f"{work / 'bin'}:{os.environ['PATH']}",
-                       "VERSION": "8.5.9", "FAKE_IS_DRAFT": is_draft}
+                       "VERSION": "8.5.9", "FAKE_IS_DRAFT": is_draft, "FAKE_PRIOR": str(prior_dir),
+                       "RUN_ID": "77", "RUN_ATTEMPT": str(run_attempt), "RUNNER_TEMP": str(runner_temp)}
                 subprocess.run(["bash", "-euo", "pipefail", "-c", script], cwd=work, env=env, check=True)
                 recorded = json.loads((run_dir / "transaction-state.json").read_text())
-                self.assertEqual(expected, recorded["released"], (state, is_draft))
+                self.assertEqual(expected, recorded["released"], (state, is_draft, run_attempt, prior))
         # A still-draft release is recaptured and revalidated before publication, because
         # a rerun of the failed jobs does not repeat the release job's recapture.
         recapture = jobs["publish"]["steps"][publish_names.index("Re-capture authoritative evidence before publication")]

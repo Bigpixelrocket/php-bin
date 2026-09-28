@@ -570,6 +570,8 @@ jobs:
         if: always()
         env:
           GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           mkdir -p release-run
           released=false
@@ -597,6 +599,18 @@ jobs:
               fi
               ;;
           esac
+          # A release never goes back to a draft, so a state an earlier attempt retained
+          # as released stays released when this attempt cannot establish it itself.
+          attempt=$((RUN_ATTEMPT - 1))
+          while [[ "$released" != "true" ]] && ((attempt > 0)); do
+            prior="$RUNNER_TEMP/prior-transaction-state-$attempt"
+            if gh run download "$RUN_ID" --repo "${{ github.repository }}" \
+              --name "release-transaction-state-$RUN_ID-$attempt" --dir "$prior" 2>/dev/null \
+              && [[ "$(jq -r .released "$prior/transaction-state.json")" == "true" ]]; then
+              released=true
+            fi
+            attempt=$((attempt - 1))
+          done
           jq -n --argjson released "$released" --arg version "$VERSION" \
             '{schemaVersion:1,released:$released,recorded:false,version:$version}' > release-run/transaction-state.json
       - name: Retain the transaction state for triage
