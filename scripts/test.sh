@@ -64,6 +64,23 @@ printf '#define CONFIGURE_COMMAND " '"'"'--with-bz2=%s'"'"'"\n' "$FIXTURE_ROOT" 
   > "$FIXTURE_ROOT/include/php/main/build-defs.h"
 printf '#define PHP_OS "Darwin"\n' > "$FIXTURE_ROOT/include/php/main/php_config.h"
 printf 'dnl fixture\n' > "$FIXTURE_ROOT/lib/php/build/phpize.m4"
+# PHP headers that include library headers the kit must carry, the libraries'
+# installed headers, and lexbor's source tree, of which only the URL closure ships.
+mkdir -p "$FIXTURE_ROOT/include/php/ext/gmp" "$FIXTURE_ROOT/include/php/ext/sodium" \
+  "$FIXTURE_ROOT/include/php/ext/uri" "$FIXTURE_ROOT/include/sodium"
+printf '#include <gmp.h>\n' > "$FIXTURE_ROOT/include/php/ext/gmp/php_gmp_int.h"
+printf '#include <sodium.h>\n' > "$FIXTURE_ROOT/include/php/ext/sodium/php_libsodium.h"
+printf '#include "lexbor/url/url.h"\n' > "$FIXTURE_ROOT/include/php/ext/uri/uri_parser_whatwg.h"
+printf '#include <stddef.h>\n#define __GMP_CFLAGS "-I%s/include"\n' "$FIXTURE_ROOT" > "$FIXTURE_ROOT/include/gmp.h"
+printf '#include "sodium/core.h"\n' > "$FIXTURE_ROOT/include/sodium.h"
+printf '#include "export.h"\n' > "$FIXTURE_ROOT/include/sodium/core.h"
+printf '#define SODIUM_EXPORT\n' > "$FIXTURE_ROOT/include/sodium/export.h"
+FIXTURE_LEXBOR="$FIXTURE_BUILD/source/php-src/ext/lexbor/lexbor"
+mkdir -p "$FIXTURE_LEXBOR/url" "$FIXTURE_LEXBOR/core" "$FIXTURE_LEXBOR/html"
+printf '#include "lexbor/core/base.h"\n#include <lexbor/url/base.h>\n' > "$FIXTURE_LEXBOR/url/url.h"
+printf '#include "lexbor/core/base.h"\n' > "$FIXTURE_LEXBOR/url/base.h"
+printf '#include <string.h>\n' > "$FIXTURE_LEXBOR/core/base.h"
+printf '#include "lexbor/core/base.h"\n' > "$FIXTURE_LEXBOR/html/parser.h"
 printf 'fixture\n' > "$FIXTURE_ROOT/modules/demo_on.so"
 printf 'fixture\n' > "$FIXTURE_ROOT/modules/demo_off.so"
 printf 'demo_on on\ndemo_off off zend requires=demo_on\n' > "$FIXTURE_BUILD/shared-extensions.txt"
@@ -75,6 +92,10 @@ tar -tzf "$ARCHIVE" | LC_ALL=C sort > "$SCRATCH_DIR/members.txt"
 for member in \
   ./bin/php ./bin/php-config ./bin/phpize \
   ./include/php/main/build-defs.h ./include/php/main/php_config.h \
+  ./include/php/gmp.h ./include/php/sodium.h \
+  ./include/php/sodium/core.h ./include/php/sodium/export.h \
+  ./include/php/lexbor/url/url.h ./include/php/lexbor/url/base.h \
+  ./include/php/lexbor/core/base.h \
   ./lib/php/build/phpize.m4 \
   ./lib/php/extensions/demo_off.so ./lib/php/extensions/demo_on.so \
   ./share/php-bin/manifest.json ./LICENSE ./NOTICE
@@ -83,6 +104,11 @@ do
 done
 if grep -F 'modules' "$SCRATCH_DIR/members.txt"; then
   echo "The build tree's modules folder leaked into the archive." >&2
+  exit 1
+fi
+# Only the lexbor headers the URL header reaches ship, not the whole source tree.
+if grep -F 'lexbor/html' "$SCRATCH_DIR/members.txt"; then
+  echo "A lexbor header the URL parser does not include was packaged." >&2
   exit 1
 fi
 
@@ -108,6 +134,7 @@ do
   grep -Fqx "$line" "$SCRATCH_DIR/unpacked/bin/php-config"
 done
 grep -Fqx "prefix='@PHP_BIN_PREFIX@'" "$SCRATCH_DIR/unpacked/bin/phpize"
+grep -Fqx '#define __GMP_CFLAGS "-I@PHP_BIN_PREFIX@/include"' "$SCRATCH_DIR/unpacked/include/php/gmp.h"
 grep -Fqx 'SED="/usr/bin/sed"' "$SCRATCH_DIR/unpacked/bin/phpize"
 python3 - "$SCRATCH_DIR/unpacked/share/php-bin/manifest.json" <<'PY'
 import json
@@ -136,6 +163,15 @@ if "$SCRIPT_DIR/package.sh" "$FIXTURE_ROOT/bin/php" 8.4.99 2> "$SCRATCH_DIR/left
 fi
 grep -Fq 'include/php/main/php_config.h' "$SCRATCH_DIR/leftover.log"
 printf '#define PHP_OS "Darwin"\n' > "$FIXTURE_ROOT/include/php/main/php_config.h"
+
+# A PHP header whose library header the build kit lacks stops packaging.
+mv "$FIXTURE_LEXBOR/core/base.h" "$SCRATCH_DIR/base.h"
+if "$SCRIPT_DIR/package.sh" "$FIXTURE_ROOT/bin/php" 8.4.99 2> "$SCRATCH_DIR/missing-header.log"; then
+  echo "Expected packaging to reject a missing library header." >&2
+  exit 1
+fi
+grep -Fq 'lexbor/core/base.h' "$SCRATCH_DIR/missing-header.log"
+mv "$SCRATCH_DIR/base.h" "$FIXTURE_LEXBOR/core/base.h"
 
 # And any shared extension the verified list does not name.
 printf 'fixture\n' > "$FIXTURE_ROOT/modules/stray.so"
