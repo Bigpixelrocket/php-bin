@@ -7,6 +7,7 @@ import os
 import pathlib
 import re
 import runpy
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -2076,6 +2077,52 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertEqual("always()", live["if"])
         self.assertIn("published|public_verified|complete) released=true ;;", live["run"])
         self.assertIn("publishing)\n", live["run"])
+        # A rerun that resumes from the draft handoff still reports a public release as live.
+        script = live["run"].replace("${{ github.repository }}", "bigpixelrocket/php-bin")
+        with tempfile.TemporaryDirectory() as temporary:
+            work = pathlib.Path(temporary)
+            (work / "bin").mkdir()
+            # gh answers isDraft as the case names; an empty answer is a failed lookup.
+            (work / "bin/gh").write_text('#!/usr/bin/env bash\n[[ -n "$FAKE_IS_DRAFT" ]] || exit 1\necho "$FAKE_IS_DRAFT"\n')
+            (work / "bin/gh").chmod(0o755)
+            cases = (
+                ("complete", "", True),
+                ("publishing", "", True),
+                ("publishing", "true", False),
+                ("publishing", "false", True),
+                ("draft_verified", "false", True),
+                ("draft_verified", "true", False),
+                ("draft_verified", "", False),
+                (None, "false", True),
+                (None, "", False),
+            )
+            for state, is_draft, expected in cases:
+                run_dir = work / "release-run"
+                shutil.rmtree(run_dir, ignore_errors=True)
+                if state is not None:
+                    run_dir.mkdir()
+                    (run_dir / "transaction.json").write_text(json.dumps({"state": state}))
+                env = {**os.environ, "PATH": f"{work / 'bin'}:{os.environ['PATH']}",
+                       "VERSION": "8.5.9", "FAKE_IS_DRAFT": is_draft}
+                subprocess.run(["bash", "-euo", "pipefail", "-c", script], cwd=work, env=env, check=True)
+                recorded = json.loads((run_dir / "transaction-state.json").read_text())
+                self.assertEqual(expected, recorded["released"], (state, is_draft))
+        # A still-draft release is recaptured and revalidated before publication, because
+        # a rerun of the failed jobs does not repeat the release job's recapture.
+        recapture = jobs["publish"]["steps"][publish_names.index("Re-capture authoritative evidence before publication")]
+        self.assertLess(
+            publish_names.index("Verify the handed-over transaction"),
+            publish_names.index("Re-capture authoritative evidence before publication"),
+        )
+        self.assertLess(
+            publish_names.index("Re-capture authoritative evidence before publication"),
+            publish_names.index("Publish unchanged draft and verify public bytes"),
+        )
+        self.assertIn('if [[ "$is_draft" == "true" ]]; then', recapture["run"])
+        self.assertIn("./scripts/capture-autorelease-evidence --output release-run/evidence", recapture["run"])
+        self.assertIn("./autorelease/control.py validate-recaptured-evidence", recapture["run"])
+        self.assertIn('test "$is_draft" = "false"', recapture["run"])
+        self.assertNotIn("if", recapture)
 
         # Every artifact a rerun could upload again is named per attempt.
         for job, _, step in steps:
@@ -2332,8 +2379,13 @@ class AutoreleaseControlTests(unittest.TestCase):
             # Only callers that require it assert the Protected controls check.
             only_script = json.dumps([{"name": "Script checks", "bucket": "pass"}])
             self.assertEqual(0, merge(checks=only_script, protected=False).returncode)
+            # assert-admission-checks is byte-identical in mise-php and fails silently, so
+            # a missing Protected controls check shows as the absent success line.
+            unprotected = merge(checks=only_script)
+            self.assertNotEqual(0, unprotected.returncode)
+            self.assertNotIn("Admission checks passed", unprotected.stdout)
+            self.assertEqual("", merge_log.read_text())
             refusals = (
-                (merge(checks=only_script), ""),
                 (merge(pr_head="f" * 40), "is not the committed record"),
                 (merge(record_digest="sha256:" + "0" * 64), "does not hold the committed bytes"),
             )
@@ -2346,6 +2398,7 @@ class AutoreleaseControlTests(unittest.TestCase):
             git("commit", "-q", "-am", "moved main")
             git("push", "-q", "origin", "HEAD:main")
             moved = merge()
+            self.assertNotEqual(0, moved.returncode)
             self.assertIn("main moved away from", moved.stderr)
             self.assertEqual("", merge_log.read_text())
 

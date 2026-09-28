@@ -513,6 +513,29 @@ jobs:
           test "$(jq -r .commit release-handoff/transaction.json)" = "$EXACT_COMMIT"
           mkdir -p release-run
           cp release-handoff/transaction.json release-handoff/event.json release-run/
+      # A rerun of the failed jobs reuses the release job's handoff without repeating its
+      # recapture, however long ago that ran. While the release is still a draft the
+      # admitted evidence is therefore recaptured and revalidated here, supersession
+      # included. A release that is already public only completes its transaction.
+      - name: Re-capture authoritative evidence before publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          INVESTIGATION_RUN_ID: ${{ needs.preflight.outputs.investigation_run_id }}
+        run: |
+          is_draft="$(gh release view "$VERSION" --repo "${{ github.repository }}" --json isDraft --jq .isDraft)"
+          if [[ "$is_draft" == "true" ]]; then
+            gh run download "$INVESTIGATION_RUN_ID" \
+              --name "autorelease-investigation-$INVESTIGATION_RUN_ID" \
+              --dir admitted-run
+            ./scripts/capture-autorelease-evidence --output release-run/evidence
+            ./autorelease/control.py validate-recaptured-evidence \
+              --plan admitted-run/autorelease-plan.json \
+              --admitted-manifest admitted-run/evidence/evidence-manifest.json \
+              --current-manifest release-run/evidence/evidence-manifest.json
+          else
+            test "$is_draft" = "false"
+          fi
       - name: Publish unchanged draft and verify public bytes
         env:
           GH_TOKEN: ${{ github.token }}
@@ -550,19 +573,30 @@ jobs:
         run: |
           mkdir -p release-run
           released=false
+          state=""
           if [[ -f release-run/transaction.json ]]; then
-            case "$(jq -r .state release-run/transaction.json)" in
-              published|public_verified|complete) released=true ;;
-              # The run stopped between publication and its record, so the release
-              # counts as live unless GitHub positively reports it is still a draft.
-              publishing)
-                released=true
-                if [[ "$(gh release view "$VERSION" --repo "${{ github.repository }}" --json isDraft --jq .isDraft 2>/dev/null)" == "true" ]]; then
-                  released=false
-                fi
-                ;;
-            esac
+            state="$(jq -r .state release-run/transaction.json)"
           fi
+          is_draft="$(gh release view "$VERSION" --repo "${{ github.repository }}" --json isDraft --jq .isDraft 2>/dev/null || true)"
+          case "$state" in
+            published|public_verified|complete) released=true ;;
+            # The run stopped between publication and its record, so the release
+            # counts as live unless GitHub positively reports it is still a draft.
+            publishing)
+              released=true
+              if [[ "$is_draft" == "true" ]]; then
+                released=false
+              fi
+              ;;
+            # A rerun resumes from the draft handoff even when an earlier attempt already
+            # published, so a release GitHub reports as public is live whatever this
+            # attempt recorded before it stopped.
+            *)
+              if [[ "$is_draft" == "false" ]]; then
+                released=true
+              fi
+              ;;
+          esac
           jq -n --argjson released "$released" --arg version "$VERSION" \
             '{schemaVersion:1,released:$released,recorded:false,version:$version}' > release-run/transaction-state.json
       - name: Retain the transaction state for triage
