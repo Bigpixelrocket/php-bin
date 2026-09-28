@@ -5,7 +5,8 @@
 # main through the same gate: the dispatched required checks pass at the exact head,
 # the head is still the commit the caller pushed, that commit is a single child of
 # the current main, it changes exactly the named record, and the record holds exactly
-# the bytes the caller committed. Any difference stops before the merge.
+# the bytes the caller committed. Any difference stops before the merge, and the merge
+# itself only accepts that same head.
 #
 # --require-protected-controls additionally asserts the Protected controls check,
 # for records filed from a run whose base must still be main.
@@ -68,5 +69,6 @@ actual_digest="sha256:$(git show "$head:$record" | shasum -a 256 | awk '{print $
 [[ "$actual_digest" == "$digest" ]] || fail "$record does not hold the committed bytes"
 
 # --repo keeps the branch deletion remote-only: without it gh also deletes the local
-# branch, which git refuses while a worktree still holds it.
-gh pr merge "$pr_number" --repo "$repository" --squash --delete-branch
+# branch, which git refuses while a worktree still holds it. --match-head-commit binds
+# the merge to the head checked above, so a push after those checks cannot be merged.
+gh pr merge "$pr_number" --repo "$repository" --squash --delete-branch --match-head-commit "$head"

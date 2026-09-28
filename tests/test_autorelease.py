@@ -1,7 +1,9 @@
 import contextlib
+import hashlib
 import http.client
 import io
 import json
+import os
 import pathlib
 import re
 import runpy
@@ -1890,7 +1892,10 @@ class AutoreleaseControlTests(unittest.TestCase):
         merger = (root / "scripts/merge-record-pr").read_text()
         self.assertIn('"$script_dir/dispatch-pr-checks"', merger)
         self.assertIn('"$script_dir/assert-admission-checks"', merger)
-        self.assertIn('gh pr merge "$pr_number" --repo "$repository" --squash --delete-branch', merger)
+        self.assertIn(
+            'gh pr merge "$pr_number" --repo "$repository" --squash --delete-branch --match-head-commit "$head"',
+            merger,
+        )
         for workflow, merges in (
             ("autorelease-watch.yml", 3),
             ("autorelease-implement.yml", 1),
@@ -2249,6 +2254,100 @@ class AutoreleaseControlTests(unittest.TestCase):
             result = subprocess.run([script, "--checks", str(path),
                                      "--check-name", "Plugin contract"], capture_output=True)
             self.assertNotEqual(result.returncode, 0)
+
+    def test_merge_record_pr_merges_only_the_checked_record(self):
+        source = pathlib.Path(__file__).resolve().parents[1] / "scripts"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            for name in ("merge-record-pr", "assert-admission-checks"):
+                (scripts / name).write_bytes((source / name).read_bytes())
+                (scripts / name).chmod(0o755)
+            # The dispatcher reports the checks the case names; gh reports the pull
+            # request head the case names and logs every merge it is asked for.
+            (scripts / "dispatch-pr-checks").write_text(
+                '#!/usr/bin/env bash\nset -euo pipefail\n'
+                'while (($#)); do case "$1" in --output) out="$2"; shift 2 ;; *) shift ;; esac; done\n'
+                'printf "%s" "$FAKE_CHECKS" > "$out"\n'
+            )
+            (scripts / "dispatch-pr-checks").chmod(0o755)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            (bin_dir / "gh").write_text(
+                '#!/usr/bin/env bash\nset -euo pipefail\n'
+                'case "$1 $2" in\n'
+                '  "pr view") echo "$FAKE_PR_HEAD" ;;\n'
+                '  "pr merge") printf "%s\\n" "$*" >> "$FAKE_MERGE_LOG" ;;\n'
+                '  *) exit 3 ;;\n'
+                'esac\n'
+            )
+            (bin_dir / "gh").chmod(0o755)
+            origin = root / "origin.git"
+            subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+            repo = root / "repo"
+            subprocess.run(["git", "clone", "-q", str(origin), str(repo)], check=True, capture_output=True)
+
+            def git(*args: str) -> str:
+                return subprocess.run(
+                    ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@invalid", *args],
+                    cwd=repo, check=True, text=True, stdout=subprocess.PIPE,
+                ).stdout.strip()
+
+            (repo / "autorelease-events").mkdir()
+            (repo / "autorelease-events/other.json").write_text("{}\n")
+            git("add", ".")
+            git("commit", "-q", "-m", "base")
+            git("push", "-q", "origin", "HEAD:main")
+            base = git("rev-parse", "HEAD")
+            record = "autorelease-events/new_patch-8.5.9.json"
+            (repo / record).write_text('{"state":"complete"}\n')
+            git("add", record)
+            git("commit", "-q", "-m", "record")
+            head = git("rev-parse", "HEAD")
+            digest = "sha256:" + hashlib.sha256((repo / record).read_bytes()).hexdigest()
+            both = json.dumps([{"name": "Script checks", "bucket": "pass"},
+                               {"name": "Protected controls", "bucket": "pass"}])
+            merge_log = root / "merges.log"
+
+            def merge(*, pr_head: str = head, checks: str = both, record_digest: str = digest,
+                      protected: bool = True) -> subprocess.CompletedProcess:
+                merge_log.write_text("")
+                args = [str(scripts / "merge-record-pr"), "--pr", "7", "--base", base, "--head", head,
+                        "--record", record, "--digest", record_digest,
+                        "--checks-output", str(root / "checks.json")]
+                if protected:
+                    args.append("--require-protected-controls")
+                env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                       "GITHUB_REPOSITORY": "bigpixelrocket/php-bin", "FAKE_CHECKS": checks,
+                       "FAKE_PR_HEAD": pr_head, "FAKE_MERGE_LOG": str(merge_log)}
+                return subprocess.run(args, cwd=repo, env=env, capture_output=True, text=True)
+
+            result = merge()
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(
+                f"pr merge 7 --repo bigpixelrocket/php-bin --squash --delete-branch --match-head-commit {head}\n",
+                merge_log.read_text(),
+            )
+            # Only callers that require it assert the Protected controls check.
+            only_script = json.dumps([{"name": "Script checks", "bucket": "pass"}])
+            self.assertEqual(0, merge(checks=only_script, protected=False).returncode)
+            refusals = (
+                (merge(checks=only_script), ""),
+                (merge(pr_head="f" * 40), "is not the committed record"),
+                (merge(record_digest="sha256:" + "0" * 64), "does not hold the committed bytes"),
+            )
+            for result, reason in refusals:
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn(reason, result.stderr)
+                self.assertEqual("", merge_log.read_text())
+            # A record commit that is not a single child of the current main is refused.
+            (repo / "autorelease-events/other.json").write_text('{"moved":true}\n')
+            git("commit", "-q", "-am", "moved main")
+            git("push", "-q", "origin", "HEAD:main")
+            moved = merge()
+            self.assertIn("main moved away from", moved.stderr)
+            self.assertEqual("", merge_log.read_text())
 
     def test_archive_absolute_member_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
