@@ -18,7 +18,7 @@ defaults:
 
 jobs:
   investigate:
-    name: Capture and investigate
+    name: Capture and classify
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
@@ -41,7 +41,7 @@ jobs:
         run: |
           ./autorelease/control.py validate-policy
           ./scripts/capture-autorelease-evidence --output autorelease-run/evidence
-      - name: Decide whether an agent call is required
+      - name: Decide whether classification is required
         id: decision
         run: |
           self_update=()
@@ -56,11 +56,11 @@ jobs:
             --output autorelease-run/watch-decision.json
           {
             echo "trigger=$(jq -r .trigger autorelease-run/watch-decision.json)"
-            echo "model_call=$(jq -r .modelCall autorelease-run/watch-decision.json)"
+            echo "classify=$(jq -r .classify autorelease-run/watch-decision.json)"
             echo "action_key=$(jq -r .actionKey autorelease-run/watch-decision.json)"
           } >> "$GITHUB_OUTPUT"
       - name: Record exact preconditions
-        if: steps.decision.outputs.model_call == 'true'
+        if: steps.decision.outputs.classify == 'true'
         run: |
           jq -n \
             --arg phpBinHead "$(git rev-parse HEAD)" \
@@ -77,54 +77,20 @@ jobs:
           else
             printf '[]\n' > autorelease-run/completed-actions.json
           fi
-      - name: Prepare investigation contract
-        if: steps.decision.outputs.model_call == 'true'
+      - name: Classify the captured evidence
+        if: steps.decision.outputs.classify == 'true'
         run: |
-          ./scripts/prepare-agent-task \
-            --phase investigation \
-            --action-key "investigate:${{ steps.decision.outputs.trigger }}:${{ github.run_id }}" \
-            --goal "Classify the captured autorelease trigger and emit one evidence-bound plan." \
+          ./scripts/classify-autorelease-evidence \
+            --manifest autorelease-run/evidence/evidence-manifest.json \
             --preconditions autorelease-run/preconditions.json \
-            --allowed-authority read_repository \
-            --allowed-authority read_captured_evidence \
-            --allowed-authority allowlisted_web_search \
-            --non-goal repository_mutation \
-            --non-goal required_check_execution \
-            --non-goal irreversible_github_effect \
-            --stop-condition missing_or_contradictory_required_evidence \
-            --stop-condition changed_precondition \
-            --stop-condition required_protected_change \
-            --shared .github/codex/autorelease/shared.md \
-            --phase-template .github/codex/autorelease/investigation.md \
-            --contract-output autorelease-run/event-contract.json \
-          --prompt-output autorelease-run/investigation-prompt.md
-          mkdir -p "$RUNNER_TEMP/codex-home"
-          cp .codex/investigation.config.toml "$RUNNER_TEMP/codex-home/config.toml"
-      - name: Run read-only Codex investigation
-        if: steps.decision.outputs.model_call == 'true'
-        uses: openai/codex-action@52fe01ec70a42f454c9d2ebd47598f9fd6893d56 # v1
-        with:
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-          codex-version: 0.145.0
-          prompt-file: autorelease-run/investigation-prompt.md
-          output-file: autorelease-run/autorelease-plan.json
-          codex-home: ${{ runner.temp }}/codex-home
-          sandbox: read-only
-          safety-strategy: drop-sudo
-          allow-users: loadinglucian
-          allow-bots: false
-          allow-bot-users: github-actions[bot]
-          codex-args: '["--strict-config","--ephemeral","--output-schema","schemas/autorelease-plan.schema.json"]'
+            --events autorelease-events \
+            --output autorelease-run/autorelease-plan.json
       - name: Admit plan against exact evidence
-        if: steps.decision.outputs.model_call == 'true'
+        if: steps.decision.outputs.classify == 'true'
         run: |
           ./scripts/admit-autorelease-plan \
             --plan autorelease-run/autorelease-plan.json \
             --manifest autorelease-run/evidence/evidence-manifest.json \
-            --contract autorelease-run/event-contract.json \
-            --shared .github/codex/autorelease/shared.md \
-            --phase .github/codex/autorelease/investigation.md \
-            --event-contract autorelease-run/event-contract.json \
             --php-bin-head "$(git rev-parse HEAD)" \
             --mise-php-head "$(jq -r .misePhpHead autorelease-run/preconditions.json)" \
             --policy-digest "$(./autorelease/control.py digest support-policy.json)" \
@@ -132,7 +98,7 @@ jobs:
             --output autorelease-run/admission.json
       - name: Expose admitted plan
         id: plan
-        if: steps.decision.outputs.model_call == 'true'
+        if: steps.decision.outputs.classify == 'true'
         run: |
           echo "action_key=$(jq -r .actionKey autorelease-run/autorelease-plan.json)" >> "$GITHUB_OUTPUT"
           echo "edits_required=$(jq -r .editsRequired autorelease-run/autorelease-plan.json)" >> "$GITHUB_OUTPUT"
@@ -172,7 +138,7 @@ jobs:
           ref: main
           fetch-depth: 0
           persist-credentials: false
-      - name: Download admitted investigation
+      - name: Download admitted classification
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -406,7 +372,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if [[ "$(./autorelease/control.py operator-gate --operator-file .github/autorelease-operator.json)" != "enabled" ]]; then
-            echo "Unattended mutation is paused; retained investigation remains read-only."
+            echo "Unattended mutation is paused; the retained classification remains read-only."
             exit 0
           fi
           # One deterministic table maps the admitted decision to exactly one route. An
@@ -494,8 +460,7 @@ jobs:
               --repo "${{ github.repository }}" \
               --ref main \
               -f investigation_run_id="${{ github.run_id }}" \
-              -f exact_base_sha="$BASE_SHA" \
-              -f phase=implementation
+              -f exact_base_sha="$BASE_SHA"
             ;;
           dispatch_publish)
             if [[ "$ACTION" == "new_branch" ]]; then

@@ -28,14 +28,14 @@ Required repository state:
   changes exactly that file, and the record has the reviewed healthy-capture
   shape. The exact file must also have a GitHub OIDC/Sigstore attestation from
   the protected watcher workflow, bound to its source commit and run-specific
-  predicate. Runtime Codex cannot mint that identity, invoke this exception,
-  or edit that state.
+  predicate. No other workflow or runtime job can mint that identity, invoke
+  this exception, or edit that state.
 - Bind the required checks to the GitHub Actions app, preventing another app
   from satisfying the same context name.
 - Enable squash merge, auto-merge, update branch, and automatic head-branch
   deletion; disable merge commits and rebase merge.
 - Keep the default Actions token read-only while enabling automation PR
-  creation. Runtime Codex jobs declare read scopes; only deterministic
+  creation. Capture and classification jobs declare read scopes; only
   downstream jobs explicitly declare the write scopes they require.
 - Enable the organization setting that permits Actions to create pull requests;
   runtime workflows do not submit approving reviews. Protected-control approval
@@ -46,13 +46,10 @@ Required repository state:
   successful validator runs for that head SHA, and only then publishes the
   Actions-owned check evidence plus PR-visible commit statuses with the exact
   validator URLs.
-- Allow GitHub-owned Actions plus only `openai/codex-action` and
-  `jdx/mise-action`, and require every Action reference to use a full commit
-  SHA.
+- Allow GitHub-owned Actions plus only `jdx/mise-action`, and require every
+  Action reference to use a full commit SHA.
 - Create the protected `php-autorelease-publish` environment, limited to
   protected branches, and disable administrator bypass.
-- Create the protected `php-autorelease-canary` environment with the
-  same protected-branch-only policy and disabled administrator bypass.
 - Enable Dependabot security updates, provider-pattern secret scanning, and
   secret-scanning push protection. Request validity checks and non-provider
   patterns as well; GitHub may retain those two as disabled until the
@@ -60,7 +57,6 @@ Required repository state:
 - Enable GitHub immutable releases so future published tags and assets cannot
   be moved, replaced, or deleted.
 - Set `AUTORELEASE_OWNER=loadinglucian`.
-- Keep distinct repository-scoped `OPENAI_API_KEY` secrets.
 - For the email digest, keep the repository-scoped `RESEND_API_KEY` secret
   (a Resend sending-only key) plus the `AUTORELEASE_EMAIL_FROM` and
   `AUTORELEASE_EMAIL_TO` repository variables. The sender address must belong
@@ -68,12 +64,12 @@ Required repository state:
   workflow skips without failing.
 - Keep the `autorelease` and `attention-required` labels.
 
-CODEOWNERS covers prompts, contracts, workflows, policy invariants, authority
-controls, and release code. Deterministic event/state records and admitted
-runtime paths are deliberately outside CODEOWNERS so their exact-SHA PRs can
-merge. Runtime sealing rejects protected controls before a branch or PR is
-created. Initial and later protected-control changes require an explicit
-reviewed PR outside the runtime agent.
+CODEOWNERS covers the classifier, admission, workflows, policy invariants,
+authority controls, and release code. Deterministic event/state records and
+admitted lifecycle paths are deliberately outside CODEOWNERS so their exact-SHA
+PRs can merge. Runtime sealing rejects protected controls before a branch or PR
+is created. Initial and later protected-control changes require an explicit
+reviewed PR.
 
 The normal verification commands are:
 
@@ -86,6 +82,5 @@ The normal verification commands are:
   --repo bigpixelrocket/php-bin \
   --owner loadinglucian \
   --required-check "Script checks" \
-  --environment php-autorelease-publish \
-  --environment php-autorelease-canary
+  --environment php-autorelease-publish
 ```

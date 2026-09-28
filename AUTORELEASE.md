@@ -38,39 +38,88 @@ changed evidence, and the read-only watcher and the publish job's write token
 digest the same list; the unprojected bytes are retained beside the digested
 body. The watcher compares
 only opaque digests and incomplete-event state. An unchanged healthy day is
-quiet: it makes no model call and causes no issue, repository, tag, asset, or
-release mutation.
+quiet: nothing is classified and nothing causes an issue, repository, tag,
+asset, or release mutation.
 
-When evidence changes, the pinned official Codex Action investigates from a
-read-only checkout. Web search is limited to `php.net`, `github.com`, and
-`docs.github.com`; material release and lifecycle claims must still resolve to
-the retained raw captures. A separate offline Codex invocation may edit only
-paths admitted by the evidence-bound plan. It has no GitHub write credential
-and cannot change the prompts, contracts, workflows, policy, admission,
-sealing, merge, or release controls.
+No model takes part in any step. When evidence changes, the deterministic
+classifier (`autorelease/_classifier.py`, run by
+`scripts/classify-autorelease-evidence`) turns the retained capture into
+exactly one plan in `schemas/autorelease-plan.schema.json`, computing every
+evidence digest from the bytes it cites. It applies these rules in order and
+stops at the first that applies:
 
-The line between the two is deliberate. The *harness* is protected: `scripts/`
-gates such as `test.sh`, `lib.sh`, `build.sh`, `package.sh`, and
-`compare-modules.sh`, the toolchain pins `.spc-version` and `.spc-sha256`,
-`tests/`, `autorelease/**`, `schemas/**`, `.github/workflows/**`, and the
-pinned Codex prompts and contracts under `.github/`. The *product* is
-agent-admissible: `patches/`, `stages/`, `craft.yml`, `extensions.txt`, and
-`expected-modules/`. A model may change what is built, never what decides
-whether the build was correct, so the protected tests are the standing control
-on every product change. `mise-php` draws the same line over its own paths;
-its `AUTORELEASE.md` owns that list.
+1. **Unhealthy evidence.** A capture that did not return HTTP 200, or a failed
+   health check, produces a `blocked` plan: nothing can be proven from it.
+2. **An incomplete event record** in `autorelease-events/` is resumed under its
+   own action key: a `new_branch` release, a `branch_eol` completion, a
+   `new_patch`, or the selected `recipe_rebuild`. A record stopped at
+   `blocked` or `needs_human`, or one no deterministic path resumes, produces
+   `needs_human`. One exception keeps patches moving: when the only incomplete
+   record is a `new_branch` or `branch_eol` at `php_bin_ready`, waiting for
+   `mise-php` readiness, a patch due under the next rule goes first and the
+   record resumes on a later run.
+3. **New patches.** For each maintained branch, oldest first, the version that
+   branch's own feed names is a `new_patch` when it is not yet published, not
+   older than what already shipped on that branch, and not superseded by a
+   later patch the aggregate feed names. The plan cites exactly that branch
+   feed value. A maintained branch with no shipped release is never a
+   `new_patch`: its first release belongs to `new_branch`, which waits for
+   both readiness records, so it produces `needs_human` instead. Admission
+   rejects that patch independently. New patches never read the
+   supported-versions page, so they go before lifecycle work and keep
+   shipping while that page cannot be read.
+4. **Lifecycle.** The captured supported-versions page is parsed by a reviewed
+   reader that accepts exactly one table shape. A supported branch the policy
+   does not maintain is a `new_branch` once the aggregate release feed names
+   its first stable release. A maintained branch whose row is marked end of
+   life is a `branch_eol` keyed on its security support end date. php.net
+   keeps that row for 28 days after the date; a maintained branch with no
+   row (for example, one whose window the watcher missed), or an older
+   supported branch the policy does not maintain, contradicts the policy and
+   produces `needs_human`.
+5. **Rebuilds.** The one `rebuildActionKey` the watch decision selected.
+6. **No change**, keyed on the manifest's embedded `manifestDigest`.
+
+A body that does not have its reviewed shape (a redesigned lifecycle page, a
+feed naming another branch, a releases capture that is not an array) never
+leads to a guess: it produces a `blocked` plan, and the watcher raises or
+refreshes the deduplicated owner issue for that action key. php.net's
+`releases/states.php` is not used.
+
+Admission (`scripts/admit-autorelease-plan`, `autorelease/_admission.py`) then
+checks the plan independently. It shares only small pure helpers with the
+classifier and re-derives every claim from the capture: the exact field set,
+the action key form, evidence digests and locators, release-feed proof and
+supersession, that a patch extends a branch that already shipped, the
+rebuild selection, allowed paths, and the exact repository and policy
+preconditions.
+
+The line between the harness and the product is deliberate. The *harness* is
+protected: `scripts/` gates such as `test.sh`, `lib.sh`, `build.sh`,
+`package.sh`, and `compare-modules.sh`, the toolchain pins `.spc-version` and
+`.spc-sha256`, `tests/`, `autorelease/**`, `schemas/**`, and
+`.github/workflows/**`. The *product* is what an admitted lifecycle plan may
+write: `support-policy.json` and `expected-modules/`, beside the reviewed
+recipe paths `patches/`, `stages/`, `craft.yml`, and `extensions.txt` that
+change only through a reviewed pull request. Automation may change what is
+built, never what decides whether the build was correct, so the protected
+tests are the standing control on every product change. `mise-php` draws the
+same line over its own paths; its `AUTORELEASE.md` owns that list.
 
 ```mermaid
 flowchart TD
   capture["Capture fixed raw evidence"] --> changed{"Digest or health changed?"}
-  changed -- "No" --> quiet["Quiet: no model call or mutation"]
-  changed -- "Yes" --> investigate["Read-only Codex investigation"]
-  investigate --> admit["Deterministic plan admission"]
-  admit --> edit{"Repository edit required?"}
-  edit -- "Yes" --> implement["Offline Codex implementation"]
+  changed -- "No" --> quiet["Quiet: nothing classified or mutated"]
+  changed -- "Yes" --> classify["Deterministic classifier"]
+  classify --> admit["Independent plan admission"]
+  admit --> stop{"blocked or needs_human?"}
+  stop -- "Yes" --> issue["Deduplicated owner issue"]
+  stop -- "No" --> edit{"Lifecycle edit required?"}
+  edit -- "Yes" --> implement["Deterministic lifecycle edit"]
   implement --> seal["Seal admitted paths and digests"]
   seal --> validate["Clean checkout validation"]
-  validate --> merge["Exact-SHA PR and merge admission"]
+  validate --> build["New branch: real build and exact module comparison"]
+  build --> merge["Exact-SHA PR and merge admission"]
   edit -- "No" --> release
   merge --> release["Immutable release transaction"]
   release --> draft["Verify draft bytes and temporary install"]
@@ -97,12 +146,12 @@ failed. The release job still runs the built binary to verify the draft and
 public installs, so those steps hold no token, and its mise setup gets no
 token and restores no cache.
 
-Validation deliberately runs the repository's own scripts at the sealed model
+Validation deliberately runs the repository's own scripts at the sealed
 commit: `autorelease-implement.yml`, and `autorelease-consumer.yml` in
 `mise-php`, check out the base SHA, apply the sealed patch, and run
 `./scripts/test.sh` from that tree. That is safe precisely because the gates
-themselves are protected paths: a model patch that touched `autorelease/**`,
-`tests/`, or any gate script is rejected at admission and never reaches
+themselves are protected paths: a patch that touched `autorelease/**`,
+`tests/`, or any gate script is rejected at sealing and never reaches
 validation, so the code under test can never be the code doing the testing.
 
 Failures use one deduplicated issue per action key, assigned to the username in
@@ -114,22 +163,24 @@ GitHub Actions failure email is an independent fallback.
 after every completed watcher or publish run, including quiet healthy days, so
 silence stops being ambiguous between "no change" and "the schedule stopped".
 The template is selected by `email-digest` in `autorelease/control.py` from
-retained run state alone and delivered through Resend; no model-authored prose
+retained run state alone and delivered through Resend; no free-form plan prose
 reaches the outbound channel, and the workflow skips quietly until the
 `RESEND_API_KEY` secret and the email variables exist. Run state that matches
 no template — including a corrupt retained artifact — still sends a fallback
 summary naming the exact rejection reason, so the channel cannot go silent on
 precisely the runs that need a look.
 
+There is no repair phase. A failed classification input, admission, sealing,
+validation, build, or merge stops that run and raises the deduplicated owner
+issue; the next watcher run retries from the same deterministic state once the
+cause is fixed.
+
 ```mermaid
 flowchart TD
   job["Any autorelease phase"] --> result{"Result"}
   result -- "Success" --> transition["Record evidence-backed transition"]
-  result -- "Retryable failure" --> retry{"Bounded retry remains?"}
-  retry -- "Yes" --> repair["Offline Codex repair"]
-  retry -- "No" --> blocked["Stop as blocked or needs_human"]
-  result -- "Critical or policy failure" --> blocked
-  blocked --> issue["Create or update one assigned issue"]
+  result -- "Failure, blocked, or needs_human" --> stop["Stop without mutation"]
+  stop --> issue["Create or update one assigned issue"]
   issue --> email["GitHub inbox and email"]
   issue --> actions["Actions failure email fallback"]
 ```
@@ -138,7 +189,7 @@ flowchart TD
 
 A published release is immutable, so a recipe change reaches an existing PHP
 version only as a new rebuild revision: `8.5.9-1`, then `8.5.9-2`. The
-watcher, not the model, decides which one is due:
+watcher decides which one is due:
 
 - The *recipe identity* of a branch is a SHA-256 over the committed tree
   entries of `.spc-sha256`, `.spc-version`, `LICENSE`, `NOTICE`, `patches/`,
@@ -160,7 +211,7 @@ watcher, not the model, decides which one is due:
   per run: the newest version of each branch first, then older versions,
   newest first. Its revision is one past the highest published revision.
   `watch-decision.json` reports it as `rebuildActionKey`, and the `rebuild_due`
-  trigger calls the model even on an otherwise quiet day.
+  trigger runs the classifier even on an otherwise quiet day.
 - Admission re-derives the same selection from the same capture, commit, and
   policy. A `recipe_rebuild` plan must name exactly that key, set
   `releaseIntent.version` to `<version>-<n>`, require no edits, allow no paths,
@@ -169,8 +220,8 @@ watcher, not the model, decides which one is due:
   pending.
 - The admitted rebuild goes straight to the publish transaction. Each
   publication changes `php_bin_releases`, so the next run selects the next
-  rebuild until none is due. New patches, new branches, EOL, and
-  reconciliation take priority in the investigation.
+  rebuild until none is due. Incomplete records, new branches, EOL, and new
+  patches take priority in the classifier.
 - Selection has no skip: a version whose rebuild keeps failing is selected
   again on every run and holds back the rebuilds ordered after it until the
   recipe is fixed. The `php_bin_releases` capture reads the newest 100
@@ -184,19 +235,39 @@ is anchored to a particular major or minor: the action keys, version
 validators, and policy files all accept any `<major>.<minor>`, so PHP `8.6`,
 `9.0`, and `10.0` all travel the same path with no code change.
 
-When upstream evidence first shows a new branch, the admitted implementation
-patch adds `expected-modules/<branch>.txt` and whatever recipe inputs the
-staged S0–S4 builds need, `support-policy.json` regenerates from the accepted
-policy, and `mise-php` regenerates `support-snapshot.json` and
-`lib/policy.lua` from it. The readiness and event records then merge on their
-own: `autorelease-events/`, `autorelease-state/`, and `mise-php`'s
+When upstream evidence first shows a new branch, `autorelease-implement.yml`
+runs `scripts/apply-autorelease-plan`: it copies the newest maintained
+branch's `expected-modules/<branch>.txt` byte for byte (the only per-branch
+recipe input; `stages/`, `patches/`, and `craft.yml` are shared by every
+branch) and regenerates `support-policy.json` with the branch added, bound to
+the plan's evidence digests and action key and accepted at the capture time.
+The sealed edit is validated in a clean checkout, and the branch's first
+release is then built for real at the validated commit. Only an exact module
+comparison pass lets it merge. When the new branch builds a different module
+set, the run stops without merging and the owner issue for the
+`new_branch:<branch>` key states the exact missing (`-`) and unexpected (`+`)
+modules; a human corrects `expected-modules/<branch>.txt` by pull request, and
+the next watcher run retries with that list, which the edit never overwrites.
+Until then each watcher run with no patch due retries the same build and
+fails the same way; patches on maintained branches go first and never wait
+for it.
+`mise-php` then regenerates `support-snapshot.json` and `lib/policy.lua`
+from the merged policy with its own deterministic scripts. The readiness and
+event records then merge on their own: `autorelease-events/`, `autorelease-state/`, and `mise-php`'s
 `readiness/` sit outside CODEOWNERS precisely so their exact-SHA automation
 PRs satisfy branch protection without a reviewer, while every protected
 control still cannot. Publication waits only on machine facts — matching
-`php_bin_ready` and `mise_ready` records at exact commits.
+`php_bin_ready` and `mise_ready` records at exact commits. The `mise_ready`
+record names the mise-php synchronization commit it validated, and the record
+itself merges on top of it, so the publish job requires the captured mise-php
+`main` to contain that commit and verifies installs with the plugin checked
+out at exactly it.
 
-Retirement is the mirror image and equally unattended. Captured EOL evidence
-stops new builds and publication for that branch and delists it from
+Retirement is the mirror image and equally unattended. A maintained branch
+whose supported-versions row is marked end of life becomes
+`branch_eol:<branch>:<security support end>`; the lifecycle edit removes it
+from `support-policy.json` and leaves its module list in place. That stops
+new builds and publication for the branch and delists it from
 `mise ls-remote` and branch-shorthand resolution. It removes nothing: every
 release already published stays immutable, and an exact version such as
 `8.2.32` installs exactly as before, indefinitely.
@@ -204,7 +275,7 @@ release already published stays immutable, and an exact version such as
 Unattended mutation is controlled by
 `.github/autorelease-operator.json`. Set `unattendedMutation` to `paused` in a
 reviewed protected-path PR to stop implementation, merge, and release while
-leaving read-only evidence capture and investigation available. Re-enable it
+leaving read-only evidence capture and classification available. Re-enable it
 through another reviewed PR; an incomplete event then resumes only through its
 single legal next transition.
 
@@ -226,22 +297,23 @@ gh workflow run autorelease-e2e.yml \
   -f php_bin_sha=<exact-php-bin-sha> \
   -f mise_php_sha=<exact-mise-php-sha> \
   -f suite=production-parity
-
-# After the reviewed php-bin commit is merged to main, exercise the actual
-# pinned Codex Action and repository API key inside the protected canary environment.
-gh workflow run autorelease-e2e.yml \
-  --repo bigpixelrocket/php-bin \
-  --ref main \
-  -f php_bin_sha=<exact-main-php-bin-sha> \
-  -f mise_php_sha=<exact-mise-php-sha> \
-  -f suite=agent-canary
 ```
 
-`scripts/test.sh` validates every Codex Action invocation, exact CLI version,
-and canonical `config.toml` loading against the reviewed offline contract in
-`.github/codex-action-contract.json`. The live agent canary must run from
-protected `main`; feature-branch runs cannot enter its credentialed
-environment.
+The other suites are `notification-canary`, which creates, replays, and closes
+one namespaced issue, and `live-canary`, which installs an already published
+version through `mise-php` (`-f live_version=<version>`).
+
+To reproduce a classification offline, run the classifier and admission
+against a retained watcher artifact (`gh run download <run-id> --name
+autorelease-investigation-<run-id>`):
+
+```bash
+./scripts/classify-autorelease-evidence \
+  --manifest <artifact>/evidence/evidence-manifest.json \
+  --preconditions <artifact>/preconditions.json \
+  --events autorelease-events \
+  --output plan.json
+```
 
 Inspect `autorelease-events/`, generated `support-policy.json`, the reviewed
 `autorelease/policy-invariants.json`, retained workflow artifacts, and the

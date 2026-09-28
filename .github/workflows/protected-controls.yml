@@ -130,7 +130,7 @@ jobs:
           # exact-head owner review of owner-authored changes was unsatisfiable
           # and every such merge ended in an administrative bypass regardless.
           # The gate's value is against non-owner authors: automation identities
-          # and admitted agent work. Owner-authored protected changes pass here
+          # and admitted automation PRs. Owner-authored protected changes pass here
           # and still owe the functional required check before merging.
           if author.lower() == reviewer:
               print(f"Protected paths changed by the configured owner {author}.")

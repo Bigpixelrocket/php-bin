@@ -3,17 +3,20 @@
 Releases are published by the autorelease system, not by a person. There is no
 tag-triggered release workflow: `autorelease-publish.yml` only runs through
 `workflow_dispatch` with an admitted action key, exact merged commit, and the
-investigation run holding the retained evidence. Pushing a version tag by hand
+watcher run holding the retained evidence and classified plan. Pushing a version tag by hand
 therefore publishes nothing. See [`AUTORELEASE.md`](../AUTORELEASE.md) for the
 full contract.
 
 ## What the automation does
 
-1. The daily watcher captures upstream evidence and, when it changes, admits an
-   evidence-bound plan.
-2. For an ordinary stable patch the plan requires no edit and goes straight to
-   the publish transaction. A recipe change is implemented offline, sealed,
-   validated in a clean checkout, and merged through exact-SHA admission first.
+1. The daily watcher captures upstream evidence and, when it changes,
+   classifies it with fixed rules into one evidence-bound plan that an
+   independent admission check accepts or rejects.
+2. For an ordinary stable patch or a rebuild the plan requires no edit and goes
+   straight to the publish transaction. A new or retired PHP branch is first
+   written deterministically (`support-policy.json`, plus the new branch's
+   module list), sealed, validated in a clean checkout, built for real when the
+   branch is new, and merged through exact-SHA admission.
 3. The publish transaction rebuilds on macOS 26 arm64 in a separate job with a
    read-only token, verifies the exact module baseline and deployment target,
    packages the archive, and writes `SHA256SUMS`. The write-scoped release job
@@ -53,7 +56,7 @@ only that branch; a change to a shared recipe input rebuilds every maintained
 version. Each release records the identity of the recipe it was built from
 in its notes, and a version is rebuilt when its newest revision records a
 different identity or none. The watcher selects the version and revision
-deterministically, the investigation confirms it as a
+deterministically, the classifier confirms it as a
 `recipe_rebuild:<version>:<n>` plan, and admission accepts only that key, so a
 revision is never chosen by hand. See "Recipe rebuilds" in
 [`AUTORELEASE.md`](../AUTORELEASE.md).

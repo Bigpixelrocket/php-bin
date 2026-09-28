@@ -1,5 +1,0 @@
-web_search = "live"
-
-[tools.web_search]
-context_size = "medium"
-allowed_domains = ["php.net", "github.com", "docs.github.com"]

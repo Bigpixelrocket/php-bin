@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""Write the deterministic repository edits of one admitted lifecycle plan."""
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from autorelease.control import main
+
+raise SystemExit(main(["apply-lifecycle", *sys.argv[1:]]))

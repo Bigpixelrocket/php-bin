@@ -13,7 +13,6 @@ from unittest import mock
 
 from autorelease.control import (
     ACTION_KEY_RE,
-    COMPLETION_EVIDENCE_REF_RE,
     EDGE_CACHE_BYPASS_PARAMETER,
     EVIDENCE_CAPTURE_IDS,
     EVIDENCE_SOURCES,
@@ -37,6 +36,9 @@ from autorelease.control import (
     evidence_sources,
     fetch_url,
     load_plan_evidence,
+    PLAN_ACTIONS,
+    PLAN_FIELDS,
+    REQUIRED_PLAN_CHECKS,
     main as control_main,
     manifest_digest,
     mutation_allowed,
@@ -44,7 +46,6 @@ from autorelease.control import (
     notification_decision,
     retained_notification_issue,
     release_transition,
-    retry_decision,
     seal_patch,
     sha256_bytes,
     sha256_file,
@@ -52,7 +53,6 @@ from autorelease.control import (
     strip_supported_versions_date_presentation,
     transition_event,
     validate_archive,
-    validate_completion_assessment,
     validate_completed_event_record,
     validate_evidence_attestation_predicate,
     validate_evidence_state_record,
@@ -63,6 +63,26 @@ from autorelease.control import (
     watch_decision,
     path_is_protected,
 )
+
+
+def full_plan(**fields) -> dict:
+    """Return a plan with every reviewed field, overridden by `fields`."""
+    return {
+        "schemaVersion": 1,
+        "actionKey": "no_change:" + "c" * 16,
+        "action": "no_change",
+        "evidence": [],
+        "repositories": ["php-bin"],
+        "preconditions": {},
+        "editsRequired": False,
+        "allowedPaths": {"php-bin": [], "mise-php": []},
+        "requiredChecks": ["Script checks"],
+        "releaseIntent": None,
+        "notification": {"suggestedSeverity": "info", "summary": "Fixture.", "humanActionRequired": False},
+        "risk": "routine",
+        "summary": "Fixture.",
+        **fields,
+    }
 
 
 def run_control(*argv: str) -> tuple[int, str]:
@@ -109,39 +129,11 @@ def supported_versions_page(today_x: str, today_label: str, ages: tuple[str, ...
 
 
 class AutoreleaseControlTests(unittest.TestCase):
-    @staticmethod
-    def _contract():
-        return {
-            "contractVersion": 1,
-            "phase": "implementation",
-            "goal": "Update one admitted fixture.",
-            "actionKey": "repair:8.5.9:deadbeef",
-            "preconditions": {},
-            "allowedAuthority": ["workspace_write_admitted_paths"],
-            "nonGoals": ["irreversible_effect"],
-            "completionCriteria": [
-                {"id": "done", "requirement": "Done.", "evidenceRequired": "Diff."}
-            ],
-            "stopConditions": ["protected_change"],
-        }
-
-    @staticmethod
-    def _assessment(contract, digests):
-        return {
-            "contractVersion": 1,
-            "instructionDigests": digests,
-            "phaseStatus": "complete",
-            "criteria": [{"id": contract["completionCriteria"][0]["id"], "status": "passed", "evidence": ["diff"]}],
-            "goNoGo": "go",
-            "unresolved": [],
-            "summary": "Done.",
-        }
-
-    def test_quiet_snapshot_does_not_wake_agent(self):
+    def test_quiet_snapshot_does_not_wake_the_classifier(self):
         manifest = {"manifestDigest": "sha256:" + "a" * 64, "captures": [{"status": 200}]}
         decision = watch_decision(manifest, manifest, [], {"healthy": True})
         self.assertEqual("quiet", decision["trigger"])
-        self.assertFalse(decision["modelCall"])
+        self.assertFalse(decision["classify"])
 
     def test_evidence_recording_commit_does_not_wake_itself(self):
         previous = {
@@ -390,7 +382,7 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertEqual(yesterday["manifestDigest"], today["manifestDigest"])
         decision = watch_decision(today, yesterday, [], {"healthy": True})
         self.assertEqual("quiet", decision["trigger"])
-        self.assertFalse(decision["modelCall"])
+        self.assertFalse(decision["classify"])
 
     def test_capture_digests_the_projected_body_and_retains_unprojected_bytes(self):
         body = json.dumps(
@@ -421,14 +413,10 @@ class AutoreleaseControlTests(unittest.TestCase):
             self.assertFalse((output / "raw/php_bin_releases.body.raw").exists())
 
     def test_no_change_plan_cannot_authorize_edits_paths_or_releases(self):
-        plan = {
-            "schemaVersion": 1,
-            "action": "no_change",
-            "actionKey": "no_change:" + "c" * 16,
-            "editsRequired": True,
-            "allowedPaths": {"php-bin": ["autorelease-state/last-evidence.json"], "mise-php": []},
-            "releaseIntent": None,
-        }
+        plan = full_plan(
+            editsRequired=True,
+            allowedPaths={"php-bin": ["autorelease-state/last-evidence.json"], "mise-php": []},
+        )
         with tempfile.TemporaryDirectory() as tmp:
             manifest_path = pathlib.Path(tmp) / "evidence-manifest.json"
             manifest_path.write_bytes(canonical_json({"manifestDigest": "sha256:" + "c" * 64}))
@@ -462,15 +450,15 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertEqual("record_completed_event", decision["action"])
         self.assertEqual("new_patch:8.5.9", decision["actionKey"])
         self.assertEqual("record_missing", decision["trigger"])
-        self.assertFalse(decision["modelCall"])
+        self.assertFalse(decision["classify"])
 
         # A changed snapshot would otherwise select new work; the missing record wins the
-        # trigger, but recovery never withholds the investigation those paths depend on,
+        # trigger, but recovery never withholds the classification those paths depend on,
         # so a repair that stays blocked cannot starve them run after run.
         changed = {"manifestDigest": "sha256:" + "c" * 64, "captures": manifest["captures"]}
         moved = watch_decision(changed, manifest, events, {"healthy": True}, releases=releases)
         self.assertEqual("record_completed_event", moved["action"])
-        self.assertTrue(moved["modelCall"])
+        self.assertTrue(moved["classify"])
         incomplete = watch_decision(
             manifest,
             manifest,
@@ -479,7 +467,7 @@ class AutoreleaseControlTests(unittest.TestCase):
             releases=releases,
         )
         self.assertEqual("record_completed_event", incomplete["action"])
-        self.assertTrue(incomplete["modelCall"])
+        self.assertTrue(incomplete["classify"])
         self.assertEqual(["new_patch:8.5.7"], incomplete["incompleteActions"])
 
         rebuild = watch_decision(
@@ -672,7 +660,7 @@ class AutoreleaseControlTests(unittest.TestCase):
             releases=releases, recipe_identities=dict.fromkeys(["8.4", "8.5"], current),
         )
         self.assertEqual("rebuild_due", decision["trigger"])
-        self.assertTrue(decision["modelCall"])
+        self.assertTrue(decision["classify"])
         self.assertEqual("recipe_rebuild:8.5.11:1", decision["rebuildActionKey"])
         self.assertEqual("none", decision["action"])
         # Recording a no_change snapshot is exactly the self-update that would otherwise
@@ -693,7 +681,7 @@ class AutoreleaseControlTests(unittest.TestCase):
             manifest, manifest, [*events, {"actionKey": "recipe_rebuild:8.5.11:1", "state": "complete"}],
             {"healthy": True}, releases=published, recipe_identities=dict.fromkeys(["8.4", "8.5"], current),
         )
-        self.assertEqual(("quiet", False, ""), (quiet["trigger"], quiet["modelCall"], quiet["rebuildActionKey"]))
+        self.assertEqual(("quiet", False, ""), (quiet["trigger"], quiet["classify"], quiet["rebuildActionKey"]))
         unhealthy = self._releases_manifest(status=500)
         self.assertEqual(
             "",
@@ -705,14 +693,11 @@ class AutoreleaseControlTests(unittest.TestCase):
 
     def test_rebuild_admission_binds_the_deterministic_selection(self):
         key = "recipe_rebuild:8.5.9:2"
-        plan = {
-            "schemaVersion": 1,
-            "action": "recipe_rebuild",
-            "actionKey": key,
-            "editsRequired": False,
-            "allowedPaths": {"php-bin": [], "mise-php": []},
-            "releaseIntent": {"version": "8.5.9-2", "sourceIdentifier": "php_bin_releases"},
-        }
+        plan = full_plan(
+            action="recipe_rebuild",
+            actionKey=key,
+            releaseIntent={"version": "8.5.9-2", "sourceIdentifier": "php_bin_releases"},
+        )
         with tempfile.TemporaryDirectory() as tmp:
             manifest_path = pathlib.Path(tmp) / "evidence-manifest.json"
             manifest_path.write_bytes(canonical_json({"manifestDigest": "sha256:" + "c" * 64}))
@@ -731,14 +716,7 @@ class AutoreleaseControlTests(unittest.TestCase):
             with self.assertRaisesRegex(ControlError, "already completed"):
                 _validate_plan_shape(plan, manifest_path, {key}, key)
             # A pending rebuild can never be silenced by recording the evidence unchanged.
-            no_change = {
-                "schemaVersion": 1,
-                "action": "no_change",
-                "actionKey": "no_change:" + "c" * 16,
-                "editsRequired": False,
-                "allowedPaths": {"php-bin": [], "mise-php": []},
-                "releaseIntent": None,
-            }
+            no_change = full_plan()
             self.assertEqual(no_change["actionKey"], _validate_plan_shape(no_change, manifest_path, set(), None))
             with self.assertRaisesRegex(ControlError, "due rebuild pending"):
                 _validate_plan_shape(no_change, manifest_path, set(), key)
@@ -820,63 +798,45 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertEqual("none", occupied["action"])
         self.assertEqual("quiet", occupied["trigger"])
 
-    def test_completion_go_is_mechanical(self):
-        contract = {
-            "contractVersion": 1,
-            "phase": "investigation",
-            "goal": "Classify one fixture.",
-            "actionKey": "new_patch:8.5.9",
-            "preconditions": {},
-            "allowedAuthority": ["read_repository"],
-            "nonGoals": ["mutation"],
-            "completionCriteria": [
-                {"id": "done", "requirement": "Done.", "evidenceRequired": "Evidence."}
-            ],
-            "stopConditions": ["missing_evidence"],
-        }
-        digests = {
-            "shared": "sha256:" + "a" * 64,
-            "phaseTemplate": "sha256:" + "b" * 64,
-            "eventContract": "sha256:" + "c" * 64,
-        }
-        assessment = {
-            "contractVersion": 1,
-            "instructionDigests": digests,
-            "phaseStatus": "complete",
-            "criteria": [{"id": "done", "status": "passed", "evidence": ["evidence[0]"]}],
-            "goNoGo": "go",
-            "unresolved": [],
-            "summary": "Done.",
-        }
-        validate_completion_assessment(assessment, contract, digests)
-        assessment["unresolved"] = ["contradiction"]
-        with self.assertRaises(ControlError):
-            validate_completion_assessment(assessment, contract, digests)
+    def test_plan_shape_is_exact_and_only_lifecycle_plans_edit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest_path = pathlib.Path(tmp) / "evidence-manifest.json"
+            manifest_path.write_bytes(canonical_json({"manifestDigest": "sha256:" + "c" * 64}))
+            self.assertEqual("no_change:" + "c" * 16, _validate_plan_shape(full_plan(), manifest_path, set()))
+            # Fields the model-era schema carried are unknown now, and none may be missing.
+            with self.assertRaisesRegex(ControlError, "fields are unknown or missing"):
+                _validate_plan_shape({**full_plan(), "budgets": {}}, manifest_path, set())
+            incomplete = full_plan()
+            del incomplete["summary"]
+            with self.assertRaisesRegex(ControlError, "fields are unknown or missing"):
+                _validate_plan_shape(incomplete, manifest_path, set())
+            for retired in ("repair", "reconcile_partial"):
+                with self.assertRaisesRegex(ControlError, "invalid autorelease action", msg=retired):
+                    _validate_plan_shape(full_plan(action=retired), manifest_path, set())
+            # A plan that stops the run authorizes nothing.
+            for field, value in (
+                ("editsRequired", True),
+                ("allowedPaths", {"php-bin": ["support-policy.json"], "mise-php": []}),
+                ("releaseIntent", {"version": "8.5.9", "sourceIdentifier": "php_release_feed"}),
+            ):
+                with self.assertRaisesRegex(ControlError, "blocked plan cannot", msg=field):
+                    _validate_plan_shape(
+                        full_plan(action="blocked", actionKey="source_unhealthy:" + "d" * 16, **{field: value}),
+                        manifest_path,
+                        set(),
+                    )
+            with self.assertRaisesRegex(ControlError, "does not match its action"):
+                _validate_plan_shape(
+                    full_plan(action="new_patch", actionKey="new_branch:8.6"), manifest_path, set()
+                )
 
-    def test_investigation_evidence_references_are_machine_resolvable(self):
-        for reference in (
-            "evidence[0]",
-            "preconditions.phpBinHead",
-            "preconditions.misePhpHead",
-            "preconditions.supportPolicyDigest",
-            "researchSources[2]",
-        ):
-            self.assertIsNotNone(COMPLETION_EVIDENCE_REF_RE.fullmatch(reference))
-        self.assertIsNone(COMPLETION_EVIDENCE_REF_RE.fullmatch("watch-decision.json reports success"))
-
-    def test_investigation_defers_required_checks_to_writable_jobs(self):
-        root = pathlib.Path(__file__).resolve().parents[1]
-        instructions = (root / ".github/codex/autorelease/investigation.md").read_text()
-        watcher = (root / ".github/workflows/autorelease-watch.yml").read_text()
-        self.assertIn("Treat `requiredChecks` as downstream exact-head gates", instructions)
-        self.assertIn("do not run them in this read-only", instructions)
-        self.assertIn("not-yet-run status as unresolved", instructions)
-        self.assertIn(
-            "--non-goal repository_mutation \\\n"
-            "            --non-goal required_check_execution \\\n"
-            "            --non-goal irreversible_github_effect \\",
-            watcher,
-        )
+    def test_plan_schema_matches_admission(self):
+        schema = json.loads((ROOT / "schemas/autorelease-plan.schema.json").read_text())
+        self.assertEqual(set(schema["required"]), set(schema["properties"]))
+        self.assertEqual(PLAN_FIELDS, set(schema["required"]))
+        self.assertEqual(ACTION_KEY_RE.pattern, schema["properties"]["actionKey"]["pattern"])
+        self.assertEqual(sorted(PLAN_ACTIONS), sorted(schema["properties"]["action"]["enum"]))
+        self.assertEqual(REQUIRED_PLAN_CHECKS, schema["properties"]["requiredChecks"]["items"]["enum"])
 
     def test_deterministic_evidence_state_shape_is_fail_closed(self):
         capture_ids = (
@@ -1348,13 +1308,13 @@ class AutoreleaseControlTests(unittest.TestCase):
             "runUrl": "https://github.com/bigpixelrocket/php-bin/actions/runs/1",
             "repository": "bigpixelrocket/php-bin",
         }
-        changed = {"modelCall": True, "manifestDigest": digest}
+        changed = {"classify": True, "manifestDigest": digest}
         cases = (
             ({**base, "conclusion": "failure"}, "watcher_failed", "conclusion 'failure'"),
             (
-                {**base, "decision": {"modelCall": False, "manifestDigest": digest}},
+                {**base, "decision": {"classify": False, "manifestDigest": digest}},
                 "quiet_day",
-                "no model call was made",
+                "nothing needed classifying",
             ),
             (
                 {**base, "decision": changed, "plan": {"action": "no_change", "actionKey": "no_change:" + "0" * 16}},
@@ -1375,16 +1335,6 @@ class AutoreleaseControlTests(unittest.TestCase):
                 {**base, "decision": changed, "plan": {"action": "branch_eol", "actionKey": "branch_eol:8.1:2026-12-31"}},
                 "branch_eol_started",
                 "PHP 8.1 reached end of life",
-            ),
-            (
-                {**base, "decision": changed, "plan": {"action": "repair", "actionKey": "repair:8.5.9:deadbeef"}},
-                "repair_started",
-                "repair:8.5.9:deadbeef",
-            ),
-            (
-                {**base, "decision": changed, "plan": {"action": "reconcile_partial", "actionKey": "new_patch:8.5.9"}},
-                "reconcile_started",
-                "last legal state",
             ),
             (
                 {**base, "decision": changed, "plan": {"action": "recipe_rebuild", "actionKey": "recipe_rebuild:8.5.9:2"}},
@@ -1444,22 +1394,25 @@ class AutoreleaseControlTests(unittest.TestCase):
             "runUrl": "https://github.com/bigpixelrocket/php-bin/actions/runs/1",
             "repository": "bigpixelrocket/php-bin",
         }
-        changed = {"modelCall": True, "manifestDigest": digest}
+        changed = {"classify": True, "manifestDigest": digest}
         rejected = (
             {**base, "workflow": "consumer"},
             {**base, "runUrl": "https://example.invalid/run"},
             {**base, "repository": "php-bin"},
             base,
-            {**base, "decision": {"modelCall": False, "manifestDigest": "sha256:short"}},
-            {**base, "decision": {"modelCall": False, "manifestDigest": None}},
+            {**base, "decision": {"classify": False, "manifestDigest": "sha256:short"}},
+            {**base, "decision": {"classify": False, "manifestDigest": None}},
             {**base, "decision": {"manifestDigest": "sha256:" + "a" * 64}},
-            {**base, "decision": {"modelCall": 1, "manifestDigest": "sha256:" + "a" * 64}},
+            {**base, "decision": {"classify": 1, "manifestDigest": "sha256:" + "a" * 64}},
             {**base, "decision": changed},
             {**base, "decision": changed, "plan": {"action": "new_patch", "actionKey": "new_patch:8.5.9; rm -rf"}},
             {**base, "decision": changed, "plan": {"action": "new_patch", "actionKey": None}},
             {**base, "decision": changed, "plan": {"action": "new_patch", "actionKey": "repair:8.5.9:deadbeef"}},
             {**base, "decision": changed, "plan": {"action": "recipe_rebuild", "actionKey": "new_patch:8.5.9"}},
             {**base, "decision": changed, "plan": {"action": "publish", "actionKey": "new_patch:8.5.9"}},
+            # Retired model-era actions have no template left.
+            {**base, "decision": changed, "plan": {"action": "repair", "actionKey": "repair:8.5.9:deadbeef"}},
+            {**base, "decision": changed, "plan": {"action": "reconcile_partial", "actionKey": "new_patch:8.5.9"}},
             {**base, "workflow": "publish", "transaction": {"released": True, "version": "main"}},
             {**base, "workflow": "publish"},
             {**base, "workflow": "publish", "transaction": {"released": False, "version": "8.5.9"}},
@@ -1509,7 +1462,7 @@ class AutoreleaseControlTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as scratch:
             root = pathlib.Path(scratch)
             (root / "watch-decision.json").write_text(
-                json.dumps({"modelCall": True, "manifestDigest": "sha256:" + "a" * 64})
+                json.dumps({"classify": True, "manifestDigest": "sha256:" + "a" * 64})
             )
             (root / "autorelease-plan.json").write_text("{not json")
             status, output = run_control(
@@ -1584,8 +1537,7 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertEqual("10", gh.call_args_list[0].args[2])
         self.assertEqual("10", gh.call_args_list[1].args[2])
 
-    def test_retry_and_pause_bounds(self):
-        self.assertFalse(retry_decision({"attemptCount": 2, "failureFingerprint": "x"}, "x", 2)["recallAgent"])
+    def test_pause_bounds(self):
         self.assertFalse(mutation_allowed({"unattendedMutation": "paused"}))
         self.assertTrue(mutation_allowed({"unattendedMutation": "enabled"}))
 
@@ -1624,11 +1576,9 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertEqual("notify_blocked", route(action="blocked")["route"])
         self.assertEqual("notify_blocked", route(action="needs_human")["route"])
         self.assertEqual("no_change_evidence", route(action="no_change")["route"])
-        self.assertEqual("dispatch_implementation", route(action="repair", editsRequired=True)["route"])
         self.assertEqual("dispatch_implementation", route(action="new_branch", editsRequired=True)["route"])
         self.assertEqual("dispatch_publish", route(action="new_patch")["route"])
         self.assertEqual("dispatch_publish", route(action="new_branch")["route"])
-        self.assertEqual("dispatch_publish", route(action="reconcile_partial")["route"])
         self.assertEqual("complete_branch_eol", route(action="branch_eol")["route"])
         # Recovery is an overlay: it carries its own route beside any plan route.
         self.assertEqual("none", route(action="new_patch")["recoveryRoute"])
@@ -1664,6 +1614,10 @@ class AutoreleaseControlTests(unittest.TestCase):
         # Unrouted combinations fail loudly instead of exiting green.
         with self.assertRaises(ControlError):
             route_watch_action({"action": "repair", "editsRequired": False})
+        # The retired model-era actions route nowhere.
+        for retired in ("repair", "reconcile_partial"):
+            with self.assertRaises(ControlError, msg=retired):
+                route_watch_action({"action": retired, "editsRequired": True})
         # A rebuild publishes an existing version as a new revision with no edit.
         self.assertEqual(
             "dispatch_publish",
@@ -1725,9 +1679,10 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertEqual(1, run_control("route-watch-action", "--action", "repair", "--edits-required", "yes")[0])
 
     def test_invariants_and_durable_state_are_protected(self):
-        self.assertTrue(path_is_protected(".github/codex-action-contract.json"))
         self.assertTrue(path_is_protected("autorelease/policy-invariants.json"))
-        self.assertTrue(path_is_protected("scripts/validate-codex-action-inputs"))
+        self.assertTrue(path_is_protected("scripts/classify-autorelease-evidence"))
+        self.assertTrue(path_is_protected("scripts/apply-autorelease-plan"))
+        self.assertTrue(path_is_protected("autorelease/_classifier.py"))
         self.assertTrue(path_is_protected("scripts/dispatch-pr-checks"))
         self.assertTrue(path_is_protected("autorelease-events/new-branch.json"))
         self.assertTrue(path_is_protected("autorelease-state/last-evidence.json"))
@@ -1737,7 +1692,7 @@ class AutoreleaseControlTests(unittest.TestCase):
         for path in ("scripts/test.sh", "scripts/build.sh", "scripts/package.sh",
                      "scripts/compare-modules.sh", "scripts/check-public-language.sh",
                      "tests/test_autorelease.py",
-                     # Sourced by the protected gate scripts, so agent-authored bash would
+                     # Sourced by the protected gate scripts, so admitted product bash would
                      # otherwise execute inside the gate run that judges the patch.
                      "scripts/lib.sh",
                      # Pin the compiler toolchain that produces published binaries.
@@ -2058,16 +2013,6 @@ class AutoreleaseControlTests(unittest.TestCase):
                                      "--check-name", "Plugin contract"], capture_output=True)
             self.assertNotEqual(result.returncode, 0)
 
-    def test_malformed_contract_shapes_fail_closed(self):
-        contract = self._contract()
-        contract["allowedAuthority"] = [[]]
-        with self.assertRaisesRegex(ControlError, "allowedAuthority"):
-            validate_completion_assessment({}, contract)
-        contract = self._contract()
-        contract["completionCriteria"] = ["not-an-object"]
-        with self.assertRaisesRegex(ControlError, "objects"):
-            validate_completion_assessment({}, contract)
-
     def test_archive_absolute_member_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             archive = pathlib.Path(temporary) / "php-8.5.9-cli-macos-aarch64.tar.gz"
@@ -2093,26 +2038,9 @@ class AutoreleaseControlTests(unittest.TestCase):
                 ["git", "rev-parse", "HEAD"], cwd=repo, check=True, text=True, stdout=subprocess.PIPE
             ).stdout.strip()
             (repo / "allowed.txt").write_text("after\n")
-            contract = self._contract()
-            digests = {
-                "shared": "sha256:" + "a" * 64,
-                "phaseTemplate": "sha256:" + "b" * 64,
-                "eventContract": sha256_bytes(canonical_json(contract)),
-            }
-            plan = {
-                "actionKey": contract["actionKey"],
-                "agentContract": {"instructionDigests": digests},
-                "allowedPaths": {"php-bin": ["allowed.txt"]},
-            }
+            plan = {"actionKey": "new_branch:8.6", "allowedPaths": {"php-bin": ["allowed.txt"]}}
             sealed = pathlib.Path(temporary) / "sealed"
-            manifest = seal_patch(
-                repo,
-                base,
-                plan,
-                self._assessment(contract, digests),
-                contract,
-                sealed,
-            )
+            manifest = seal_patch(repo, base, plan, sealed)
             subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
             subprocess.run(["git", "commit", "-q", "-m", "validated"], cwd=repo, check=True)
             head = subprocess.run(
@@ -2121,7 +2049,7 @@ class AutoreleaseControlTests(unittest.TestCase):
             admitted = verify_merge(repo, head, manifest, {"Script checks": "success"}, {}, {})
             self.assertEqual(head, admitted["headSha"])
             with self.assertRaisesRegex(ControlError, "exact commit SHA"):
-                seal_patch(repo, "--help", plan, self._assessment(contract, digests), contract, sealed)
+                seal_patch(repo, "--help", plan, sealed)
             with self.assertRaisesRegex(ControlError, "exact commit SHA"):
                 verify_merge(repo, "--help", manifest, {"Script checks": "success"}, {}, {})
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Admit a Codex autorelease plan against exact evidence and preconditions."""
+"""Admit a classified autorelease plan against exact evidence and preconditions."""
 
 import argparse
 import json
@@ -21,10 +21,6 @@ from autorelease.control import (  # noqa: E402
 parser = argparse.ArgumentParser()
 parser.add_argument("--plan", type=pathlib.Path, required=True)
 parser.add_argument("--manifest", type=pathlib.Path, required=True)
-parser.add_argument("--contract", type=pathlib.Path, required=True)
-parser.add_argument("--shared", type=pathlib.Path, required=True)
-parser.add_argument("--phase", type=pathlib.Path, required=True)
-parser.add_argument("--event-contract", type=pathlib.Path, required=True)
 parser.add_argument("--php-bin-head", required=True)
 parser.add_argument("--mise-php-head", required=True)
 parser.add_argument("--policy-digest", required=True)
@@ -41,15 +37,11 @@ try:
         raise ControlError("completed actions must be an array of strings")
     completed = set(completed_document)
     # Re-derived from the same capture, recipe commit, and policy the watcher used,
-    # so the investigation can only confirm the rebuild the watcher selected.
+    # so the classifier can only confirm the rebuild the watcher selected.
     pending_rebuild = due_recipe_rebuild(args.manifest, ROOT, args.php_bin_head)
     admission = validate_plan(
         load_json(args.plan),
         args.manifest,
-        load_json(args.contract),
-        args.shared,
-        args.phase,
-        args.event_contract,
         heads,
         args.policy_digest,
         completed,
