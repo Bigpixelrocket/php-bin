@@ -65,6 +65,62 @@ cp -R "$BUILDROOT/lib/php/build" "$PACKAGE/lib/php/build"
 install -m 0644 "$PROJECT_ROOT/LICENSE" "$PACKAGE/LICENSE"
 install -m 0644 "$PROJECT_ROOT/NOTICE" "$PACKAGE/NOTICE"
 
+# Stage one library header and every header of that library it reaches through
+# "<prefix>..." includes, keeping the library's own layout under include/php.
+stage_header_closure() {
+  local source_root="$1" prefix="$2" header included
+  local -a queue=("$3")
+  while ((${#queue[@]})); do
+    header="${queue[0]}"
+    queue=("${queue[@]:1}")
+    [[ -f "$PACKAGE/include/php/$header" ]] && continue
+    require_file "$source_root/$header"
+    mkdir -p "$(dirname "$PACKAGE/include/php/$header")"
+    install -m 0644 "$source_root/$header" "$PACKAGE/include/php/$header"
+    while IFS= read -r included; do
+      queue+=("$included")
+    done < <(sed -nE "s|^[[:space:]]*#[[:space:]]*include[[:space:]]*[\"<](${prefix}[^\">]+)[\">].*|\\1|p" \
+      "$source_root/$header")
+  done
+}
+
+# The installed PHP headers include three libraries the binary links statically but
+# the build kit does not carry: ext/gmp includes <gmp.h>, ext/sodium includes
+# <sodium.h>, and ext/uri's WHATWG parser includes lexbor's URL headers, which
+# php-src compiles in but does not install. Each is staged under include/php,
+# which php-config --includes names, in the library's own layout, so an extension
+# that includes those PHP headers builds against the libraries this binary links.
+KIT_INCLUDE="$PACKAGE/include/php"
+if [[ -f "$KIT_INCLUDE/ext/gmp/php_gmp_int.h" ]]; then
+  require_file "$BUILDROOT/include/gmp.h"
+  install -m 0644 "$BUILDROOT/include/gmp.h" "$KIT_INCLUDE/gmp.h"
+fi
+if [[ -f "$KIT_INCLUDE/ext/sodium/php_libsodium.h" ]]; then
+  # libsodium's headers include each other without a folder prefix, so its public
+  # header folder is staged whole.
+  require_file "$BUILDROOT/include/sodium.h"
+  if [[ ! -d "$BUILDROOT/include/sodium" ]]; then
+    echo "Build kit is incomplete, missing: $BUILDROOT/include/sodium" >&2
+    exit 1
+  fi
+  install -m 0644 "$BUILDROOT/include/sodium.h" "$KIT_INCLUDE/sodium.h"
+  mkdir -p "$KIT_INCLUDE/sodium"
+  # Each copy runs in this shell, so a failed one stops packaging; find -exec would
+  # report success whatever its command returned.
+  copied=0
+  while IFS= read -r -d '' header; do
+    install -m 0644 "$header" "$KIT_INCLUDE/sodium/"
+    copied=$((copied + 1))
+  done < <(find "$BUILDROOT/include/sodium" -maxdepth 1 -type f -name '*.h' -print0)
+  if ((copied == 0)); then
+    echo "Build kit is incomplete, no headers in: $BUILDROOT/include/sodium" >&2
+    exit 1
+  fi
+fi
+if [[ -f "$KIT_INCLUDE/ext/uri/uri_parser_whatwg.h" ]]; then
+  stage_header_closure "$BUILD_DIR/source/php-src/ext/lexbor" "lexbor/" lexbor/url/url.h
+fi
+
 # Ship exactly the listed shared extensions: a missing or unlisted .so means
 # the build and the list the gate verified have drifted apart.
 cut -f1 <<< "$SHARED_ROWS" | LC_ALL=C sort > "$TEMP_DIR/listed.txt"
@@ -113,11 +169,15 @@ rewrite "$PACKAGE/bin/phpize" \
   -e "s|^prefix=.*|prefix='$MARKER'|" \
   -e "s|^datarootdir=.*|datarootdir='$MARKER/share'|" \
   -e 's|^SED=.*|SED="/usr/bin/sed"|'
-if [[ -f "$PACKAGE/include/php/main/build-defs.h" ]]; then
-  rewrite "$PACKAGE/include/php/main/build-defs.h" \
-    -e "s|$BUILDROOT_PATTERN|$MARKER|g" \
-    -e "s|$BUILD_DIR_PATTERN|$MARKER|g"
-fi
+# build-defs.h records PHP's configure command, and gmp.h the flags GMP was
+# compiled with; both are informational strings that name the build tree.
+for header in main/build-defs.h gmp.h; do
+  if [[ -f "$PACKAGE/include/php/$header" ]]; then
+    rewrite "$PACKAGE/include/php/$header" \
+      -e "s|$BUILDROOT_PATTERN|$MARKER|g" \
+      -e "s|$BUILD_DIR_PATTERN|$MARKER|g"
+  fi
+done
 
 # The manifest tells mise-php which shared extensions exist, how to load each
 # one, and which are on by default in a fresh php.ini.

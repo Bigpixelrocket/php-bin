@@ -71,7 +71,12 @@ The archive ships no `php.ini`. `mise-php` writes one per install at
 configuration path cannot exist and it has no scan directory, so no system
 `php.ini` is ever read. `bin/php-config` and `bin/phpize` hold the placeholder
 `@PHP_BIN_PREFIX@` where the install folder belongs, and `mise-php` replaces it
-at install time.
+at install time. The informational build strings in
+`include/php/main/build-defs.h` and `include/php/gmp.h` carry the same
+placeholder. `include/php/` also carries the library headers the PHP
+headers include: `gmp.h`, `sodium.h` with `sodium/`, and, from PHP 8.5, the
+lexbor URL headers under `lexbor/`, so an extension can build against
+`ext/gmp`, `ext/sodium`, or the `ext/uri` WHATWG parser with `phpize` alone.
 
 Releases published before shared extensions contain only `bin/php`, `LICENSE`,
 and `NOTICE`, with every module compiled in.
