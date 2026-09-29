@@ -518,6 +518,17 @@ class ClassifierTests(unittest.TestCase):
         # A first release the aggregate feed already supersedes waits for its own feed.
         ahead = self.capture(feeds=feeds, rows=rows, aggregate="8.6.1")
         self.assertEqual("no_change", self.classify_on(ahead, repo)["action"])
+        # While it waits, no fresh lifecycle edit rewrites the policy's key and loses it.
+        retiring = {**rows, "8.4": ("eol", "31 Dec 2025")}
+        waiting_eol = self.capture(feeds=feeds, rows=retiring, aggregate="8.6.1")
+        self.assertEqual("no_change", self.classify_on(waiting_eol, repo)["action"])
+        # Once the branch has shipped, lifecycle work goes on as before.
+        shipped = self.capture(feeds=feeds, rows=retiring, aggregate="8.6.0", releases=[*PUBLISHED, {"tag_name": "8.6.0"}])
+        self.assertEqual("branch_eol:8.4:2025-12-31", self.classify_on(shipped, repo)["actionKey"])
+        # So does a policy that carries the key but no longer maintains the branch.
+        dropped = self.base(("8.4", "8.5"), "new_branch:8.6", modules=("8.4", "8.5"))
+        unmaintained = self.capture(feeds={"8.4": "8.4.20", "8.5": "8.5.9"}, rows={**MAINTAINED, "8.4": ("eol", "31 Dec 2025")})
+        self.assertEqual("branch_eol:8.4:2025-12-31", self.classify_on(unmaintained, dropped)["actionKey"])
 
     def test_a_merged_retirement_without_its_record_resumes_the_lifecycle(self):
         key = "branch_eol:8.4:2026-12-31"

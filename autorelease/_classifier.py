@@ -18,6 +18,7 @@ evidence digest computed from the bytes it cites:
    lifecycle resumes; any other such branch needs a human.
 4. Lifecycle evidence on the supported-versions page: first a retirement whose edit
    already merged without a record resumes, then a `new_branch`, then a `branch_eol`.
+   No fresh edit starts while a merged `new_branch` edit still waits to resume.
    Patches never read that page, so an unreadable page blocks only a run with no patch
    due.
 5. The one `recipe_rebuild` the watch decision selected.
@@ -619,6 +620,8 @@ class _Classifier:
         resumed = self.resumed_retirement(rows)
         if resumed is not None:
             return resumed
+        if self.branch_resume_pending():
+            return None
         for branch in sorted((set(rows) - maintained), key=version_key):
             row = rows[branch]
             if row.state not in SUPPORTED_STATES:
@@ -765,11 +768,31 @@ class _Classifier:
         # stops as `needs_human` in `new_patch`, and that stop yields to the resume.
         return patch if patch is not None and patch["action"] == "new_patch" else resumed
 
-    def new_patch(self) -> dict[str, Any] | None:
-        published = self.published_versions()
-        shipped = {branch_of(version) for version in published} | {
+    def shipped_branches(self, published: set[str]) -> set[str]:
+        """Return every branch with a published release or a completed `new_branch` record."""
+        return {branch_of(version) for version in published} | {
             key.partition(":")[2] for key in self.completed if key.startswith("new_branch:")
         }
+
+    def branch_resume_pending(self) -> bool:
+        """Tell whether the accepted policy is an unrecorded `new_branch` edit still owed a resume.
+
+        `new_patch` resumes it, or skips it while a feed supersedes the branch's first
+        release. Until then no fresh lifecycle edit may start: that edit rewrites the
+        policy's action key, and with it the only sign the resume is owed. A record for
+        the key never reaches this rule, since `new_patch` stops on any unshipped branch
+        that has one.
+        """
+        match = re.fullmatch(r"new_branch:(\d+\.\d+)", self.accepted_policy_key or "")
+        return (
+            bool(match)
+            and match.group(1) in self.maintained
+            and match.group(1) not in self.shipped_branches(self.published_versions())
+        )
+
+    def new_patch(self) -> dict[str, Any] | None:
+        published = self.published_versions()
+        shipped = self.shipped_branches(published)
         for branch in self.maintained:
             version = self.branch_feed_version(branch)
             if version is None and not self.capture.has(branch_feed_capture_id(branch)):

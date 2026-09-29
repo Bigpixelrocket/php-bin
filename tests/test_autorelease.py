@@ -2297,6 +2297,8 @@ class AutoreleaseControlTests(unittest.TestCase):
                 'echo "$*" >> "$FAKE_LOG"\n'
                 'case "$1 $2" in\n'
                 '  "pr create") echo https://github.com/o/r/pull/9 ;;\n'
+                '  "pr list") echo "${FAKE_PRS:-[]}" ;;\n'
+                '  "pr close") ;;\n'
                 '  "auth setup-git") ;;\n'
                 "  *) exit 3 ;;\n"
                 "esac\n"
@@ -2335,11 +2337,20 @@ class AutoreleaseControlTests(unittest.TestCase):
             result, outputs = run_through_on_main(work, clone, base)
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual(base, outputs["commit"])
-            result, outputs = run_step(work, clone, scripts[6], MERGED_COMMIT=outputs["commit"])
+            # An earlier attempt's readiness PR for this key is closed; nothing else is.
+            open_prs = [
+                {"number": 5, "headRefName": "autorelease/readiness-41", "title": "chore: record new_branch:8.6 php-bin readiness"},
+                {"number": 6, "headRefName": "autorelease/readiness-42", "title": "chore: record new_branch:8.7 php-bin readiness"},
+                {"number": 7, "headRefName": "autorelease/new_branch-8.6", "title": "chore: record new_branch:8.6 php-bin readiness"},
+            ]
+            result, outputs = run_step(work, clone, scripts[6], MERGED_COMMIT=outputs["commit"], FAKE_PRS=json.dumps(open_prs))
             self.assertEqual(0, result.returncode, result.stderr)
             # Only the readiness record reached a branch and a PR: nothing was merged.
             calls = (work / "gh.log").read_text()
             self.assertNotIn("pr merge", calls)
+            self.assertIn("pr list --state open --author app/github-actions", calls)
+            self.assertEqual(["pr close 5 --delete-branch"],
+                             [line.split(" --comment")[0] for line in calls.splitlines() if line.startswith("pr close")])
             self.assertEqual(1, calls.count("pr create"))
             self.assertIn("--head autorelease/readiness-77", calls)
             self.assertEqual("autorelease/readiness-77", git_in(origin, "branch", "--list", "autorelease/*").strip("* "))

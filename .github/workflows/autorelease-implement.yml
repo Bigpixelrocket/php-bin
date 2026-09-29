@@ -478,6 +478,14 @@ jobs:
           record="autorelease-events/$filename"
           digest="sha256:$(shasum -a 256 "$record" | awk '{print $1}')"
           gh auth setup-git
+          # An earlier attempt that failed after opening its readiness PR leaves it open.
+          # This record replaces it, so the stale PR is closed rather than left to conflict.
+          gh pr list --state open --author app/github-actions --limit 100 --json number,headRefName,title |
+            jq -r --arg title "chore: record $action_key php-bin readiness" \
+              '.[] | select(.title == $title and (.headRefName | startswith("autorelease/readiness-"))) | .number' |
+            while read -r stale; do
+              gh pr close "$stale" --delete-branch --comment "Superseded by the readiness record of run ${{ github.run_id }}."
+            done
           git push origin HEAD
           url="$(gh pr create --base main --head "autorelease/readiness-${{ github.run_id }}" \
             --title "chore: record $action_key php-bin readiness" \

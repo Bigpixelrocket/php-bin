@@ -68,14 +68,17 @@ stops at the first that applies:
    `new_patch`: its first release belongs to `new_branch`, which waits for
    both readiness records. When the accepted policy was written by that
    branch's own `new_branch` edit and no record exists, the lifecycle
-   resumes (see [Unattended lifecycle](#unattended-lifecycle)); otherwise it
-   produces `needs_human`. Admission rejects that patch independently. New
+   resumes (see [Unattended lifecycle](#unattended-lifecycle)), waiting while
+   a later patch supersedes the first release; otherwise it produces
+   `needs_human`. Admission rejects that patch independently. New
    patches never read the
    supported-versions page, so they go before lifecycle work and keep
    shipping while that page cannot be read.
 4. **Lifecycle.** The captured supported-versions page is parsed by a reviewed
    reader that accepts exactly one table shape. A retirement whose policy
-   edit already merged without a record resumes first. A supported branch the policy
+   edit already merged without a record resumes first, and no new lifecycle
+   edit starts while a new branch's merged edit still waits to resume, since
+   that edit would rewrite the policy's action key. A supported branch the policy
    does not maintain is a `new_branch` once the aggregate release feed names
    its first stable release. A maintained branch whose row is marked end of
    life is a `branch_eol` keyed on its security support end date. php.net
@@ -349,7 +352,8 @@ empty patch (`alreadyApplied`), validates and, for a new branch, builds main's
 exact commit, skips the lifecycle PR and merge, and files the readiness record
 for exactly that commit while main is still it. A failed validation or build
 reports to the owner issue for the action key, as on the first attempt, and the
-next watcher run retries.
+next watcher run retries. A readiness PR an earlier attempt left open for the
+same key is closed when the next attempt opens its own.
 
 Unattended mutation is controlled by
 `.github/autorelease-operator.json`. Set `unattendedMutation` to `paused` in a
