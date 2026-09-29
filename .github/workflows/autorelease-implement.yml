@@ -480,11 +480,15 @@ jobs:
           gh auth setup-git
           # An earlier attempt that failed after opening its readiness PR leaves it open.
           # This record replaces it, so the stale PR is closed rather than left to conflict.
+          # This run's own branch is never closed: a re-run then fails at the push as before.
+          # --repo keeps the branch deletion remote-only, as in merge-record-pr.
           gh pr list --state open --author app/github-actions --limit 100 --json number,headRefName,title |
             jq -r --arg title "chore: record $action_key php-bin readiness" \
-              '.[] | select(.title == $title and (.headRefName | startswith("autorelease/readiness-"))) | .number' |
+              --arg own "autorelease/readiness-${{ github.run_id }}" \
+              '.[] | select(.title == $title and .headRefName != $own and (.headRefName | startswith("autorelease/readiness-"))) | .number' |
             while read -r stale; do
-              gh pr close "$stale" --delete-branch --comment "Superseded by the readiness record of run ${{ github.run_id }}."
+              gh pr close "$stale" --repo "$GITHUB_REPOSITORY" --delete-branch \
+                --comment "Superseded by the readiness record of run ${{ github.run_id }}."
             done
           git push origin HEAD
           url="$(gh pr create --base main --head "autorelease/readiness-${{ github.run_id }}" \

@@ -2342,14 +2342,16 @@ class AutoreleaseControlTests(unittest.TestCase):
                 {"number": 5, "headRefName": "autorelease/readiness-41", "title": "chore: record new_branch:8.6 php-bin readiness"},
                 {"number": 6, "headRefName": "autorelease/readiness-42", "title": "chore: record new_branch:8.7 php-bin readiness"},
                 {"number": 7, "headRefName": "autorelease/new_branch-8.6", "title": "chore: record new_branch:8.6 php-bin readiness"},
+                {"number": 8, "headRefName": "autorelease/readiness-77", "title": "chore: record new_branch:8.6 php-bin readiness"},
             ]
-            result, outputs = run_step(work, clone, scripts[6], MERGED_COMMIT=outputs["commit"], FAKE_PRS=json.dumps(open_prs))
+            result, outputs = run_step(work, clone, scripts[6], MERGED_COMMIT=outputs["commit"], FAKE_PRS=json.dumps(open_prs),
+                                       GITHUB_REPOSITORY="o/r")
             self.assertEqual(0, result.returncode, result.stderr)
             # Only the readiness record reached a branch and a PR: nothing was merged.
             calls = (work / "gh.log").read_text()
             self.assertNotIn("pr merge", calls)
             self.assertIn("pr list --state open --author app/github-actions", calls)
-            self.assertEqual(["pr close 5 --delete-branch"],
+            self.assertEqual(["pr close 5 --repo o/r --delete-branch"],
                              [line.split(" --comment")[0] for line in calls.splitlines() if line.startswith("pr close")])
             self.assertEqual(1, calls.count("pr create"))
             self.assertIn("--head autorelease/readiness-77", calls)

@@ -353,7 +353,9 @@ exact commit, skips the lifecycle PR and merge, and files the readiness record
 for exactly that commit while main is still it. A failed validation or build
 reports to the owner issue for the action key, as on the first attempt, and the
 next watcher run retries. A readiness PR an earlier attempt left open for the
-same key is closed when the next attempt opens its own.
+same key is closed when the next attempt opens its own. Until readiness records
+merge without owner review, each classified watcher run therefore replaces the
+open record PR, so the owner merges the newest one.
 
 Unattended mutation is controlled by
 `.github/autorelease-operator.json`. Set `unattendedMutation` to `paused` in a
