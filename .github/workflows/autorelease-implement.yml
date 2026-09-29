@@ -300,14 +300,17 @@ jobs:
           # from the earlier attempt, so the automation branch is replaced under a lease
           # and any open PR on it is reused; the exact-SHA gates below still bind the
           # merge to this run's validated commit.
+          # The fetch is forced so the tracking ref, and with it the lease, is exactly the
+          # branch head GitHub reports now, whatever an earlier attempt left behind.
           if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
-            git fetch origin "$branch:refs/remotes/origin/$branch"
+            git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch"
           fi
           git push --force-with-lease origin "HEAD:refs/heads/$branch"
           existing="$(gh pr list --head "$branch" --state open --json number --jq '.[0].number // empty')"
           if [[ -z "$existing" ]]; then
-            url="$(gh pr create --base main --head "$branch" --title "chore: $action_key" \
-              --body "Deterministically sealed autorelease patch for \`$action_key\`.\n\nValidated commit: \`$(git rev-parse HEAD)\`.")"
+            body="$(printf "Deterministically sealed autorelease patch for \`%s\`.\n\nValidated commit: \`%s\`." \
+              "$action_key" "$(git rev-parse HEAD)")"
+            url="$(gh pr create --base main --head "$branch" --title "chore: $action_key" --body "$body")"
             existing="${url##*/}"
           fi
           echo "number=$existing" >> "$GITHUB_OUTPUT"
@@ -426,7 +429,8 @@ jobs:
             --head "${{ steps.readiness.outputs.head_sha }}" \
             --record "${{ steps.readiness.outputs.record }}" \
             --digest "${{ steps.readiness.outputs.digest }}" \
-            --checks-output autorelease-run/readiness-checks.json
+            --checks-output autorelease-run/readiness-checks.json \
+            --require-protected-controls
 
   # Any failed phase stops here with one deduplicated owner issue on the action key.
   # A new branch whose build fails the exact module comparison carries that module

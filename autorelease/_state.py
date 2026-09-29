@@ -99,6 +99,51 @@ def validate_completed_event_record(record: dict[str, Any]) -> None:
     require(current == record["state"], "autorelease event state does not match its history")
 
 
+# Evidence kinds that name the published release a completed record describes: the
+# publish transaction's own record, and the watcher's recovery of a missing one.
+RELEASE_RECORD_EVIDENCE_KINDS = {"published_release", "published_immutable_release"}
+
+
+def release_event_recorded(
+    record: dict[str, Any] | None,
+    action_key: str,
+    version: str,
+    asset_digests: dict[str, str] | None = None,
+) -> bool:
+    """Return whether `record`, main's copy of an event record, completes this release.
+
+    A rerun of the publish run's final job must not file a second record, and must not
+    report a record as missing that an earlier attempt, or the watcher's recovery,
+    already merged. No record, or one still short of `complete` (a new branch's record
+    waiting for its release), means this release is not recorded yet. A complete record
+    counts only when it is a valid completed history for exactly this action key whose
+    release evidence names this version and, when the transaction is known, exactly its
+    asset digests. A complete record naming anything else contradicts the release and
+    is rejected rather than read as either answer.
+    """
+    require(bool(STABLE_VERSION_RE.fullmatch(version or "")), f"release version is invalid: {version}")
+    if record is None:
+        return False
+    require(isinstance(record, dict), "autorelease event must be an object")
+    if record.get("state") != "complete":
+        return False
+    validate_completed_event_record(record)
+    require(record.get("actionKey") == action_key, "the completed record belongs to another action key")
+    named = [
+        item
+        for transition in record["history"]
+        for item in transition["evidence"]
+        if item.get("kind") in RELEASE_RECORD_EVIDENCE_KINDS and item.get("version") == version
+    ]
+    require(bool(named), f"the completed record for {action_key} does not name release {version}")
+    if asset_digests is not None:
+        require(
+            all(item.get("assetDigests") == asset_digests for item in named),
+            f"the completed record for {action_key} names other assets than release {version}",
+        )
+    return True
+
+
 def transition_event(event: dict[str, Any], target: str, evidence: list[dict[str, Any]]) -> dict[str, Any]:
     current = event.get("state", "detected")
     require(target in LEGAL_EVENT_TRANSITIONS.get(current, set()), f"illegal event transition: {current} -> {target}")
@@ -474,6 +519,34 @@ def unrecorded_published_release(
         if key not in recorded and action_filename(key) not in occupied:
             keys.add(key)
     return min(keys, default=None)
+
+
+def release_is_newest(version: str, releases: Iterable[dict[str, Any]]) -> bool:
+    """Return whether `version` sorts above every other published release.
+
+    GitHub moves the "Latest" badge to whichever release was published last unless the
+    publication says otherwise, so a rebuild of an older branch would take it from the
+    newest PHP version. Versions compare numerically as (major, minor, patch, revision),
+    a plain patch counting as revision 0, so `8.5.11-2` sorts above `8.5.11` and
+    `8.10.0` above `8.9.9`. Drafts, prereleases, tags that are not release versions,
+    and `version` itself are ignored; with nothing else published the version is newest.
+    """
+    tag = PUBLISHED_RELEASE_TAG_RE.fullmatch(version)
+    require(tag is not None, f"release version is not a PHP version: {version}")
+
+    def order(match: re.Match[str]) -> tuple[int, ...]:
+        return (*(int(part) for part in match.group(1).split(".")), int(match.group(3) or 0))
+
+    candidate = order(tag)
+    for release in releases:
+        if not isinstance(release, dict) or release.get("draft") or release.get("prerelease"):
+            continue
+        other = PUBLISHED_RELEASE_TAG_RE.fullmatch(str(release.get("tag_name", "")))
+        if other is None or other.group(0) == version:
+            continue
+        if order(other) > candidate:
+            return False
+    return True
 
 
 def recipe_identity_note(identity: str) -> str:

@@ -107,6 +107,8 @@ from autorelease._state import (  # noqa: E402
     notification_decision,
     pending_recipe_rebuild,
     recipe_identity_note,
+    release_event_recorded,
+    release_is_newest,
     release_recipe_identity,
     release_transition,
     retained_notification_issue,
@@ -352,6 +354,14 @@ def main(argv: list[str] | None = None) -> int:
     operator_parser.add_argument("--operator-file", required=True, type=pathlib.Path)
     operator_parser.add_argument("--require-enabled", action="store_true")
 
+    # Whether main's copy of an event record already completes one published release;
+    # an absent --record file means main has no record under that name.
+    recorded_parser = subparsers.add_parser("release-recorded")
+    recorded_parser.add_argument("--record", required=True, type=pathlib.Path)
+    recorded_parser.add_argument("--action-key", required=True)
+    recorded_parser.add_argument("--version", required=True)
+    recorded_parser.add_argument("--transaction", type=pathlib.Path)
+
     filename_parser = subparsers.add_parser("action-filename")
     filename_parser.add_argument("action_key")
     filename_parser.add_argument("--suffix", default=".json")
@@ -444,6 +454,18 @@ def main(argv: list[str] | None = None) -> int:
             allowed = mutation_allowed(state)
             require(allowed or not args.require_enabled, "unattended mutation is paused")
             print("enabled" if allowed else "paused")
+        elif args.command == "release-recorded":
+            asset_digests = None
+            if args.transaction is not None:
+                transaction = load_json(args.transaction)
+                asset_digests = transaction.get("assetDigests") if isinstance(transaction, dict) else None
+                require(
+                    isinstance(asset_digests, dict) and bool(asset_digests),
+                    "release transaction carries no asset digests",
+                )
+            record = load_json(args.record) if args.record.exists() else None
+            recorded = release_event_recorded(record, args.action_key, args.version, asset_digests)
+            print("true" if recorded else "false")
         elif args.command == "action-filename":
             print(action_filename(args.action_key, args.suffix))
         elif args.command == "validate-archive":
