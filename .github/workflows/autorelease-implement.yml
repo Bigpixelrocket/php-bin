@@ -54,6 +54,7 @@ jobs:
       action_key: ${{ steps.admitted.outputs.action_key }}
       action: ${{ steps.admitted.outputs.action }}
       version: ${{ steps.admitted.outputs.version }}
+      already_applied: ${{ steps.sealed.outputs.already_applied }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -97,6 +98,7 @@ jobs:
             --manifest autorelease-run/evidence/evidence-manifest.json \
             --repo .
       - name: Seal exact deterministic diff
+        id: sealed
         env:
           BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
         run: |
@@ -105,6 +107,10 @@ jobs:
             --base "$BASE_SHA" \
             --plan autorelease-run/autorelease-plan.json \
             --output autorelease-run/sealed
+          # A resumed lifecycle whose edit already merged seals an empty patch. Every
+          # later job then validates, builds, and records the admitted base itself, and
+          # nothing is merged except the readiness record.
+          echo "already_applied=$(jq -r '.alreadyApplied == true' autorelease-run/sealed/patch-manifest.json)" >> "$GITHUB_OUTPUT"
       - name: Retain sealed patch
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -134,7 +140,13 @@ jobs:
       - name: Apply exact sealed bytes
         run: |
           test "$(./autorelease/control.py digest autorelease-run/sealed/sealed.patch)" = "$(jq -r .patchDigest autorelease-run/sealed/patch-manifest.json)"
-          git apply --index autorelease-run/sealed/sealed.patch
+          if [[ "$(jq -r '.alreadyApplied == true' autorelease-run/sealed/patch-manifest.json)" == "true" ]]; then
+            # The admitted edit is already on the base, so the checks run on the base.
+            test "$(jq -c .files autorelease-run/sealed/patch-manifest.json)" = "[]"
+            test ! -s autorelease-run/sealed/sealed.patch
+          else
+            git apply --index autorelease-run/sealed/sealed.patch
+          fi
       - name: Run authoritative checks and retain failure logs
         id: run-checks
         run: |
@@ -152,15 +164,23 @@ jobs:
         env:
           BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
         run: |
-          export GIT_AUTHOR_NAME=autorelease-validator
-          export GIT_AUTHOR_EMAIL=autorelease@invalid
-          export GIT_COMMITTER_NAME=autorelease-validator
-          export GIT_COMMITTER_EMAIL=autorelease@invalid
-          export GIT_AUTHOR_DATE=2000-01-01T00:00:00Z
-          export GIT_COMMITTER_DATE=2000-01-01T00:00:00Z
-          git commit -m "chore: apply admitted autorelease patch"
-          jq -n --arg headSha "$(git rev-parse HEAD)" --arg tree "$(git rev-parse HEAD^{tree})" '{headSha:$headSha,tree:$tree,checks:{"Script checks":"success"}}' > autorelease-run/validation.json
-          git bundle create autorelease-run/validated.bundle HEAD "^$BASE_SHA"
+          if [[ "$(jq -r '.alreadyApplied == true' autorelease-run/sealed/patch-manifest.json)" == "true" ]]; then
+            # Nothing was applied, so the validated commit is the admitted base, which
+            # every later job checks out; there is no commit to bundle.
+            test "$(git rev-parse HEAD)" = "$BASE_SHA"
+            # The verdict is bound to HEAD, so the tested tree must equal it exactly.
+            git diff --quiet HEAD --
+          else
+            export GIT_AUTHOR_NAME=autorelease-validator
+            export GIT_AUTHOR_EMAIL=autorelease@invalid
+            export GIT_COMMITTER_NAME=autorelease-validator
+            export GIT_COMMITTER_EMAIL=autorelease@invalid
+            export GIT_AUTHOR_DATE=2000-01-01T00:00:00Z
+            export GIT_COMMITTER_DATE=2000-01-01T00:00:00Z
+            git commit -m "chore: apply admitted autorelease patch"
+            git bundle create autorelease-run/validated.bundle HEAD "^$BASE_SHA"
+          fi
+          jq -n --arg headSha "$(git rev-parse HEAD)" --arg tree "$(git rev-parse "HEAD^{tree}")" '{headSha:$headSha,tree:$tree,checks:{"Script checks":"success"}}' > autorelease-run/validation.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: steps.run-checks.outputs.status == 'passed'
         with:
@@ -215,10 +235,17 @@ jobs:
           name: validated-autorelease-patch-${{ github.run_id }}
           path: autorelease-run
       - name: Restore exact validated commit
+        env:
+          BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
         run: |
           validated="$(jq -r .headSha autorelease-run/validation.json)"
-          git fetch autorelease-run/validated.bundle HEAD
-          git checkout --detach "$validated"
+          if [[ "$(jq -r '.alreadyApplied == true' autorelease-run/sealed/patch-manifest.json)" == "true" ]]; then
+            # An already-applied edit validated the admitted base, which is checked out.
+            test "$validated" = "$BASE_SHA"
+          else
+            git fetch autorelease-run/validated.bundle HEAD
+            git checkout --detach "$validated"
+          fi
           test "$(git rev-parse HEAD)" = "$validated"
           test "$(uname -s)" = Darwin && test "$(uname -m)" = arm64
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
@@ -283,13 +310,21 @@ jobs:
           name: validated-autorelease-patch-${{ github.run_id }}
           path: autorelease-run
       - name: Restore exact validated commit
+        env:
+          BASE_SHA: ${{ needs.preflight.outputs.base_sha }}
         run: |
           validated="$(jq -r .headSha autorelease-run/validation.json)"
-          git fetch autorelease-run/validated.bundle HEAD
-          git checkout --detach "$validated"
+          if [[ "$(jq -r '.alreadyApplied == true' autorelease-run/sealed/patch-manifest.json)" == "true" ]]; then
+            # An already-applied edit validated the admitted base, which is checked out.
+            test "$validated" = "$BASE_SHA"
+          else
+            git fetch autorelease-run/validated.bundle HEAD
+            git checkout --detach "$validated"
+          fi
           test "$(git rev-parse HEAD)" = "$validated"
       - name: Create or reuse automation PR
         id: pr
+        if: needs.implement.outputs.already_applied != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -315,6 +350,7 @@ jobs:
           fi
           echo "number=$existing" >> "$GITHUB_OUTPUT"
       - name: Wait for required checks on exact head
+        if: needs.implement.outputs.already_applied != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -324,6 +360,7 @@ jobs:
             --output autorelease-run/pr-checks.json
           ./scripts/assert-admission-checks --checks autorelease-run/pr-checks.json
       - name: Re-verify exact SHA, sealed tree, and preconditions
+        if: needs.implement.outputs.already_applied != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -350,6 +387,7 @@ jobs:
             --current autorelease-run/current.json
       - name: Merge admitted exact commit
         id: merged
+        if: needs.implement.outputs.already_applied != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -358,14 +396,44 @@ jobs:
           gh pr merge "${{ steps.pr.outputs.number }}" --squash --delete-branch \
             --match-head-commit "$(jq -r .headSha autorelease-run/validation.json)"
           echo "commit=$(gh pr view "${{ steps.pr.outputs.number }}" --json mergeCommit --jq .mergeCommit.oid)" >> "$GITHUB_OUTPUT"
+      # A resumed lifecycle merged its edit in an earlier run that stopped before its
+      # readiness record, so no PR is opened and nothing is merged. The validated commit
+      # must be the admitted base and still be main under the admitted policy; the
+      # validation job's checks ran on exactly that commit.
+      - name: Re-verify the already-merged edit at the validated commit
+        id: onmain
+        if: needs.implement.outputs.already_applied == 'true'
+        run: |
+          expected="$(jq -r .headSha autorelease-run/validation.json)"
+          test "$(git rev-parse HEAD)" = "$expected"
+          admitted_head="$(jq -r .preconditions.phpBinHead autorelease-run/autorelease-plan.json)"
+          admitted_policy="$(jq -r .preconditions.supportPolicyDigest autorelease-run/autorelease-plan.json)"
+          git fetch origin main
+          current_head="$(git rev-parse origin/main)"
+          current_policy="sha256:$(git show origin/main:support-policy.json | shasum -a 256 | awk '{print $1}')"
+          jq -n --arg phpBinHead "$admitted_head" --arg supportPolicyDigest "$admitted_policy" \
+            '{phpBinHead:$phpBinHead,supportPolicyDigest:$supportPolicyDigest}' > autorelease-run/preconditions.json
+          jq -n --arg phpBinHead "$current_head" --arg supportPolicyDigest "$current_policy" \
+            '{phpBinHead:$phpBinHead,supportPolicyDigest:$supportPolicyDigest}' > autorelease-run/current.json
+          jq .checks autorelease-run/validation.json > autorelease-run/checks.json
+          ./scripts/verify-merge-admission \
+            --repo . \
+            --head "$expected" \
+            --manifest autorelease-run/sealed/patch-manifest.json \
+            --checks autorelease-run/checks.json \
+            --preconditions autorelease-run/preconditions.json \
+            --current autorelease-run/current.json
+          echo "commit=$expected" >> "$GITHUB_OUTPUT"
       - name: Commit deterministic php_bin_ready event record
         id: readiness
         env:
           GH_TOKEN: ${{ github.token }}
+          # Exactly one of the two steps above ran and named the commit now on main.
+          MERGED_COMMIT: ${{ steps.merged.outputs.commit || steps.onmain.outputs.commit }}
         run: |
           git fetch origin main
-          test "$(git rev-parse origin/main)" = "${{ steps.merged.outputs.commit }}"
-          test "$(git rev-parse "${{ steps.merged.outputs.commit }}^{tree}")" = "$(jq -r .tree autorelease-run/validation.json)"
+          test "$(git rev-parse origin/main)" = "$MERGED_COMMIT"
+          test "$(git rev-parse "$MERGED_COMMIT^{tree}")" = "$(jq -r .tree autorelease-run/validation.json)"
           git checkout -B "autorelease/readiness-${{ github.run_id }}" origin/main
           base="$(git rev-parse HEAD)"
           action_key="$(jq -r .actionKey autorelease-run/autorelease-plan.json)"
@@ -374,7 +442,7 @@ jobs:
           jq -n \
             --arg actionKey "$action_key" \
             --arg classification "$(jq -r .action autorelease-run/autorelease-plan.json)" \
-            --arg phpBinCommit "${{ steps.merged.outputs.commit }}" \
+            --arg phpBinCommit "$MERGED_COMMIT" \
             --arg planDigest "$(jq -r .planDigest autorelease-run/sealed/patch-manifest.json)" \
             --arg policyDigest "$(./autorelease/control.py digest support-policy.json)" \
             --arg policyInvariantsDigest "$(./autorelease/control.py digest autorelease/policy-invariants.json)" \
@@ -394,7 +462,7 @@ jobs:
               evidenceDigests:$evidenceDigests
             }' > "autorelease-events/$filename"
           jq -n \
-            --arg commit "${{ steps.merged.outputs.commit }}" \
+            --arg commit "$MERGED_COMMIT" \
             --arg planDigest "$(jq -r .planDigest autorelease-run/sealed/patch-manifest.json)" \
             '[{kind:"validated_merge",commit:$commit,planDigest:$planDigest}]' > autorelease-run/readiness-evidence.json
           ./scripts/autorelease-event \
@@ -410,15 +478,29 @@ jobs:
           record="autorelease-events/$filename"
           digest="sha256:$(shasum -a 256 "$record" | awk '{print $1}')"
           gh auth setup-git
+          # An earlier attempt that failed after opening its readiness PR leaves it open.
+          # This record replaces it, so the stale PR is closed rather than left to conflict.
+          # This run's own branch is never closed: a re-run then fails at the push as before.
+          # --repo keeps the branch deletion remote-only, as in merge-record-pr.
+          gh pr list --state open --author app/github-actions --limit 100 --json number,headRefName,title |
+            jq -r --arg title "chore: record $action_key php-bin readiness" \
+              --arg own "autorelease/readiness-${{ github.run_id }}" \
+              '.[] | select(.title == $title and .headRefName != $own and (.headRefName | startswith("autorelease/readiness-"))) | .number' |
+            while read -r stale; do
+              gh pr close "$stale" --repo "$GITHUB_REPOSITORY" --delete-branch \
+                --comment "Superseded by the readiness record of run ${{ github.run_id }}."
+            done
           git push origin HEAD
           url="$(gh pr create --base main --head "autorelease/readiness-${{ github.run_id }}" \
             --title "chore: record $action_key php-bin readiness" \
             --body "Deterministic event state for the exact merged implementation commit.")"
-          echo "number=${url##*/}" >> "$GITHUB_OUTPUT"
-          echo "base_sha=$base" >> "$GITHUB_OUTPUT"
-          echo "head_sha=$head" >> "$GITHUB_OUTPUT"
-          echo "record=$record" >> "$GITHUB_OUTPUT"
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          {
+            echo "number=${url##*/}"
+            echo "base_sha=$base"
+            echo "head_sha=$head"
+            echo "record=$record"
+            echo "digest=$digest"
+          } >> "$GITHUB_OUTPUT"
       - name: Validate and merge php-bin readiness record
         env:
           GH_TOKEN: ${{ github.token }}

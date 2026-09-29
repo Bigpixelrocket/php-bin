@@ -13,6 +13,7 @@ from autorelease.control import (  # noqa: E402
     ControlError,
     due_recipe_rebuild,
     load_json,
+    recorded_action_keys,
     validate_plan,
     write_json,
 )
@@ -25,6 +26,9 @@ parser.add_argument("--php-bin-head", required=True)
 parser.add_argument("--mise-php-head", required=True)
 parser.add_argument("--policy-digest", required=True)
 parser.add_argument("--completed-actions", type=pathlib.Path, required=True)
+# The durable event records at the checked-out base. A lifecycle resume is admitted
+# only when none exists for its key, so without them a resume is rejected.
+parser.add_argument("--events", type=pathlib.Path)
 parser.add_argument("--output", type=pathlib.Path, required=True)
 args = parser.parse_args()
 
@@ -46,6 +50,8 @@ try:
         args.policy_digest,
         completed,
         pending_rebuild,
+        ROOT,
+        recorded_action_keys(args.events) if args.events else None,
     )
     write_json(args.output, admission)
     print(json.dumps(admission))

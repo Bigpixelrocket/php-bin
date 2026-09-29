@@ -163,13 +163,25 @@ def validate_patch_extends_shipped_branch(
     match = re.fullmatch(r"(\d+\.\d+)\.\d+", str(release_intent.get("version", "")))
     require(bool(match), f"stable release version is invalid: {release_intent.get('version')}")
     branch = match.group(1)
+    require(
+        branch_has_shipped(manifest_path, branch, completed_actions),
+        f"new_patch would be the first PHP {branch} release; only new_branch may publish it",
+    )
+
+
+def branch_has_shipped(manifest_path: pathlib.Path, branch: str, completed_actions: set[str]) -> bool:
+    """Tell whether a PHP branch already has a release.
+
+    A branch has shipped when the captured php-bin releases hold a published release
+    on it, or a completed event record names a release on it.
+    """
     _capture, body = load_capture(manifest_path, "php_bin_releases")
     try:
         releases = json.loads(body)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ControlError("php-bin releases capture is not valid JSON") from error
     require(isinstance(releases, list), "php-bin releases capture is not a release array")
-    shipped = any(
+    return any(
         isinstance(release, dict)
         and not release.get("draft")
         and not release.get("prerelease")
@@ -181,7 +193,6 @@ def validate_patch_extends_shipped_branch(
         or bool(re.fullmatch(rf"(?:new_patch|recipe_rebuild):{re.escape(branch)}\.\d+(?::\d+)?", key))
         for key in completed_actions
     )
-    require(shipped, f"new_patch would be the first PHP {branch} release; only new_branch may publish it")
 
 
 def validate_recipe_rebuild_evidence(
@@ -294,6 +305,85 @@ def validate_support_policy(root: pathlib.Path = ROOT) -> dict[str, Any]:
         "invariantsDigest": sha256_file(invariants_path),
         "maintainedBranches": branches,
     }
+
+
+LIFECYCLE_ACTION_KEY_RE = re.compile(r"new_branch:(\d+\.\d+)|branch_eol:(\d+\.\d+):\d{4}-\d{2}-\d{2}")
+
+
+def is_lifecycle_resume(plan: dict[str, Any]) -> bool:
+    """Tell whether a plan resumes a lifecycle edit that already merged.
+
+    A lifecycle plan that requires the implementation run but allows no path can change
+    nothing: its edit is already on the base, and only the clean validation, a new
+    branch's real build, and the `php_bin_ready` record are still owed. Admission, the
+    implementation, and sealing each re-check that the edit is really there
+    (`validate_lifecycle_on_base`) before anything runs on it.
+    """
+    allowed = plan.get("allowedPaths")
+    return (
+        plan.get("action") in {"new_branch", "branch_eol"}
+        and plan.get("editsRequired") is True
+        and isinstance(allowed, dict)
+        and not any(allowed.values())
+    )
+
+
+def recorded_action_keys(directory: pathlib.Path) -> set[str]:
+    """Return the action key of every durable event record in `directory`, failing closed."""
+    require(directory.is_dir(), f"events directory is missing: {directory}")
+    keys = set()
+    for path in sorted(directory.glob("*.json")):
+        record = load_json(path)
+        key = record.get("actionKey") if isinstance(record, dict) else None
+        require(
+            isinstance(key, str) and bool(ACTION_KEY_RE.fullmatch(key)),
+            f"event record carries no valid action key: {path.name}",
+        )
+        keys.add(key)
+    return keys
+
+
+def validate_lifecycle_on_base(
+    repo: pathlib.Path,
+    plan: dict[str, Any],
+    recorded_keys: set[str] | None,
+) -> str:
+    """Require a resumed lifecycle edit to be fully present in `repo`, and return its branch.
+
+    `repo` is a clean tree of the plan's base. The deterministic edit binds the policy
+    it writes to its own action key, so an accepted policy carrying the plan's key is
+    that edit's output. A `new_branch` must then maintain the branch and carry its
+    module list, which the edit never overwrites once present, so a list corrected by
+    reviewed pull request still counts. A `branch_eol` must no longer maintain the
+    branch. The policy's evidence digests and acceptance time belong to the capture
+    that first admitted the edit and are only validated for shape here.
+
+    No event record may exist for the key: an incomplete one resumes through its own
+    next transition instead, and a complete one means the action already finished.
+    `recorded_keys` is None when the records could not be read, which rejects.
+    """
+    key = str(plan.get("actionKey", ""))
+    match = LIFECYCLE_ACTION_KEY_RE.fullmatch(key)
+    require(
+        bool(match) and key.startswith(f"{plan.get('action')}:"),
+        f"lifecycle action key is invalid: {key}",
+    )
+    branch = match.group(1) or match.group(2)
+    maintained = validate_support_policy(repo)["maintainedBranches"]
+    policy = load_json(repo / "support-policy.json")
+    require(policy.get("actionKey") == key, f"the accepted support policy was not written by {key}")
+    if plan.get("action") == "new_branch":
+        require(branch in maintained, f"the accepted support policy does not maintain PHP {branch}")
+        modules = repo / f"expected-modules/{branch}.txt"
+        require(
+            modules.is_file() and not modules.is_symlink(),
+            f"the module list of PHP {branch} is missing",
+        )
+    else:
+        require(branch not in maintained, f"the accepted support policy still maintains PHP {branch}")
+    require(recorded_keys is not None, f"the event records needed to resume {key} were not supplied")
+    require(key not in recorded_keys, f"an event record for {key} already exists")
+    return branch
 
 
 PLAN_FIELDS = frozenset(
@@ -493,6 +583,8 @@ def validate_plan(
     policy_digest: str | None = None,
     completed_actions: set[str] | None = None,
     pending_rebuild: str | None = None,
+    repo: pathlib.Path | None = None,
+    recorded_keys: set[str] | None = None,
 ) -> dict[str, Any]:
     """Admit one classified plan, or reject it.
 
@@ -502,13 +594,31 @@ def validate_plan(
     against, and what it asks for. A later gate reads values the earlier one proved,
     so none of them is safe to reorder. A `new_patch` must finally extend a branch that
     already shipped, which needs the completed records the watcher supplied.
+
+    A lifecycle resume (`is_lifecycle_resume`) is also checked against `repo`, the
+    checked-out base, and `recorded_keys`, the action keys of its event records: the
+    policy there must be the one the plan was classified against and already hold the
+    lifecycle edit, no record may exist for the key, and a resumed new branch must not
+    have shipped. Without both inputs a resume is rejected.
     """
     action_key = _validate_plan_shape(plan, manifest_path, completed_actions, pending_rebuild)
-    _validate_plan_preconditions(plan, repo_heads, policy_digest)
+    declared = _validate_plan_preconditions(plan, repo_heads, policy_digest)
     _validate_plan_actions(plan, manifest_path)
     validate_patch_extends_shipped_branch(
         plan.get("action", ""), plan.get("releaseIntent"), manifest_path, completed_actions or set()
     )
+    if is_lifecycle_resume(plan):
+        require(repo is not None, "a lifecycle resume is admitted only against the checked-out base")
+        require(
+            sha256_file(repo / "support-policy.json") == declared.get("supportPolicyDigest"),
+            "the checked-out support policy is not the one the plan was classified against",
+        )
+        branch = validate_lifecycle_on_base(repo, plan, recorded_keys)
+        require(
+            plan.get("action") != "new_branch"
+            or not branch_has_shipped(manifest_path, branch, completed_actions or set()),
+            f"PHP {branch} already shipped, so its new_branch lifecycle cannot resume",
+        )
     return {
         "admitted": True,
         "admittedAt": utc_now(),
@@ -574,11 +684,19 @@ def seal_patch(
     to the plan's own evidence digests and action key. The sealed patch and its file
     digests are what clean validation applies and what the exact-SHA merge gate
     compares, so nothing written after sealing can reach main.
+
+    The one legal empty patch is a lifecycle resume whose edit is verifiably already
+    on the base: the manifest then says `alreadyApplied` and seals no file, and the
+    base itself is what gets validated, built, and recorded.
     """
     require(bool(COMMIT_SHA_RE.fullmatch(base or "")), "base is not an exact commit SHA")
     require(git(repo, "rev-parse", f"{base}^{{commit}}").stdout.strip() == base, "base is not an exact commit")
     paths = changed_paths(repo, base)
-    require(bool(paths), "implementation produced no patch")
+    already_applied = not paths and is_lifecycle_resume(plan)
+    if already_applied:
+        validate_lifecycle_on_base(repo, plan, recorded_action_keys(repo / "autorelease-events"))
+    else:
+        require(bool(paths), "implementation produced no patch")
     admitted = [
         item
         for patterns in plan.get("allowedPaths", {}).values()
@@ -662,6 +780,7 @@ def seal_patch(
         "planDigest": sha256_bytes(canonical_json(plan)),
         "patchDigest": sha256_file(patch_path),
         "files": files,
+        "alreadyApplied": already_applied,
         "sealedAt": utc_now(),
     }
     write_json(output_dir / "patch-manifest.json", manifest)
@@ -683,6 +802,10 @@ def verify_merge(
     base whose diff is exactly the sealed file set, byte for byte and mode for mode.
     Every check in `REQUIRED_PLAN_CHECKS` must be reported as successful, the
     recorded preconditions must still hold, and any readiness record must be ready.
+
+    An `alreadyApplied` manifest seals no file, so there is nothing to merge: the
+    validated head must be the sealed base itself and still be main, which the
+    unchanged preconditions prove.
     """
     require(bool(COMMIT_SHA_RE.fullmatch(expected_head or "")), "expected head is not an exact commit SHA")
     actual_head = git(repo, "rev-parse", "HEAD").stdout.strip()
@@ -696,6 +819,28 @@ def verify_merge(
     require(preconditions == current, "merge preconditions changed")
     base_sha = manifest.get("baseSha")
     require(bool(COMMIT_SHA_RE.fullmatch(base_sha or "")), "sealed manifest has no exact base SHA")
+    file_records = manifest.get("files", [])
+    require(isinstance(file_records, list), "sealed manifest files are invalid")
+    if manifest.get("alreadyApplied") is True:
+        require(not file_records, "an already-applied manifest cannot seal file changes")
+        require(expected_head == base_sha, "an already-applied lifecycle must validate its sealed base itself")
+        require(current.get("phpBinHead") == expected_head, "main is not the validated commit")
+    else:
+        require(bool(file_records), "a sealed manifest without files must be an already-applied lifecycle")
+        _verify_sealed_commit(repo, expected_head, base_sha, file_records)
+    for record in readiness or []:
+        require(record.get("ready") is True, "cross-repository readiness is missing")
+        require(bool(record.get("commit")), "readiness record has no exact commit")
+    return {"admitted": True, "headSha": actual_head, "verifiedAt": utc_now()}
+
+
+def _verify_sealed_commit(
+    repo: pathlib.Path,
+    expected_head: str,
+    base_sha: str,
+    file_records: list[Any],
+) -> None:
+    """Require `expected_head` to be one commit on `base_sha` changing exactly the sealed files."""
     require(
         git(repo, "rev-list", "--parents", "-n", "1", expected_head).stdout.split()
         == [expected_head, base_sha],
@@ -712,8 +857,6 @@ def verify_merge(
             "--",
         ).stdout.splitlines()
     )
-    file_records = manifest.get("files", [])
-    require(isinstance(file_records, list), "sealed manifest files are invalid")
     manifest_paths = {item.get("path") for item in file_records if isinstance(item, dict)}
     require(len(manifest_paths) == len(file_records) and None not in manifest_paths, "sealed manifest paths are invalid")
     require(actual_paths == manifest_paths, "final diff does not equal the sealed manifest")
@@ -729,7 +872,3 @@ def verify_merge(
                 oct(candidate.stat().st_mode & 0o777) == file_record.get("mode"),
                 f"validated file mode changed: {path}",
             )
-    for record in readiness or []:
-        require(record.get("ready") is True, "cross-repository readiness is missing")
-        require(bool(record.get("commit")), "readiness record has no exact commit")
-    return {"admitted": True, "headSha": actual_head, "verifiedAt": utc_now()}

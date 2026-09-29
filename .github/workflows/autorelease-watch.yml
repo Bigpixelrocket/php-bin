@@ -95,15 +95,18 @@ jobs:
             --mise-php-head "$(jq -r .misePhpHead autorelease-run/preconditions.json)" \
             --policy-digest "$(./autorelease/control.py digest support-policy.json)" \
             --completed-actions autorelease-run/completed-actions.json \
+            --events autorelease-events \
             --output autorelease-run/admission.json
       - name: Expose admitted plan
         id: plan
         if: steps.decision.outputs.classify == 'true'
         run: |
-          echo "action_key=$(jq -r .actionKey autorelease-run/autorelease-plan.json)" >> "$GITHUB_OUTPUT"
-          echo "edits_required=$(jq -r .editsRequired autorelease-run/autorelease-plan.json)" >> "$GITHUB_OUTPUT"
-          echo "base_sha=$(jq -r .preconditions.phpBinHead autorelease-run/autorelease-plan.json)" >> "$GITHUB_OUTPUT"
-          echo "action=$(jq -r .action autorelease-run/autorelease-plan.json)" >> "$GITHUB_OUTPUT"
+          {
+            echo "action_key=$(jq -r .actionKey autorelease-run/autorelease-plan.json)"
+            echo "edits_required=$(jq -r .editsRequired autorelease-run/autorelease-plan.json)"
+            echo "base_sha=$(jq -r .preconditions.phpBinHead autorelease-run/autorelease-plan.json)"
+            echo "action=$(jq -r .action autorelease-run/autorelease-plan.json)"
+          } >> "$GITHUB_OUTPUT"
       - name: Retain evidence and admitted plan
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

@@ -50,8 +50,11 @@ from autorelease._admission import (  # noqa: E402
     _validate_support_policy_document,
     changed_paths,
     git,
+    is_lifecycle_resume,
     recipe_identity,
+    recorded_action_keys,
     seal_patch,
+    validate_lifecycle_on_base,
     validate_plan,
     validate_recipe_rebuild_evidence,
     validate_release_is_newest_patch,
@@ -394,6 +397,7 @@ def main(argv: list[str] | None = None) -> int:
                 load_json(args.preconditions),
                 load_event_records(args.events),
                 validate_support_policy(ROOT)["maintainedBranches"],
+                load_json(ROOT / "support-policy.json")["actionKey"],
             )
             write_json(args.output, plan)
             print(json.dumps({"action": plan["action"], "actionKey": plan["actionKey"]}))

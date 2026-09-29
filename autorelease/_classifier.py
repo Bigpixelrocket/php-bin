@@ -11,11 +11,16 @@ evidence digest computed from the bytes it cites:
    that is only waiting for mise-php readiness lets a due patch go first.
 3. A `new_patch` per maintained branch, oldest branch first, for the newest stable
    version that branch's own feed names when it is neither published nor superseded.
-   A maintained branch that never shipped a release needs a human instead: its first
-   release belongs to `new_branch`, behind the cross-repository readiness gate.
-4. Lifecycle evidence on the supported-versions page: a `new_branch`, then a
-   `branch_eol`. Patches never read that page, so an unreadable page blocks only a run
-   with no patch due.
+   A maintained branch that never shipped a release is never a patch: its first
+   release belongs to `new_branch`, behind the cross-repository readiness gate. When
+   the accepted policy was written by that branch's `new_branch` edit and no record
+   exists, the edit merged in a run that stopped before recording readiness, so the
+   lifecycle resumes; any other such branch needs a human.
+4. Lifecycle evidence on the supported-versions page: first a retirement whose edit
+   already merged without a record resumes, then a `new_branch`, then a `branch_eol`.
+   No fresh edit starts while a merged `new_branch` edit still waits to resume.
+   Patches never read that page, so an unreadable page blocks only a run with no patch
+   due.
 5. The one `recipe_rebuild` the watch decision selected.
 6. `no_change`, keyed on the manifest's embedded `manifestDigest`.
 
@@ -264,6 +269,7 @@ class _Classifier:
         preconditions: dict[str, Any],
         events: Iterable[dict[str, Any]],
         maintained_branches: list[str],
+        accepted_policy_key: str | None,
     ):
         self.capture = _Capture(manifest_path)
         require(isinstance(preconditions, dict), "preconditions must be an object")
@@ -286,6 +292,11 @@ class _Classifier:
             "maintained branches are invalid",
         )
         self.maintained = sorted(set(maintained_branches), key=version_key)
+        require(
+            accepted_policy_key is None or isinstance(accepted_policy_key, str),
+            "accepted policy action key is invalid",
+        )
+        self.accepted_policy_key = accepted_policy_key
         self.completed = {key for key, event in self.events.items() if event.get("state") == "complete"}
 
     # Plan construction ---------------------------------------------------------------
@@ -606,6 +617,11 @@ class _Classifier:
                 "released, or an older supported branch is not maintained. The policy needs a "
                 "reviewed change.",
             )
+        resumed = self.resumed_retirement(rows)
+        if resumed is not None:
+            return resumed
+        if self.branch_resume_pending():
+            return None
         for branch in sorted((set(rows) - maintained), key=version_key):
             row = rows[branch]
             if row.state not in SUPPORTED_STATES:
@@ -657,6 +673,70 @@ class _Classifier:
             )
         return None
 
+    def lifecycle_resume(
+        self,
+        action: str,
+        action_key: str,
+        evidence: list[dict[str, Any]],
+        summary: str,
+        release_intent: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Return a plan that resumes a lifecycle edit already merged on main.
+
+        It requires the implementation run but allows no path, so that run can only
+        verify the edit is present, validate and (for a new branch) build main's exact
+        commit, and file the readiness record for it. Admission re-checks the edit and
+        the missing record against the checked-out base independently.
+        """
+        return self.plan(
+            action=action,
+            action_key=action_key,
+            evidence=evidence,
+            edits_required=True,
+            allowed_php_bin=[],
+            repositories=["php-bin", "mise-php"],
+            release_intent=release_intent,
+            risk="lifecycle",
+            summary=summary,
+        )
+
+    def resumed_retirement(self, rows: dict[str, SupportRow]) -> dict[str, Any] | None:
+        """Resume a retirement whose policy edit merged but whose record never landed.
+
+        Nothing else would notice it: the branch is no longer maintained, so no rule
+        reads it again. The branch's end-of-life row is cited while php.net still lists
+        it; once php.net drops the row, the capture that no longer lists it is. A branch
+        the page still calls supported is a contradiction for the rules below instead.
+        """
+        key = self.accepted_policy_key or ""
+        match = re.fullmatch(r"branch_eol:(\d+\.\d+):\d{4}-\d{2}-\d{2}", key)
+        if not match or match.group(1) in self.maintained or key in self.events:
+            return None
+        branch = match.group(1)
+        row = rows.get(branch)
+        if row is not None and row.state != "eol":
+            return None
+        if row is not None:
+            cited = self.capture.fragment(
+                "php_supported_versions",
+                row.fragment,
+                f"php.net lists PHP {branch} as end of life since {row.security_until.isoformat()}.",
+            )
+        else:
+            cited, _value = self.capture.pointer(
+                "evidence_manifest",
+                f"/captures/{self.capture.index['php_supported_versions']}/digest",
+                f"php.net no longer lists PHP {branch} among its branches.",
+            )
+        return self.lifecycle_resume(
+            "branch_eol",
+            key,
+            [cited],
+            f"PHP {branch} already left the maintained set on main, but no {key} record exists. "
+            "The retirement resumes without a new edit: main's exact commit is validated and "
+            "its readiness record filed.",
+        )
+
     def waiting_lifecycle_record(self) -> bool:
         """Tell whether the only incomplete record is lifecycle work waiting for mise-php.
 
@@ -688,11 +768,31 @@ class _Classifier:
         # stops as `needs_human` in `new_patch`, and that stop yields to the resume.
         return patch if patch is not None and patch["action"] == "new_patch" else resumed
 
-    def new_patch(self) -> dict[str, Any] | None:
-        published = self.published_versions()
-        shipped = {branch_of(version) for version in published} | {
+    def shipped_branches(self, published: set[str]) -> set[str]:
+        """Return every branch with a published release or a completed `new_branch` record."""
+        return {branch_of(version) for version in published} | {
             key.partition(":")[2] for key in self.completed if key.startswith("new_branch:")
         }
+
+    def branch_resume_pending(self) -> bool:
+        """Tell whether the accepted policy is an unrecorded `new_branch` edit still owed a resume.
+
+        `new_patch` resumes it, or skips it while a feed supersedes the branch's first
+        release. Until then no fresh lifecycle edit may start: that edit rewrites the
+        policy's action key, and with it the only sign the resume is owed. A record for
+        the key never reaches this rule, since `new_patch` stops on any unshipped branch
+        that has one.
+        """
+        match = re.fullmatch(r"new_branch:(\d+\.\d+)", self.accepted_policy_key or "")
+        return (
+            bool(match)
+            and match.group(1) in self.maintained
+            and match.group(1) not in self.shipped_branches(self.published_versions())
+        )
+
+    def new_patch(self) -> dict[str, Any] | None:
+        published = self.published_versions()
+        shipped = self.shipped_branches(published)
         for branch in self.maintained:
             version = self.branch_feed_version(branch)
             if version is None and not self.capture.has(branch_feed_capture_id(branch)):
@@ -709,14 +809,29 @@ class _Classifier:
                 # plain patch would skip the mise-php readiness gate.
                 proof = self.feed_proof(version)
                 require(proof is not None, f"branch feed version {version} is not provable")
+                key = f"new_branch:{branch}"
+                if self.accepted_policy_key == key and key not in self.events:
+                    # The accepted policy is this branch's own lifecycle edit, which
+                    # merged in a run that stopped before recording readiness.
+                    if self.superseded_by(version):
+                        continue
+                    return self.lifecycle_resume(
+                        "new_branch",
+                        key,
+                        [proof],
+                        f"PHP {branch} is already maintained on main, but no {key} record exists. "
+                        f"The lifecycle resumes without a new edit: main's exact commit is validated "
+                        f"and PHP {version} built at it before its readiness record is filed.",
+                        release_intent={"version": version, "sourceIdentifier": proof["captureId"]},
+                    )
                 return self.stop(
                     "needs_human",
-                    f"new_branch:{branch}",
+                    key,
                     [proof],
                     f"PHP {branch} is maintained and its feed names {version}, but no {branch} release "
-                    f"has shipped and no new_branch:{branch} record is in flight. Its first release "
-                    "must pass the cross-repository readiness gate, so an operator needs to restore "
-                    "the missing event record.",
+                    f"has shipped, no {key} record is in flight, and the accepted policy was not "
+                    f"written by {key}. Its first release must pass the cross-repository readiness "
+                    "gate, so an operator needs to restore the missing event record.",
                 )
             newest_published = max(
                 (item for item in published if branch_of(item) == branch), key=version_key, default=None
@@ -796,16 +911,19 @@ def classify_evidence(
     preconditions: dict[str, Any],
     events: Iterable[dict[str, Any]],
     maintained_branches: list[str],
+    accepted_policy_key: str | None = None,
 ) -> dict[str, Any]:
     """Classify one retained watcher capture into exactly one autorelease plan.
 
     `manifest_path` is `autorelease-run/evidence/evidence-manifest.json`; the watch
     decision is read from its fixed runtime location beside it, the same file a plan
     may cite as `watch_decision`. `events` are the durable records under
-    `autorelease-events/`, and `maintained_branches` the accepted policy's branches.
+    `autorelease-events/`, `maintained_branches` the accepted policy's branches, and
+    `accepted_policy_key` the action key that policy was written by. Without it no
+    merged lifecycle edit is resumed.
     The same inputs always produce the same plan bytes. A malformed input that the
     watcher itself produced (manifest, decision, preconditions, records) raises
     `ControlError` and fails the job; a malformed upstream body becomes a `blocked`
     plan instead.
     """
-    return _Classifier(manifest_path, preconditions, events, maintained_branches).classify()
+    return _Classifier(manifest_path, preconditions, events, maintained_branches, accepted_policy_key).classify()
