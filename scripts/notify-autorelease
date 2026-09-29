@@ -39,6 +39,20 @@ FINGERPRINT_RE = re.compile(
 )
 
 
+# The repository is public, so anyone can open an issue or comment carrying a
+# marker. Only what the workflow itself wrote identifies an event issue; anything
+# else must neither capture nor silence the owner notification.
+
+
+def written_by_workflow(item: dict) -> bool:
+    """Whether a `gh issue list` entry or a REST comment was written by GitHub Actions."""
+    author = item.get("author")
+    if isinstance(author, dict):
+        return author.get("login") == "app/github-actions" and author.get("is_bot") is True
+    user = item.get("user") or {}
+    return user.get("login") == "github-actions[bot]" and user.get("type") == "Bot"
+
+
 def find_issue(repo: str, action_key: str) -> dict | None:
     matches: dict[int, dict] = {}
     for prefix in MARKER_PREFIXES:
@@ -54,13 +68,13 @@ def find_issue(repo: str, action_key: str) -> dict | None:
                 "--search",
                 f'"{marker}" in:body',
                 "--json",
-                "number,body,state,url",
+                "number,body,state,url,author",
                 "--limit",
                 "100",
             )
         )
         for issue in issues:
-            if marker in issue.get("body", ""):
+            if marker in issue.get("body", "") and written_by_workflow(issue):
                 matches[issue["number"]] = issue
     if len(matches) > 1:
         raise ControlError("multiple issues exist for one action key")
@@ -71,11 +85,18 @@ def discover_github_prior(repo: str, action_key: str) -> dict | None:
     issue = find_issue(repo, action_key)
     if issue is None:
         return None
-    detail = json.loads(
-        gh("issue", "view", str(issue["number"]), "--repo", repo, "--json", "body,comments")
+    # REST comments name the author unambiguously (`github-actions[bot]`, type Bot),
+    # where `gh issue view` reports a bare `github-actions` login.
+    pages = json.loads(
+        gh("api", f"repos/{repo}/issues/{issue['number']}/comments", "--paginate", "--slurp")
     )
-    bodies = [detail.get("body", "")]
-    bodies.extend(comment.get("body", "") for comment in detail.get("comments", []))
+    bodies = [issue.get("body", "")]
+    bodies.extend(
+        comment.get("body", "")
+        for page in pages
+        for comment in page
+        if written_by_workflow(comment)
+    )
     fingerprints = [
         match.group(1) for body in bodies for match in FINGERPRINT_RE.finditer(body)
     ]

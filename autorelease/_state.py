@@ -14,6 +14,7 @@ from typing import Any, Iterable, Mapping
 
 from ._validation import (
     ACTION_KEY_RE,
+    COMMIT_SHA_RE,
     SHA256_RE,
     STABLE_VERSION_RE,
     ControlError,
@@ -68,9 +69,82 @@ def validate_completed_event_record(record: dict[str, Any]) -> None:
     """Validate a durable event as a complete, contiguous legal transition history."""
 
     require(isinstance(record, dict), "autorelease event must be an object")
-    require(record.get("schemaVersion") == 1, "autorelease event version is invalid")
-    require(bool(ACTION_KEY_RE.fullmatch(record.get("actionKey", ""))), "autorelease event action key is invalid")
     require(record.get("state") == "complete", "autorelease event is not complete")
+    _validate_event_history(record)
+
+
+# The exact field set the implementation run writes for a lifecycle readiness record.
+READINESS_RECORD_FIELDS = {
+    "schemaVersion",
+    "actionKey",
+    "classification",
+    "state",
+    "history",
+    "phpBinCommit",
+    "planDigest",
+    "supportPolicyDigest",
+    "policyInvariantsDigest",
+    "evidenceManifestDigest",
+    "evidenceDigests",
+}
+
+
+def validate_readiness_event_record(record: dict[str, Any]) -> str:
+    """Validate an implementation run's `php_bin_ready` record and return its merged commit.
+
+    The implementation run writes exactly one transition, `detected` to
+    `php_bin_ready`, whose only evidence is the validated merge of the admitted
+    lifecycle patch. That merge commit is what the record vouches for, so the trusted
+    automation exemption binds it to the pull request's base: the record can only be
+    accepted directly on top of the commit it names.
+    """
+    require(isinstance(record, dict), "autorelease event must be an object")
+    require(set(record) == READINESS_RECORD_FIELDS, "readiness record fields changed")
+    require(record.get("state") == "php_bin_ready", "readiness record is not at php_bin_ready")
+    _validate_event_history(record)
+    classification = record.get("classification")
+    require(classification in {"new_branch", "branch_eol"}, "readiness record is not a lifecycle action")
+    require(
+        record["actionKey"].split(":", 1)[0] == classification,
+        "readiness record action key does not match its classification",
+    )
+    history = record["history"]
+    require(
+        len(history) == 1 and history[0]["from"] == "detected" and history[0]["to"] == "php_bin_ready",
+        "readiness record history is not a single detected to php_bin_ready transition",
+    )
+    evidence = history[0]["evidence"]
+    require(
+        len(evidence) == 1
+        and set(evidence[0]) == {"kind", "commit", "planDigest"}
+        and evidence[0]["kind"] == "validated_merge",
+        "readiness record evidence is not one validated merge",
+    )
+    commit = evidence[0]["commit"]
+    require(isinstance(commit, str) and bool(COMMIT_SHA_RE.fullmatch(commit)), "readiness merge commit is invalid")
+    require(record.get("phpBinCommit") == commit, "readiness record names a different php-bin commit")
+    require(evidence[0]["planDigest"] == record.get("planDigest"), "readiness record plan digest differs")
+    for field in ("planDigest", "supportPolicyDigest", "policyInvariantsDigest", "evidenceManifestDigest"):
+        value = record.get(field)
+        require(isinstance(value, str) and bool(SHA256_RE.fullmatch(value)), f"readiness record {field} is invalid")
+    digests = record.get("evidenceDigests")
+    require(
+        isinstance(digests, list)
+        and bool(digests)
+        and all(isinstance(item, str) and SHA256_RE.fullmatch(item) for item in digests),
+        "readiness record evidence digests are invalid",
+    )
+    return commit
+
+
+def _validate_event_history(record: dict[str, Any]) -> None:
+    """Require a versioned event whose history is a contiguous chain of legal transitions."""
+    require(record.get("schemaVersion") == 1, "autorelease event version is invalid")
+    action_key = record.get("actionKey")
+    require(
+        isinstance(action_key, str) and bool(ACTION_KEY_RE.fullmatch(action_key)),
+        "autorelease event action key is invalid",
+    )
     history = record.get("history")
     require(isinstance(history, list) and bool(history), "autorelease event has no transition history")
     current = history[0].get("from") if isinstance(history[0], dict) else None

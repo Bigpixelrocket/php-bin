@@ -1,3 +1,4 @@
+import base64
 import contextlib
 import hashlib
 import http.client
@@ -60,6 +61,7 @@ from autorelease.control import (
     validate_archive,
     validate_completed_event_record,
     validate_evidence_attestation_predicate,
+    validate_readiness_event_record,
     validate_evidence_state_record,
     validate_recaptured_evidence,
     validate_release_is_newest_patch,
@@ -1718,6 +1720,7 @@ class AutoreleaseControlTests(unittest.TestCase):
                     "url": f"https://example.invalid/issues/{number}",
                     "state": "CLOSED",
                     "body": f"<!-- {prefix}-action-key:new_patch:8.5.9 -->",
+                    "author": {"login": "app/github-actions", "is_bot": True},
                 }
                 gh = mock.Mock(
                     side_effect=lambda *arguments, issue=issue, prefix=prefix: json.dumps([issue])
@@ -1727,6 +1730,51 @@ class AutoreleaseControlTests(unittest.TestCase):
                 with mock.patch.dict(find_issue.__globals__, {"gh": gh}):
                     found = find_issue("Bigpixelrocket/php-bin", "new_patch:8.5.9")
                 self.assertEqual(issue, found)
+
+    def test_notification_ignores_markers_written_by_anyone_but_the_workflow(self):
+        namespace = runpy.run_path(
+            str(pathlib.Path(__file__).resolve().parents[1] / "scripts/notify-autorelease")
+        )
+        find_issue = namespace["find_issue"]
+        discover = namespace["discover_github_prior"]
+        marker = "<!-- autorelease-action-key:new_patch:8.5.9 -->"
+        bot_issue = {
+            "number": 47,
+            "url": "https://example.invalid/issues/47",
+            "state": "OPEN",
+            "body": f"{marker}\n<!-- autorelease-fingerprint:sha256:{'a' * 64} -->",
+            "author": {"login": "app/github-actions", "is_bot": True},
+        }
+        # A public repository lets anyone copy the marker, including a user whose
+        # login merely resembles the workflow's.
+        impostors = [
+            {**bot_issue, "number": 48, "author": {"login": "someone", "is_bot": False}},
+            {**bot_issue, "number": 49, "author": {"login": "github-actions", "is_bot": False}},
+            {**bot_issue, "number": 50, "author": {"login": "app/github-actions", "is_bot": False}},
+        ]
+        forged = f"<!-- autorelease-fingerprint:sha256:{'b' * 64} -->"
+        comments = [[
+            {"body": forged, "user": {"login": "someone", "type": "User"}},
+            {"body": forged, "user": {"login": "github-actions", "type": "User"}},
+        ]]
+
+        def gh(*arguments):
+            if arguments[0] == "api":
+                return json.dumps(comments)
+            return json.dumps([*impostors, bot_issue]) if "autorelease-action-key" in " ".join(arguments) else "[]"
+
+        with mock.patch.dict(find_issue.__globals__, {"gh": gh}):
+            self.assertEqual(47, find_issue("Bigpixelrocket/php-bin", "new_patch:8.5.9")["number"])
+            prior = discover("Bigpixelrocket/php-bin", "new_patch:8.5.9")
+        self.assertEqual(f"sha256:{'a' * 64}", prior["fingerprint"])
+
+        comments[0].append({"body": forged, "user": {"login": "github-actions[bot]", "type": "Bot"}})
+        with mock.patch.dict(find_issue.__globals__, {"gh": gh}):
+            prior = discover("Bigpixelrocket/php-bin", "new_patch:8.5.9")
+        self.assertEqual(f"sha256:{'b' * 64}", prior["fingerprint"])
+
+        with mock.patch.dict(find_issue.__globals__, {"gh": lambda *arguments: json.dumps(impostors)}):
+            self.assertIsNone(find_issue("Bigpixelrocket/php-bin", "new_patch:8.5.9"))
 
     def test_notification_transition_reuses_retained_issue_identity(self):
         issue = {"number": 10, "url": "https://example.invalid/issues/10", "state": "OPEN"}
@@ -2777,6 +2825,205 @@ class AutoreleaseControlTests(unittest.TestCase):
         owner_pass = protected.index("if author.lower() == reviewer:")
         self.assertLess(protected.index("No protected control path changed."), owner_pass)
         self.assertLess(owner_pass, protected.index('re.fullmatch(r"autorelease/evidence-'))
+
+    def run_protected_controls(self, pr, responses):
+        """Run the workflow's own evaluator against a fake `gh`, returning (exit code, output)."""
+        root = pathlib.Path(__file__).resolve().parents[1]
+        from autorelease.verify import load_workflow
+
+        workflow = load_workflow(root / ".github/workflows/protected-controls.yml")
+        step = next(
+            step for step in workflow["jobs"]["protected-controls"]["steps"]
+            if step.get("name") == "Require exact-head owner approval for protected paths"
+        )
+        script = step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        with tempfile.TemporaryDirectory() as temp:
+            work = pathlib.Path(temp)
+            (work / "responses.json").write_text(json.dumps(responses))
+            fake = work / "gh"
+            fake.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, sys\n"
+                "args = sys.argv[1:]\n"
+                "responses = json.loads(open(os.environ['FAKE_GH_RESPONSES']).read())\n"
+                "path = args[1]\n"
+                "if path not in responses:\n"
+                "    sys.exit(f'unexpected gh api {path}')\n"
+                "body = responses[path]\n"
+                "print(json.dumps([body] if '--slurp' in args else body))\n"
+            )
+            fake.chmod(0o755)
+            env = {
+                **os.environ,
+                "PATH": f"{work}:{os.environ['PATH']}",
+                "FAKE_GH_RESPONSES": str(work / "responses.json"),
+                "PYTHONPATH": str(root),
+                "REPOSITORY": "Bigpixelrocket/php-bin",
+                "PR_NUMBER": "7",
+                "PROTECTED_REVIEWER": "loadinglucian",
+                **pr,
+            }
+            result = subprocess.run(
+                ["python3", "-c", script], cwd=root, env=env, capture_output=True, text=True
+            )
+        return result.returncode, result.stdout + result.stderr
+
+    def test_protected_controls_admit_exact_implementation_readiness_records(self):
+        base, head, start = "b" * 40, "c" * 40, "a" * 40
+        record = transition_event(
+            {
+                "schemaVersion": 1,
+                "actionKey": "new_branch:8.6",
+                "classification": "new_branch",
+                "state": "detected",
+                "history": [],
+                "phpBinCommit": base,
+                "planDigest": "sha256:" + "1" * 64,
+                "supportPolicyDigest": sha256_file(ROOT / "support-policy.json"),
+                "policyInvariantsDigest": sha256_file(ROOT / "autorelease/policy-invariants.json"),
+                "evidenceManifestDigest": "sha256:" + "4" * 64,
+                "evidenceDigests": ["sha256:" + "5" * 64],
+            },
+            "php_bin_ready",
+            [{"kind": "validated_merge", "commit": base, "planDigest": "sha256:" + "1" * 64}],
+        )
+        self.assertEqual(base, validate_readiness_event_record(record))
+        path = "autorelease-events/new_branch-8.6.json"
+
+        def scenario(record=record, files=(path,), author="github-actions[bot]", ref="autorelease/readiness-99",
+                     run_path=".github/workflows/autorelease-implement.yml", run_sha=start,
+                     status="in_progress", compare=("ahead", 0), head_repo="Bigpixelrocket/php-bin",
+                     run_branch="main", run_event="workflow_dispatch", parents=(base,)):
+            encoded = base64.b64encode(json.dumps(record).encode()).decode()
+            responses = {
+                "repos/Bigpixelrocket/php-bin/pulls/7/files": [{"filename": name} for name in files],
+                f"repos/Bigpixelrocket/php-bin/commits/{head}": {"parents": [{"sha": sha} for sha in parents]},
+                "repos/Bigpixelrocket/php-bin/actions/runs/99": {
+                    "id": 99, "path": run_path, "event": run_event,
+                    "head_branch": run_branch, "head_sha": run_sha, "status": status,
+                },
+                f"repos/Bigpixelrocket/php-bin/contents/{path}?ref={head}": {"content": encoded},
+                "repos/Bigpixelrocket/php-bin/pulls/7/reviews": [],
+            }
+            if compare is not None:
+                responses[f"repos/Bigpixelrocket/php-bin/compare/{run_sha}...{base}"] = {
+                    "status": compare[0], "behind_by": compare[1],
+                }
+            pr = {"HEAD_SHA": head, "BASE_SHA": base, "HEAD_REF": ref,
+                  "HEAD_REPOSITORY": head_repo, "PR_AUTHOR": author}
+            return self.run_protected_controls(pr, responses)
+
+        code, output = scenario()
+        self.assertEqual(0, code, output)
+        self.assertIn("Protected readiness record approved from trusted run 99.", output)
+        # The run may have started on main itself, or on any ancestor of it.
+        self.assertEqual(0, scenario(run_sha=base)[0])
+
+        rejected = {
+            "a diverged start commit": {"compare": ("diverged", 1)},
+            "an uncomparable start commit": {"compare": None},
+            "a fork": {"head_repo": "someone/php-bin"},
+            "a run on another branch": {"run_branch": "feature"},
+            "a run started by another event": {"run_event": "push"},
+            "a record not directly on base": {"parents": ("d" * 40,)},
+            "a merge commit": {"parents": (base, "d" * 40)},
+            "a support policy the base does not hold": {"record": {**record, "supportPolicyDigest": "sha256:" + "2" * 64}},
+            "invariants the base does not hold": {"record": {**record, "policyInvariantsDigest": "sha256:" + "3" * 64}},
+            "a finished run": {"status": "completed"},
+            "another workflow": {"run_path": ".github/workflows/autorelease-watch.yml"},
+            "a human author": {"author": "someone"},
+            "another branch prefix": {"ref": "autorelease/evidence-99"},
+            "a passenger file": {"files": (path, "README.md")},
+            "a record for another commit": {"record": {**record, "phpBinCommit": "d" * 40, "history": [
+                {**record["history"][0], "evidence": [{**record["history"][0]["evidence"][0], "commit": "d" * 40}]}
+            ]}},
+            "a record naming two commits": {"record": {**record, "phpBinCommit": "d" * 40}},
+            "a record not at php_bin_ready": {"record": {**record, "state": "detected"}},
+            "a patch action": {"record": {**record, "actionKey": "new_patch:8.6.0", "classification": "new_patch"}},
+            "an extra field": {"record": {**record, "note": "x"}},
+        }
+        for label, overrides in rejected.items():
+            with self.subTest(label):
+                code, output = scenario(**overrides)
+                self.assertNotEqual(0, code, output)
+                self.assertNotIn("approved from trusted run", output)
+        code, output = scenario(files=(path.replace("8.6", "8.7"),))
+        self.assertNotEqual(0, code, output)
+        code, output = scenario(compare=None)
+        self.assertIn("could not be compared with", output)
+
+    def test_readiness_record_validator_rejects_every_deviation(self):
+        commit = "b" * 40
+        record = transition_event(
+            {
+                "schemaVersion": 1, "actionKey": "branch_eol:8.2:2026-12-31", "classification": "branch_eol",
+                "state": "detected", "history": [], "phpBinCommit": commit,
+                "planDigest": "sha256:" + "1" * 64, "supportPolicyDigest": "sha256:" + "2" * 64,
+                "policyInvariantsDigest": "sha256:" + "3" * 64, "evidenceManifestDigest": "sha256:" + "4" * 64,
+                "evidenceDigests": ["sha256:" + "5" * 64],
+            },
+            "php_bin_ready",
+            [{"kind": "validated_merge", "commit": commit, "planDigest": "sha256:" + "1" * 64}],
+        )
+        self.assertEqual(commit, validate_readiness_event_record(record))
+        merge = record["history"][0]["evidence"][0]
+
+        def with_evidence(evidence):
+            return {**record, "history": [{**record["history"][0], "evidence": evidence}]}
+
+        invalid = {
+            "a non-string action key": {**record, "actionKey": 7},
+            "two evidence items": with_evidence([merge, merge]),
+            "another evidence kind": with_evidence([{**merge, "kind": "published_release"}]),
+            "an extra evidence field": with_evidence([{**merge, "note": "x"}]),
+            "a different plan digest": with_evidence([{**merge, "planDigest": "sha256:" + "9" * 64}]),
+            "a short commit": {**with_evidence([{**merge, "commit": "b" * 7}]), "phpBinCommit": "b" * 7},
+            "no evidence digests": {**record, "evidenceDigests": []},
+            "a malformed digest": {**record, "supportPolicyDigest": "2" * 64},
+            "a classification that disagrees": {**record, "classification": "new_branch"},
+            "a second transition": {**record, "history": [*record["history"], record["history"][0]]},
+            "a legal but longer history": transition_event(
+                transition_event({**record, "state": "detected", "history": []}, "blocked", [merge]),
+                "php_bin_ready",
+                [merge],
+            ),
+        }
+        for label, candidate in invalid.items():
+            with self.subTest(label):
+                with self.assertRaises(ControlError):
+                    validate_readiness_event_record(candidate)
+
+    def test_protected_controls_admit_a_publish_record_after_main_moved(self):
+        base, head, start = "b" * 40, "c" * 40, "a" * 40
+        record = {"schemaVersion": 1, "actionKey": "new_patch:8.5.9", "state": "detected"}
+        for target in ("php_bin_ready", "release_requested", "released", "public_install_verified", "complete"):
+            record = transition_event(record, target, [{"kind": "fixture", "value": target}])
+        path = "autorelease-events/new_patch-8.5.9.json"
+
+        def scenario(compare):
+            responses = {
+                "repos/Bigpixelrocket/php-bin/pulls/7/files": [{"filename": path}],
+                f"repos/Bigpixelrocket/php-bin/commits/{head}": {"parents": [{"sha": base}]},
+                "repos/Bigpixelrocket/php-bin/actions/runs/42": {
+                    "id": 42, "path": ".github/workflows/autorelease-publish.yml", "event": "workflow_dispatch",
+                    "head_branch": "main", "head_sha": start, "status": "in_progress",
+                },
+                f"repos/Bigpixelrocket/php-bin/contents/{path}?ref={head}": {
+                    "content": base64.b64encode(json.dumps(record).encode()).decode(),
+                },
+                f"repos/Bigpixelrocket/php-bin/compare/{start}...{base}": {"status": compare[0], "behind_by": compare[1]},
+                "repos/Bigpixelrocket/php-bin/pulls/7/reviews": [],
+            }
+            pr = {"HEAD_SHA": head, "BASE_SHA": base, "HEAD_REF": "autorelease/event-42",
+                  "HEAD_REPOSITORY": "Bigpixelrocket/php-bin", "PR_AUTHOR": "github-actions[bot]"}
+            return self.run_protected_controls(pr, responses)
+
+        code, output = scenario(("ahead", 0))
+        self.assertEqual(0, code, output)
+        self.assertIn("Protected completed event approved from trusted run 42.", output)
+        for compare in (("behind", 0), ("diverged", 2), ("ahead", 1)):
+            with self.subTest(compare=compare):
+                self.assertNotEqual(0, scenario(compare)[0])
 
     def test_recovered_event_records_use_the_trusted_watcher_branch_prefix(self):
         root = pathlib.Path(__file__).resolve().parents[1]
