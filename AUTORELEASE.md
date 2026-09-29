@@ -318,10 +318,12 @@ PRs satisfy branch protection without a reviewer, while every protected
 control still cannot. `Protected controls` admits each record PR only from
 `github-actions[bot]` in this repository, as one file directly on the base
 commit, from the exact workflow run named by its branch while that run is in
-progress on main: evidence from the watcher, completed events from publish or
-the watcher, and a lifecycle's `php_bin_ready` record from the implementation
-run, which must name the base commit as its validated merge. A new branch
-therefore publishes with no human approval. Publication waits only on machine facts — matching
+progress on main: evidence from the watcher, which must also have started at
+exactly the base commit and carry a matching attestation; completed events
+from publish or the watcher; and a lifecycle's `php_bin_ready` record from the
+implementation run, which must name the base commit as its validated merge and
+carry the policy digests of the base tree. A new branch therefore publishes
+with no human approval. Publication waits only on machine facts — matching
 `php_bin_ready` and `mise_ready` records at exact commits. The `mise_ready`
 record names the mise-php synchronization commit it validated, and the record
 itself merges on top of it, so the publish job requires the captured mise-php

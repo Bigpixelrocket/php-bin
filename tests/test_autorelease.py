@@ -2659,8 +2659,8 @@ class AutoreleaseControlTests(unittest.TestCase):
                 "history": [],
                 "phpBinCommit": base,
                 "planDigest": "sha256:" + "1" * 64,
-                "supportPolicyDigest": "sha256:" + "2" * 64,
-                "policyInvariantsDigest": "sha256:" + "3" * 64,
+                "supportPolicyDigest": sha256_file(ROOT / "support-policy.json"),
+                "policyInvariantsDigest": sha256_file(ROOT / "autorelease/policy-invariants.json"),
                 "evidenceManifestDigest": "sha256:" + "4" * 64,
                 "evidenceDigests": ["sha256:" + "5" * 64],
             },
@@ -2672,23 +2672,25 @@ class AutoreleaseControlTests(unittest.TestCase):
 
         def scenario(record=record, files=(path,), author="github-actions[bot]", ref="autorelease/readiness-99",
                      run_path=".github/workflows/autorelease-implement.yml", run_sha=start,
-                     status="in_progress", compare=("ahead", 0)):
+                     status="in_progress", compare=("ahead", 0), head_repo="Bigpixelrocket/php-bin",
+                     run_branch="main", run_event="workflow_dispatch", parents=(base,)):
             encoded = base64.b64encode(json.dumps(record).encode()).decode()
             responses = {
                 "repos/Bigpixelrocket/php-bin/pulls/7/files": [{"filename": name} for name in files],
-                f"repos/Bigpixelrocket/php-bin/commits/{head}": {"parents": [{"sha": base}]},
+                f"repos/Bigpixelrocket/php-bin/commits/{head}": {"parents": [{"sha": sha} for sha in parents]},
                 "repos/Bigpixelrocket/php-bin/actions/runs/99": {
-                    "id": 99, "path": run_path, "event": "workflow_dispatch",
-                    "head_branch": "main", "head_sha": run_sha, "status": status,
+                    "id": 99, "path": run_path, "event": run_event,
+                    "head_branch": run_branch, "head_sha": run_sha, "status": status,
                 },
                 f"repos/Bigpixelrocket/php-bin/contents/{path}?ref={head}": {"content": encoded},
-                f"repos/Bigpixelrocket/php-bin/compare/{run_sha}...{base}": {
-                    "status": compare[0], "behind_by": compare[1],
-                },
                 "repos/Bigpixelrocket/php-bin/pulls/7/reviews": [],
             }
+            if compare is not None:
+                responses[f"repos/Bigpixelrocket/php-bin/compare/{run_sha}...{base}"] = {
+                    "status": compare[0], "behind_by": compare[1],
+                }
             pr = {"HEAD_SHA": head, "BASE_SHA": base, "HEAD_REF": ref,
-                  "HEAD_REPOSITORY": "Bigpixelrocket/php-bin", "PR_AUTHOR": author}
+                  "HEAD_REPOSITORY": head_repo, "PR_AUTHOR": author}
             return self.run_protected_controls(pr, responses)
 
         code, output = scenario()
@@ -2699,6 +2701,14 @@ class AutoreleaseControlTests(unittest.TestCase):
 
         rejected = {
             "a diverged start commit": {"compare": ("diverged", 1)},
+            "an uncomparable start commit": {"compare": None},
+            "a fork": {"head_repo": "someone/php-bin"},
+            "a run on another branch": {"run_branch": "feature"},
+            "a run started by another event": {"run_event": "push"},
+            "a record not directly on base": {"parents": ("d" * 40,)},
+            "a merge commit": {"parents": (base, "d" * 40)},
+            "a support policy the base does not hold": {"record": {**record, "supportPolicyDigest": "sha256:" + "2" * 64}},
+            "invariants the base does not hold": {"record": {**record, "policyInvariantsDigest": "sha256:" + "3" * 64}},
             "a finished run": {"status": "completed"},
             "another workflow": {"run_path": ".github/workflows/autorelease-watch.yml"},
             "a human author": {"author": "someone"},
@@ -2719,6 +2729,42 @@ class AutoreleaseControlTests(unittest.TestCase):
                 self.assertNotIn("approved from trusted run", output)
         code, output = scenario(files=(path.replace("8.6", "8.7"),))
         self.assertNotEqual(0, code, output)
+
+    def test_readiness_record_validator_rejects_every_deviation(self):
+        commit = "b" * 40
+        record = transition_event(
+            {
+                "schemaVersion": 1, "actionKey": "branch_eol:8.2:2026-12-31", "classification": "branch_eol",
+                "state": "detected", "history": [], "phpBinCommit": commit,
+                "planDigest": "sha256:" + "1" * 64, "supportPolicyDigest": "sha256:" + "2" * 64,
+                "policyInvariantsDigest": "sha256:" + "3" * 64, "evidenceManifestDigest": "sha256:" + "4" * 64,
+                "evidenceDigests": ["sha256:" + "5" * 64],
+            },
+            "php_bin_ready",
+            [{"kind": "validated_merge", "commit": commit, "planDigest": "sha256:" + "1" * 64}],
+        )
+        self.assertEqual(commit, validate_readiness_event_record(record))
+        merge = record["history"][0]["evidence"][0]
+
+        def with_evidence(evidence):
+            return {**record, "history": [{**record["history"][0], "evidence": evidence}]}
+
+        invalid = {
+            "a non-string action key": {**record, "actionKey": 7},
+            "two evidence items": with_evidence([merge, merge]),
+            "another evidence kind": with_evidence([{**merge, "kind": "published_release"}]),
+            "an extra evidence field": with_evidence([{**merge, "note": "x"}]),
+            "a different plan digest": with_evidence([{**merge, "planDigest": "sha256:" + "9" * 64}]),
+            "a short commit": {**with_evidence([{**merge, "commit": "b" * 7}]), "phpBinCommit": "b" * 7},
+            "no evidence digests": {**record, "evidenceDigests": []},
+            "a malformed digest": {**record, "supportPolicyDigest": "2" * 64},
+            "a classification that disagrees": {**record, "classification": "new_branch"},
+            "a second transition": {**record, "history": [*record["history"], record["history"][0]]},
+        }
+        for label, candidate in invalid.items():
+            with self.subTest(label):
+                with self.assertRaises(ControlError):
+                    validate_readiness_event_record(candidate)
 
     def test_protected_controls_admit_a_publish_record_after_main_moved(self):
         base, head, start = "b" * 40, "c" * 40, "a" * 40

@@ -101,13 +101,13 @@ def validate_readiness_event_record(record: dict[str, Any]) -> str:
     require(isinstance(record, dict), "autorelease event must be an object")
     require(set(record) == READINESS_RECORD_FIELDS, "readiness record fields changed")
     require(record.get("state") == "php_bin_ready", "readiness record is not at php_bin_ready")
+    _validate_event_history(record)
     classification = record.get("classification")
     require(classification in {"new_branch", "branch_eol"}, "readiness record is not a lifecycle action")
     require(
-        record.get("actionKey", "").split(":", 1)[0] == classification,
+        record["actionKey"].split(":", 1)[0] == classification,
         "readiness record action key does not match its classification",
     )
-    _validate_event_history(record)
     history = record["history"]
     require(
         len(history) == 1 and history[0]["from"] == "detected" and history[0]["to"] == "php_bin_ready",
@@ -140,7 +140,11 @@ def validate_readiness_event_record(record: dict[str, Any]) -> str:
 def _validate_event_history(record: dict[str, Any]) -> None:
     """Require a versioned event whose history is a contiguous chain of legal transitions."""
     require(record.get("schemaVersion") == 1, "autorelease event version is invalid")
-    require(bool(ACTION_KEY_RE.fullmatch(record.get("actionKey", ""))), "autorelease event action key is invalid")
+    action_key = record.get("actionKey")
+    require(
+        isinstance(action_key, str) and bool(ACTION_KEY_RE.fullmatch(action_key)),
+        "autorelease event action key is invalid",
+    )
     history = record.get("history")
     require(isinstance(history, list) and bool(history), "autorelease event has no transition history")
     current = history[0].get("from") if isinstance(history[0], dict) else None

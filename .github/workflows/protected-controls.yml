@@ -80,6 +80,7 @@ jobs:
 
           from autorelease.control import (
               ControlError,
+              sha256_file,
               validate_completed_event_record,
               validate_readiness_event_record,
               validate_evidence_attestation_predicate,
@@ -148,7 +149,11 @@ jobs:
                   return False
               if run_sha == base:
                   return True
-              comparison = api_one(f"repos/{repo}/compare/{run_sha}...{base}")
+              try:
+                  comparison = api_one(f"repos/{repo}/compare/{run_sha}...{base}")
+              except subprocess.CalledProcessError:
+                  print(f"Run start commit {run_sha} could not be compared with {base}.", file=sys.stderr)
+                  return False
               return comparison.get("status") == "ahead" and comparison.get("behind_by") == 0
 
           # The trusted-automation exemptions below bind the whole diff, not just
@@ -319,9 +324,18 @@ jobs:
                   raise SystemExit(1) from error
               expected_filename = record["actionKey"].translate(str.maketrans({":": "-", "/": "-"})) + ".json"
               direct_parent = [parent.get("sha") for parent in commit.get("parents", [])] == [base]
+              # This step runs on a checkout of `base`, so the policy digests the
+              # record carries, the only fields publish and EOL completion act on,
+              # must describe exactly the tree the record sits on.
+              policy_bound = (
+                  record["supportPolicyDigest"] == sha256_file(pathlib.Path("support-policy.json"))
+                  and record["policyInvariantsDigest"]
+                  == sha256_file(pathlib.Path("autorelease/policy-invariants.json"))
+              )
               trusted_run = (
                   protected[0] == f"autorelease-events/{expected_filename}"
                   and merged_commit == base
+                  and policy_bound
                   and run.get("path") == ".github/workflows/autorelease-implement.yml"
                   and run.get("event") == "workflow_dispatch"
                   and run.get("head_branch") == "main"
