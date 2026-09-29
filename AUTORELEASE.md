@@ -66,12 +66,16 @@ stops at the first that applies:
    later patch the aggregate feed names. The plan cites exactly that branch
    feed value. A maintained branch with no shipped release is never a
    `new_patch`: its first release belongs to `new_branch`, which waits for
-   both readiness records, so it produces `needs_human` instead. Admission
-   rejects that patch independently. New patches never read the
+   both readiness records. When the accepted policy was written by that
+   branch's own `new_branch` edit and no record exists, the lifecycle
+   resumes (see [Unattended lifecycle](#unattended-lifecycle)); otherwise it
+   produces `needs_human`. Admission rejects that patch independently. New
+   patches never read the
    supported-versions page, so they go before lifecycle work and keep
    shipping while that page cannot be read.
 4. **Lifecycle.** The captured supported-versions page is parsed by a reviewed
-   reader that accepts exactly one table shape. A supported branch the policy
+   reader that accepts exactly one table shape. A retirement whose policy
+   edit already merged without a record resumes first. A supported branch the policy
    does not maintain is a `new_branch` once the aggregate release feed names
    its first stable release. A maintained branch whose row is marked end of
    life is a `branch_eol` keyed on its security support end date. php.net
@@ -330,6 +334,22 @@ new builds and publication for the branch and delists it from
 `mise ls-remote` and branch-shorthand resolution. It removes nothing: every
 release already published stays immutable, and an exact version such as
 `8.2.32` installs exactly as before, indefinitely.
+
+A lifecycle run can fail after its edit merged but before its `php_bin_ready`
+record lands, for example in the build, the merge, or the record PR. A rerun
+cannot help, because its admitted base is no longer main. The next watcher run
+resumes the action instead: when the accepted policy carries the action's own
+key (`new_branch:<branch>` with the branch maintained and its module list
+present, or `branch_eol:<branch>:<date>` with the branch removed) and no event
+record exists for it, the classifier emits the same lifecycle action with no
+allowed paths. Admission re-checks all of that against the checked-out base and
+rejects anything else, and a new branch must not have shipped. The
+implementation run then finds the edit already present, seals an explicit
+empty patch (`alreadyApplied`), validates and, for a new branch, builds main's
+exact commit, skips the lifecycle PR and merge, and files the readiness record
+for exactly that commit while main is still it. A failed validation or build
+reports to the owner issue for the action key, as on the first attempt, and the
+next watcher run retries.
 
 Unattended mutation is controlled by
 `.github/autorelease-operator.json`. Set `unattendedMutation` to `paused` in a
