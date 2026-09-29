@@ -67,10 +67,12 @@ printf 'dnl fixture\n' > "$FIXTURE_ROOT/lib/php/build/phpize.m4"
 # PHP headers that include library headers the kit must carry, the libraries'
 # installed headers, and lexbor's source tree, of which only the URL closure ships.
 mkdir -p "$FIXTURE_ROOT/include/php/ext/gmp" "$FIXTURE_ROOT/include/php/ext/sodium" \
-  "$FIXTURE_ROOT/include/php/ext/uri" "$FIXTURE_ROOT/include/sodium"
+  "$FIXTURE_ROOT/include/php/ext/uri" "$FIXTURE_ROOT/include/php/ext/simdjson/src" \
+  "$FIXTURE_ROOT/include/sodium"
 printf '#include <gmp.h>\n' > "$FIXTURE_ROOT/include/php/ext/gmp/php_gmp_int.h"
 printf '#include <sodium.h>\n' > "$FIXTURE_ROOT/include/php/ext/sodium/php_libsodium.h"
 printf '#include "lexbor/url/url.h"\n' > "$FIXTURE_ROOT/include/php/ext/uri/uri_parser_whatwg.h"
+printf '#include "simdjson.h"\n' > "$FIXTURE_ROOT/include/php/ext/simdjson/src/simdjson_bindings_defs.h"
 printf '#include <stddef.h>\n#define __GMP_CFLAGS "-I%s/include"\n' "$FIXTURE_ROOT" > "$FIXTURE_ROOT/include/gmp.h"
 printf '#include "sodium/core.h"\n' > "$FIXTURE_ROOT/include/sodium.h"
 printf '#include "export.h"\n' > "$FIXTURE_ROOT/include/sodium/core.h"
@@ -81,6 +83,9 @@ printf '#include "lexbor/core/base.h"\n#include <lexbor/url/base.h>\n' > "$FIXTU
 printf '#include "lexbor/core/base.h"\n' > "$FIXTURE_LEXBOR/url/base.h"
 printf '#include <string.h>\n' > "$FIXTURE_LEXBOR/core/base.h"
 printf '#include "lexbor/core/base.h"\n' > "$FIXTURE_LEXBOR/html/parser.h"
+FIXTURE_SIMDJSON="$FIXTURE_BUILD/source/php-src/ext/simdjson/src"
+mkdir -p "$FIXTURE_SIMDJSON"
+printf '#define SIMDJSON_H\n' > "$FIXTURE_SIMDJSON/simdjson.h"
 printf 'fixture\n' > "$FIXTURE_ROOT/modules/demo_on.so"
 printf 'fixture\n' > "$FIXTURE_ROOT/modules/demo_off.so"
 printf 'demo_on on\ndemo_off off zend requires=demo_on\n' > "$FIXTURE_BUILD/shared-extensions.txt"
@@ -96,6 +101,7 @@ for member in \
   ./include/php/sodium/core.h ./include/php/sodium/export.h \
   ./include/php/lexbor/url/url.h ./include/php/lexbor/url/base.h \
   ./include/php/lexbor/core/base.h \
+  ./include/php/ext/simdjson/src/simdjson.h \
   ./lib/php/build/phpize.m4 \
   ./lib/php/extensions/demo_off.so ./lib/php/extensions/demo_on.so \
   ./share/php-bin/manifest.json ./LICENSE ./NOTICE
@@ -172,6 +178,13 @@ if "$SCRIPT_DIR/package.sh" "$FIXTURE_ROOT/bin/php" 8.4.99 2> "$SCRATCH_DIR/miss
 fi
 grep -Fq 'lexbor/core/base.h' "$SCRATCH_DIR/missing-header.log"
 mv "$SCRATCH_DIR/base.h" "$FIXTURE_LEXBOR/core/base.h"
+mv "$FIXTURE_SIMDJSON/simdjson.h" "$SCRATCH_DIR/simdjson.h"
+if "$SCRIPT_DIR/package.sh" "$FIXTURE_ROOT/bin/php" 8.4.99 2> "$SCRATCH_DIR/missing-simdjson.log"; then
+  echo "Expected packaging to reject a missing simdjson header." >&2
+  exit 1
+fi
+grep -Fq "Required file not found: $FIXTURE_SIMDJSON/simdjson.h" "$SCRATCH_DIR/missing-simdjson.log"
+mv "$SCRATCH_DIR/simdjson.h" "$FIXTURE_SIMDJSON/simdjson.h"
 
 # A library header that cannot be copied stops packaging too.
 mkdir -p "$SCRATCH_DIR/failing-install"

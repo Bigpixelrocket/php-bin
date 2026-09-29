@@ -65,6 +65,10 @@ cp -R "$BUILDROOT/lib/php/build" "$PACKAGE/lib/php/build"
 install -m 0644 "$PROJECT_ROOT/LICENSE" "$PACKAGE/LICENSE"
 install -m 0644 "$PROJECT_ROOT/NOTICE" "$PACKAGE/NOTICE"
 
+# Library headers the installed PHP headers include are staged under include/php,
+# which php-config --includes names.
+KIT_INCLUDE="$PACKAGE/include/php"
+
 # Stage one library header and every header of that library it reaches through
 # "<prefix>..." includes, keeping the library's own layout under include/php.
 stage_header_closure() {
@@ -73,10 +77,10 @@ stage_header_closure() {
   while ((${#queue[@]})); do
     header="${queue[0]}"
     queue=("${queue[@]:1}")
-    [[ -f "$PACKAGE/include/php/$header" ]] && continue
+    [[ -f "$KIT_INCLUDE/$header" ]] && continue
     require_file "$source_root/$header"
-    mkdir -p "$(dirname "$PACKAGE/include/php/$header")"
-    install -m 0644 "$source_root/$header" "$PACKAGE/include/php/$header"
+    mkdir -p "$(dirname "$KIT_INCLUDE/$header")"
+    install -m 0644 "$source_root/$header" "$KIT_INCLUDE/$header"
     while IFS= read -r included; do
       queue+=("$included")
     done < <(sed -nE "s|^[[:space:]]*#[[:space:]]*include[[:space:]]*[\"<](${prefix}[^\">]+)[\">].*|\\1|p" \
@@ -84,13 +88,13 @@ stage_header_closure() {
   done
 }
 
-# The installed PHP headers include three libraries the binary links statically but
-# the build kit does not carry: ext/gmp includes <gmp.h>, ext/sodium includes
-# <sodium.h>, and ext/uri's WHATWG parser includes lexbor's URL headers, which
-# php-src compiles in but does not install. Each is staged under include/php,
-# which php-config --includes names, in the library's own layout, so an extension
-# that includes those PHP headers builds against the libraries this binary links.
-KIT_INCLUDE="$PACKAGE/include/php"
+# The installed PHP headers include four libraries the binary links but the build
+# kit does not carry: ext/gmp includes <gmp.h>, ext/sodium includes <sodium.h>,
+# ext/uri's WHATWG parser includes lexbor's URL headers, which php-src compiles in
+# but does not install, and ext/simdjson's bindings header includes "simdjson.h",
+# the library header the extension compiles but does not install. Each is staged
+# in the library's own layout, so an extension that includes those PHP headers
+# builds against the libraries this release was built with.
 if [[ -f "$KIT_INCLUDE/ext/gmp/php_gmp_int.h" ]]; then
   require_file "$BUILDROOT/include/gmp.h"
   install -m 0644 "$BUILDROOT/include/gmp.h" "$KIT_INCLUDE/gmp.h"
@@ -119,6 +123,13 @@ if [[ -f "$KIT_INCLUDE/ext/sodium/php_libsodium.h" ]]; then
 fi
 if [[ -f "$KIT_INCLUDE/ext/uri/uri_parser_whatwg.h" ]]; then
   stage_header_closure "$BUILD_DIR/source/php-src/ext/lexbor" "lexbor/" lexbor/url/url.h
+fi
+if [[ -f "$KIT_INCLUDE/ext/simdjson/src/simdjson_bindings_defs.h" ]]; then
+  # The bindings header includes "simdjson.h" from its own folder, so the
+  # amalgamated library header is staged beside it.
+  require_file "$BUILD_DIR/source/php-src/ext/simdjson/src/simdjson.h"
+  install -m 0644 "$BUILD_DIR/source/php-src/ext/simdjson/src/simdjson.h" \
+    "$KIT_INCLUDE/ext/simdjson/src/simdjson.h"
 fi
 
 # Ship exactly the listed shared extensions: a missing or unlisted .so means
