@@ -74,9 +74,11 @@ configuration path cannot exist and it has no scan directory, so no system
 at install time. The informational build strings in
 `include/php/main/build-defs.h` and `include/php/gmp.h` carry the same
 placeholder. `include/php/` also carries the library headers the PHP
-headers include: `gmp.h`, `sodium.h` with `sodium/`, and, from PHP 8.5, the
-lexbor URL headers under `lexbor/`, so an extension can build against
-`ext/gmp`, `ext/sodium`, or the `ext/uri` WHATWG parser with `phpize` alone.
+headers include: `gmp.h`, `sodium.h` with `sodium/`, simdjson's `simdjson.h`
+beside the `ext/simdjson` bindings header, and, from PHP 8.5, the lexbor URL
+headers under `lexbor/`, so an extension can build against `ext/gmp`,
+`ext/sodium`, `ext/simdjson`, or the `ext/uri` WHATWG parser with `phpize`
+alone.
 
 Releases published before shared extensions contain only `bin/php`, `LICENSE`,
 and `NOTICE`, with every module compiled in.
