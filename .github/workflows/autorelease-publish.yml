@@ -749,25 +749,53 @@ jobs:
           jq --arg version "$VERSION" \
             '.severity="info" | .summary="PHP \($version) was published and verified through fresh exact and branch-shorthand mise installs." | .finalResult="passed"' \
             release-run/event.json > release-run/notification-event.json
+      # A rerun of this job must neither file a second record nor trip over what an
+      # earlier attempt of this run left behind. A record already on main that completes
+      # exactly this release (merged by an earlier attempt, or recovered by the watcher)
+      # ends the step. Otherwise the run-scoped branch belongs to this run alone, so any
+      # PR or branch an earlier attempt left on it is withdrawn and filed afresh.
       - name: Commit final event record through a checked PR
         id: event_pr
         env:
           GH_TOKEN: ${{ github.token }}
+          BRANCH: autorelease/event-${{ github.run_id }}
         run: |
           git fetch origin main
-          git checkout -B "autorelease/event-${{ github.run_id }}" origin/main
-          base="$(git rev-parse HEAD)"
           filename="$(./autorelease/control.py action-filename "$ACTION_KEY")"
-          cp release-run/event.json "autorelease-events/$filename"
-          git add "autorelease-events/$filename"
+          record="autorelease-events/$filename"
+          rm -f release-run/main-record.json
+          if git cat-file -e "origin/main:$record" 2>/dev/null; then
+            git show "origin/main:$record" > release-run/main-record.json
+          fi
+          recorded="$(./autorelease/control.py release-recorded \
+            --record release-run/main-record.json \
+            --action-key "$ACTION_KEY" \
+            --version "$VERSION" \
+            --transaction release-run/transaction.json)"
+          if [[ "$recorded" == "true" ]]; then
+            echo "The event record for $ACTION_KEY is already on main."
+            echo "already_recorded=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "already_recorded=false" >> "$GITHUB_OUTPUT"
+          gh auth setup-git
+          for stale in $(gh pr list --repo "${{ github.repository }}" --head "$BRANCH" --state open \
+            --json number --jq '.[].number'); do
+            gh pr close "$stale" --repo "${{ github.repository }}" --delete-branch
+          done
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
+            git push origin --delete "$BRANCH"
+          fi
+          git checkout -B "$BRANCH" origin/main
+          base="$(git rev-parse HEAD)"
+          cp release-run/event.json "$record"
+          git add "$record"
           git -c user.name=autorelease -c user.email=autorelease@invalid \
             commit -m "chore: complete $ACTION_KEY"
           head="$(git rev-parse HEAD)"
-          record="autorelease-events/$filename"
           digest="sha256:$(shasum -a 256 "$record" | awk '{print $1}')"
-          gh auth setup-git
           git push origin HEAD
-          url="$(gh pr create --base main --head "autorelease/event-${{ github.run_id }}" \
+          url="$(gh pr create --base main --head "$BRANCH" \
             --title "chore: complete $ACTION_KEY" \
             --body "Durable event record for the immutable verified release transaction.")"
           {
@@ -779,6 +807,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
       - name: Validate and merge final event record
         id: merge
+        if: steps.event_pr.outputs.already_recorded == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -788,7 +817,8 @@ jobs:
             --head "${{ steps.event_pr.outputs.head_sha }}" \
             --record "${{ steps.event_pr.outputs.record }}" \
             --digest "${{ steps.event_pr.outputs.digest }}" \
-            --checks-output release-run/event-checks.json
+            --checks-output release-run/event-checks.json \
+            --require-protected-controls
       - name: Notify owner of completed release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -801,16 +831,30 @@ jobs:
             --repo "${{ github.repository }}" \
             --owner "${{ vars.AUTORELEASE_OWNER }}"
       # This job only runs after publication, so the release is live either way; the
-      # state now also says whether its event record reached main.
+      # state now also says whether its event record is on main. Main is the authority:
+      # a failed step says nothing about a record an earlier attempt already merged, or
+      # a merge whose reply was lost, so without a merge in this attempt main is read.
       - name: Record whether the event record merged
         if: always()
         env:
           MERGE_OUTCOME: ${{ steps.merge.outcome }}
+          ALREADY_RECORDED: ${{ steps.event_pr.outputs.already_recorded }}
         run: |
           mkdir -p release-run
           recorded=false
-          if [[ "$MERGE_OUTCOME" == "success" ]]; then
+          if [[ "$MERGE_OUTCOME" == "success" || "$ALREADY_RECORDED" == "true" ]]; then
             recorded=true
+          elif filename="$(./autorelease/control.py action-filename "$ACTION_KEY")" \
+            && git fetch origin main \
+            && git show "origin/main:autorelease-events/$filename" > "$RUNNER_TEMP/main-record.json"; then
+            transaction=()
+            if [[ -f release-run/transaction.json ]]; then
+              transaction=(--transaction release-run/transaction.json)
+            fi
+            if [[ "$(./autorelease/control.py release-recorded --record "$RUNNER_TEMP/main-record.json" \
+              --action-key "$ACTION_KEY" --version "$VERSION" "${transaction[@]}")" == "true" ]]; then
+              recorded=true
+            fi
           fi
           jq -n --argjson recorded "$recorded" --arg version "$VERSION" \
             '{schemaVersion:1,released:true,recorded:$recorded,version:$version}' > release-run/transaction-state.json
@@ -919,3 +963,25 @@ jobs:
             --backend github \
             --repo "${{ github.repository }}" \
             --owner "${{ vars.AUTORELEASE_OWNER }}"
+
+  # GitHub starts no `workflow_run` for a run GITHUB_TOKEN dispatched, and the watcher
+  # dispatches this one that way, so the run emails its own digest from this last job.
+  # It waits for every other job and passes the conclusion they reached: failure when
+  # any failed, else cancelled when any was cancelled, else success. A rerun of failed
+  # jobs reruns this one too, so each attempt sends one digest, as a completed
+  # `workflow_run` would.
+  email:
+    name: Email the run digest
+    needs: [preflight, build, release, verify-draft, publish, verify-public, finalize, notify-failure]
+    if: always()
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/autorelease-email.yml
+    with:
+      run_id: ${{ github.run_id }}
+      run_attempt: ${{ github.run_attempt }}
+      workflow: publish
+      conclusion: ${{ contains(needs.*.result, 'failure') && 'failure' || contains(needs.*.result, 'cancelled') && 'cancelled' || 'success' }}
+    secrets:
+      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}

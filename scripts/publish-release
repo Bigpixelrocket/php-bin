@@ -17,6 +17,7 @@ from autorelease.control import (  # noqa: E402
     load_json,
     recipe_identity,
     recipe_identity_note,
+    release_is_newest,
     release_recipe_identity,
     release_transition,
     sha256_file,
@@ -164,9 +165,26 @@ def github_effect(
                 if sha256_file(pathlib.Path(temporary) / name) != digest:
                     raise ControlError(f"downloaded release asset differs: {name}")
     elif target == "published":
-        release = json.loads(gh("release", "view", version, "--repo", repo, "--json", "isDraft"))
+        release = json.loads(gh("release", "view", version, "--repo", repo, "--json", "isDraft,databaseId"))
         if release["isDraft"]:
-            gh("release", "edit", version, "--repo", repo, "--draft=false", capture=False)
+            # Left to GitHub, the "Latest" badge follows the last publication, so a
+            # rebuild of an older branch would take it from the newest version. The
+            # publication therefore states it: latest only when no published release
+            # sorts above this version.
+            pages = json.loads(gh("api", f"repos/{repo}/releases?per_page=100", "--paginate", "--slurp"))
+            published = [item for page in pages for item in page]
+            latest = "true" if release_is_newest(version, published) else "false"
+            gh(
+                "api",
+                "--method",
+                "PATCH",
+                f"repos/{repo}/releases/{int(release['databaseId'])}",
+                "-F",
+                "draft=false",
+                "-f",
+                f"make_latest={latest}",
+                capture=False,
+            )
 
 
 def main() -> int:

@@ -32,6 +32,8 @@ from autorelease.control import (
     pending_recipe_rebuild,
     recipe_identity,
     recipe_identity_note,
+    release_event_recorded,
+    release_is_newest,
     release_recipe_identity,
     validate_recipe_rebuild_evidence,
     email_digest,
@@ -673,6 +675,62 @@ class AutoreleaseControlTests(unittest.TestCase):
         # A published release is immutable and is never edited.
         self.assertEqual([], effect({"isDraft": False, "body": "Autorelease publication."}))
 
+    def test_release_is_newest_compares_versions_numerically_with_revisions(self):
+        published = [self._published(tag) for tag in ("8.5.11", "8.5.11-2", "8.4.26-1", "8.2.32-2")]
+        # A rebuild of the newest version sorts above its plain patch and earlier revisions.
+        self.assertTrue(release_is_newest("8.5.11-3", published))
+        # Any older version, including a newer revision of an older branch, is not newest.
+        for version in ("8.2.32-3", "8.4.26-2", "8.5.10-3", "8.5.11-1", "8.5.11"):
+            self.assertFalse(release_is_newest(version, published), version)
+        # Components compare as numbers, never as text.
+        self.assertTrue(release_is_newest("8.10.0", [self._published("8.9.9-4")]))
+        self.assertFalse(release_is_newest("8.9.9-4", [self._published("8.10.0")]))
+        self.assertTrue(release_is_newest("8.5.12", [self._published("8.5.9-9")]))
+        # Drafts, prereleases, unrelated tags, and the version itself never outrank it.
+        ignored = [
+            self._published("9.0.0", draft=True),
+            self._published("9.0.1", prerelease=True),
+            self._published("v99"),
+            self._published("8.5.11-3"),
+            "not a release",
+        ]
+        self.assertTrue(release_is_newest("8.5.11-3", ignored))
+        self.assertTrue(release_is_newest("8.5.11-3", []))
+        with self.assertRaises(ControlError):
+            release_is_newest("latest", published)
+
+    def test_publisher_states_whether_the_publication_is_latest(self):
+        namespace = runpy.run_path(
+            str(pathlib.Path(__file__).resolve().parents[1] / "scripts/publish-release"),
+            run_name="publish_release_fixture",
+        )
+        github_effect = namespace["github_effect"]
+        pages = json.dumps([[self._published("8.5.11-2"), self._published("8.4.26-1")], [self._published("8.2.32-2")]])
+
+        def publish(version, is_draft=True):
+            calls = []
+
+            def gh(*arguments, capture=True):
+                calls.append(arguments)
+                if arguments[:2] == ("release", "view"):
+                    return json.dumps({"isDraft": is_draft, "databaseId": 42})
+                if arguments[:2] == ("api", "repos/o/r/releases?per_page=100"):
+                    return pages
+                return ""
+
+            with mock.patch.dict(github_effect.__globals__, {"gh": gh}):
+                github_effect("published", "o/r", version, "c" * 40, pathlib.Path("assets"), {})
+            return [call for call in calls if "PATCH" in call]
+
+        for version, latest in (("8.5.11-3", "true"), ("8.2.32-3", "false"), ("8.4.27", "false"), ("8.6.0", "true")):
+            self.assertEqual(
+                [("api", "--method", "PATCH", "repos/o/r/releases/42", "-F", "draft=false", "-f", f"make_latest={latest}")],
+                publish(version),
+                version,
+            )
+        # A release that is already public is immutable here, and its badge is left alone.
+        self.assertEqual([], publish("8.5.11-3", is_draft=False))
+
     def test_rebuild_selection_is_deterministic_and_covers_every_published_version(self):
         current = "sha256:" + "c" * 64
         # The releases published before recipe identities existed record none.
@@ -904,6 +962,24 @@ class AutoreleaseControlTests(unittest.TestCase):
                 _validate_plan_shape(
                     full_plan(action="new_patch", actionKey="new_branch:8.6"), manifest_path, set()
                 )
+
+    def test_admin_evidence_names_each_snapshot_by_its_own_digest(self):
+        evidence = json.loads((ROOT / "docs/autorelease-admin-evidence.json").read_text())
+        snapshots = [
+            entry
+            for repository in evidence["repositories"].values()
+            for entry in (repository["beforeSnapshot"], repository["afterSnapshot"])
+        ]
+        self.assertEqual(4, len(snapshots))
+        for entry in snapshots:
+            self.assertRegex(entry["digest"], r"^sha256:[0-9a-f]{64}$", entry["path"])
+            # mise-php's snapshots live in that repository; this one can check its own.
+            if entry["path"].startswith("../"):
+                continue
+            snapshot = json.loads((ROOT / entry["path"]).read_text())
+            recorded = snapshot.pop("snapshotDigest")
+            self.assertEqual(recorded, sha256_bytes(canonical_json(snapshot)), entry["path"])
+            self.assertEqual(recorded, entry["digest"], entry["path"])
 
     def test_plan_schema_matches_admission(self):
         schema = json.loads((ROOT / "schemas/autorelease-plan.schema.json").read_text())
@@ -1363,6 +1439,13 @@ class AutoreleaseControlTests(unittest.TestCase):
         ):
             self.assertIsNotNone(ACTION_KEY_RE.fullmatch(key), key)
 
+    def test_retired_action_key_families_are_rejected(self):
+        # Nothing produces or authorizes these families, so no plan or record may carry them.
+        for key in ("repair:8.5.9:deadbeef", "auth_failure:deadbeef"):
+            self.assertIsNone(ACTION_KEY_RE.fullmatch(key), key)
+        for key in ("source_unhealthy:deadbeef", "health_failed:deadbeef", "policy_failure:deadbeef"):
+            self.assertIsNotNone(ACTION_KEY_RE.fullmatch(key), key)
+
     def test_published_asset_mismatch_fails_closed(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
@@ -1447,7 +1530,7 @@ class AutoreleaseControlTests(unittest.TestCase):
                 "installs of the plain version 8.5.9 now resolve to this revision",
             ),
             (
-                {**base, "decision": changed, "plan": {"action": "needs_human", "actionKey": "auth_failure:" + "b" * 8}},
+                {**base, "decision": changed, "plan": {"action": "needs_human", "actionKey": "policy_failure:" + "b" * 8}},
                 "watcher_attention",
                 "needs_human",
             ),
@@ -1919,6 +2002,284 @@ class AutoreleaseControlTests(unittest.TestCase):
             release.index("Validate and merge final event record"),
             release.index("Notify owner of completed release"),
         )
+
+    @staticmethod
+    def _completed_record(action_key, version, assets, kind="published_release"):
+        def step(source, target, evidence):
+            return {"from": source, "to": target, "at": "2026-09-29T00:00:00Z", "evidence": evidence}
+
+        return {
+            "schemaVersion": 1,
+            "actionKey": action_key,
+            "state": "complete",
+            "history": [
+                step("release_requested", "released", [{"kind": kind, "version": version, "assetDigests": assets}]),
+                step("released", "public_install_verified", [{"kind": "fresh_public_mise_installs", "version": version}]),
+                step("public_install_verified", "complete", [{"kind": "transaction_complete"}]),
+            ],
+        }
+
+    def test_release_event_recorded_accepts_only_this_release_complete_on_main(self):
+        key, version = "recipe_rebuild:8.5.11:3", "8.5.11-3"
+        assets = {"SHA256SUMS": "sha256:" + "1" * 64}
+        record = self._completed_record(key, version, assets)
+        self.assertFalse(release_event_recorded(None, key, version, assets))
+        # A new branch's record waits on main short of complete until its release.
+        self.assertFalse(release_event_recorded({**record, "state": "mise_ready"}, key, version, assets))
+        self.assertTrue(release_event_recorded(record, key, version, assets))
+        self.assertTrue(release_event_recorded(record, key, version))
+        # The watcher's recovered record names the release through its own evidence kind.
+        recovered = self._completed_record(key, version, assets, kind="published_immutable_release")
+        self.assertTrue(release_event_recorded(recovered, key, version, assets))
+        # A complete record that names anything else contradicts the release.
+        for other, other_key, other_version, other_assets in (
+            (record, "recipe_rebuild:8.5.11:2", version, assets),
+            (record, key, "8.5.11-2", assets),
+            (record, key, version, {"SHA256SUMS": "sha256:" + "2" * 64}),
+            ({**record, "history": record["history"][1:]}, key, version, assets),
+            (self._completed_record(key, version, assets, kind="other"), key, version, assets),
+        ):
+            with self.assertRaises(ControlError):
+                release_event_recorded(other, other_key, other_version, other_assets)
+        with self.assertRaises(ControlError):
+            release_event_recorded(record, key, "main", assets)
+
+    def test_finalize_reruns_reuse_a_merged_record_and_withdraw_stale_branches(self):
+        from autorelease.verify import load_workflow
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        jobs = load_workflow(root / ".github/workflows/autorelease-publish.yml")["jobs"]
+        steps = {step.get("name"): step for step in jobs["finalize"]["steps"]}
+        commit_step = steps["Commit final event record through a checked PR"]
+        merge_step = steps["Validate and merge final event record"]
+        state_step = steps["Record whether the event record merged"]
+        self.assertEqual("steps.event_pr.outputs.already_recorded == 'false'", merge_step["if"])
+        self.assertIn("--require-protected-controls", merge_step["run"])
+        self.assertEqual("always()", state_step["if"])
+        self.assertEqual("autorelease/event-${{ github.run_id }}", commit_step["env"]["BRANCH"])
+
+        key, version = "recipe_rebuild:8.5.11:3", "8.5.11-3"
+        assets = {"SHA256SUMS": "sha256:" + "1" * 64}
+        record_path = f"autorelease-events/{action_filename(key)}"
+        commit_script = commit_step["run"].replace("${{ github.repository }}", "o/r")
+        state_script = state_step["run"]
+
+        def git_in(path, *args):
+            return subprocess.run(
+                ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@invalid", *args],
+                cwd=path, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            ).stdout.strip()
+
+        def fixture(work, main_record=None, stale_branch=False):
+            origin = work / "origin.git"
+            git_in(work, "init", "-q", "--bare", "-b", "main", str(origin))
+            clone = work / "clone"
+            git_in(work, "clone", "-q", str(origin), str(clone))
+            git_in(clone, "checkout", "-q", "-b", "main")
+            (clone / "autorelease-events").mkdir()
+            (clone / "autorelease-events/.keep").write_text("")
+            if main_record is not None:
+                (clone / record_path).write_text(json.dumps(main_record))
+            git_in(clone, "add", "-A")
+            git_in(clone, "commit", "-q", "-m", "base")
+            git_in(clone, "push", "-q", "origin", "main")
+            if stale_branch:
+                # An earlier attempt's record commit, which a fresh commit cannot fast-forward.
+                git_in(clone, "checkout", "-q", "-b", "earlier-attempt")
+                (clone / record_path).write_text("earlier attempt\n")
+                git_in(clone, "add", "-A")
+                git_in(clone, "commit", "-q", "-m", "earlier attempt")
+                git_in(clone, "push", "-q", "origin", "HEAD:refs/heads/autorelease/event-77")
+                git_in(clone, "checkout", "-q", "main")
+            git_in(clone, "checkout", "-q", "--detach")
+            (clone / "autorelease").symlink_to(root / "autorelease")
+            (clone / "release-run").mkdir()
+            (clone / "release-run/transaction.json").write_text(json.dumps({"state": "complete", "assetDigests": assets}))
+            (clone / "release-run/event.json").write_text(json.dumps(self._completed_record(key, version, assets)))
+            (work / "bin").mkdir()
+            # gh lists the open PRs the case names, closes one by deleting its branch
+            # from the origin, and opens PR 9; every call is logged.
+            (work / "bin/gh").write_text(
+                "#!/usr/bin/env bash\n"
+                'echo "$*" >> "$FAKE_LOG"\n'
+                'case "$1 $2" in\n'
+                '  "pr list") printf "%s\\n" $FAKE_OPEN ;;\n'
+                '  "pr close") git -C "$FAKE_ORIGIN" branch -D autorelease/event-77 >/dev/null ;;\n'
+                '  "pr create") echo https://github.com/o/r/pull/9 ;;\n'
+                '  "auth setup-git") ;;\n'
+                "  *) exit 3 ;;\n"
+                "esac\n"
+            )
+            (work / "bin/gh").chmod(0o755)
+            return clone, origin
+
+        def run_step(work, clone, origin, script, open_prs="", extra=None):
+            output = work / "output.txt"
+            output.write_text("")
+            env = {
+                **os.environ,
+                "PATH": f"{work / 'bin'}:{os.environ['PATH']}",
+                "ACTION_KEY": key,
+                "VERSION": version,
+                "BRANCH": "autorelease/event-77",
+                "GITHUB_OUTPUT": str(output),
+                "RUNNER_TEMP": str(work),
+                "FAKE_LOG": str(work / "gh.log"),
+                "FAKE_OPEN": open_prs,
+                "FAKE_ORIGIN": str(origin),
+                "GIT_AUTHOR_NAME": "Fixture",
+                "GIT_AUTHOR_EMAIL": "fixture@invalid",
+                "GIT_COMMITTER_NAME": "Fixture",
+                "GIT_COMMITTER_EMAIL": "fixture@invalid",
+                **(extra or {}),
+            }
+            result = subprocess.run(
+                ["bash", "-eo", "pipefail", "-c", script], cwd=clone, env=env, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            outputs = dict(line.split("=", 1) for line in output.read_text().splitlines() if "=" in line)
+            calls = (work / "gh.log").read_text() if (work / "gh.log").exists() else ""
+            return result, outputs, calls
+
+        # A record an earlier attempt merged ends the step without a second record.
+        with tempfile.TemporaryDirectory() as temporary:
+            work = pathlib.Path(temporary)
+            clone, origin = fixture(work, self._completed_record(key, version, assets))
+            result, outputs, calls = run_step(work, clone, origin, commit_script)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("true", outputs["already_recorded"])
+            self.assertNotIn("pr create", calls)
+            self.assertEqual("", git_in(origin, "branch", "--list", "autorelease/*"))
+
+        # An earlier attempt's open PR and branch are withdrawn and the record filed afresh.
+        for open_prs, stale_branch in (("5", True), ("", True), ("", False)):
+            with tempfile.TemporaryDirectory() as temporary:
+                work = pathlib.Path(temporary)
+                clone, origin = fixture(work, stale_branch=stale_branch)
+                result, outputs, calls = run_step(work, clone, origin, commit_script, open_prs)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual("false", outputs["already_recorded"])
+                self.assertEqual("9", outputs["number"])
+                self.assertEqual(("pr close 5" in calls), bool(open_prs), calls)
+                head = git_in(origin, "rev-parse", "autorelease/event-77")
+                self.assertEqual(outputs["head_sha"], head)
+                self.assertEqual(f"{head} {outputs['base_sha']}", git_in(origin, "rev-list", "--parents", "-n", "1", head))
+                self.assertEqual(record_path, git_in(origin, "diff", "--name-only", outputs["base_sha"], head))
+
+        # A new branch's incomplete record on main is completed through the PR.
+        with tempfile.TemporaryDirectory() as temporary:
+            work = pathlib.Path(temporary)
+            waiting = {**self._completed_record(key, version, assets), "state": "mise_ready", "history": []}
+            clone, origin = fixture(work, waiting)
+            result, outputs, _calls = run_step(work, clone, origin, commit_script)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("false", outputs["already_recorded"])
+
+        # A complete record on main for another release stops the step.
+        with tempfile.TemporaryDirectory() as temporary:
+            work = pathlib.Path(temporary)
+            clone, origin = fixture(work, self._completed_record(key, "8.5.11-2", assets))
+            result, outputs, calls = run_step(work, clone, origin, commit_script)
+            self.assertNotEqual(0, result.returncode)
+            self.assertNotIn("already_recorded", outputs)
+            self.assertNotIn("pr create", calls)
+
+        # The retained state says recorded exactly when the record is on main.
+        for main_record, merge_outcome, already, expected in (
+            (None, "success", "false", True),
+            (None, "", "true", True),
+            (None, "failure", "false", False),
+            (None, "", "", False),
+            (self._completed_record(key, version, assets), "failure", "false", True),
+            (self._completed_record(key, version, assets), "", "", True),
+            (self._completed_record(key, "8.5.11-2", assets), "", "", False),
+        ):
+            with tempfile.TemporaryDirectory() as temporary:
+                work = pathlib.Path(temporary)
+                clone, origin = fixture(work, main_record)
+                result, _outputs, _calls = run_step(
+                    work, clone, origin, state_script, extra={"MERGE_OUTCOME": merge_outcome, "ALREADY_RECORDED": already}
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                state = json.loads((clone / "release-run/transaction-state.json").read_text())
+                self.assertEqual(
+                    {"schemaVersion": 1, "released": True, "recorded": expected, "version": version},
+                    state,
+                    (main_record is not None, merge_outcome, already),
+                )
+
+    def test_publish_runs_email_their_own_digest_exactly_once(self):
+        from autorelease.verify import load_workflow
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        workflows = root / ".github/workflows"
+        email = load_workflow(workflows / "autorelease-email.yml")
+        # YAML 1.1 reads the bare `on` key as true.
+        triggers = email.get("on") or email["true"]
+        # The watcher is started by its schedule or a person, so workflow_run reaches it.
+        # GitHub starts no workflow_run for a publish run GITHUB_TOKEN dispatched, and a
+        # publish run dispatched any other way must not email twice, so publish is not a
+        # workflow_run trigger at all and reaches the digest only by calling it.
+        self.assertEqual(["PHP autorelease watcher"], triggers["workflow_run"]["workflows"])
+        call = triggers["workflow_call"]
+        self.assertEqual({"run_id", "run_attempt", "workflow", "conclusion"}, set(call["inputs"]))
+        self.assertTrue(all(spec["required"] and spec["type"] == "string" for spec in call["inputs"].values()))
+        self.assertEqual({"RESEND_API_KEY": {"required": False}}, call["secrets"])
+        digest = email["jobs"]["digest"]
+        self.assertEqual("${{ inputs.run_id || github.event.workflow_run.id }}", digest["env"]["RUN_ID"])
+        self.assertEqual("${{ inputs.conclusion || github.event.workflow_run.conclusion }}", digest["env"]["RUN_CONCLUSION"])
+        self.assertIn("autorelease-email-${{ inputs.run_id || github.event.workflow_run.id }}", digest["concurrency"]["group"])
+        download = next(step for step in digest["steps"] if step.get("name") == "Download the retained run state")
+        self.assertIn('if [[ "$CALLED_WORKFLOW" != publish ]]; then', download["run"])
+        # An unconfigured repository still skips quietly on both routes.
+        gate = next(step for step in digest["steps"] if step.get("name") == "Decide whether delivery is configured")
+        self.assertIn('-n "$RESEND_API_KEY"', gate["run"])
+
+        callers = {
+            path.name: [
+                name for name, job in (load_workflow(path).get("jobs") or {}).items()
+                if job.get("uses") == "./.github/workflows/autorelease-email.yml"
+            ]
+            for path in workflows.glob("*.yml")
+        }
+        self.assertEqual({"autorelease-publish.yml": ["email"]}, {name: jobs for name, jobs in callers.items() if jobs})
+        jobs = load_workflow(workflows / "autorelease-publish.yml")["jobs"]
+        caller = jobs["email"]
+        self.assertEqual("always()", caller["if"])
+        self.assertEqual(set(jobs) - {"email"}, set(caller["needs"]))
+        self.assertEqual({"actions": "read", "contents": "read"}, caller["permissions"])
+        self.assertEqual({"RESEND_API_KEY": "${{ secrets.RESEND_API_KEY }}"}, caller["secrets"])
+        self.assertEqual(
+            {
+                "run_id": "${{ github.run_id }}",
+                "run_attempt": "${{ github.run_attempt }}",
+                "workflow": "publish",
+                "conclusion": "${{ contains(needs.*.result, 'failure') && 'failure' || "
+                "contains(needs.*.result, 'cancelled') && 'cancelled' || 'success' }}",
+            },
+            caller["with"],
+        )
+
+    def test_automation_pull_requests_are_filed_with_real_newlines_and_exact_leases(self):
+        root = pathlib.Path(__file__).resolve().parents[1]
+        for path in (root / ".github/workflows").glob("*.yml"):
+            body = path.read_text()
+            # A double-quoted shell string keeps "\n" as two characters.
+            self.assertIsNone(re.search(r'--body "[^"]*\\n', body), path.name)
+            # Every lease is taken against a tracking ref fetched with a forced refspec,
+            # so it is exactly the branch head the remote reports.
+            for match in re.finditer(r"git fetch origin \"([^\"]*)\"", body):
+                self.assertTrue(match.group(1).startswith("+refs/heads/"), (path.name, match.group(1)))
+            if "--force-with-lease" in body:
+                self.assertIn('git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch"', body, path.name)
+            # Every single-record merge also asserts the Protected controls check.
+            self.assertEqual(
+                body.count("./scripts/merge-record-pr"),
+                len(re.findall(r"\./scripts/merge-record-pr[^;]*?--require-protected-controls", body, re.DOTALL)),
+                path.name,
+            )
+        implement = (root / ".github/workflows/autorelease-implement.yml").read_text()
+        self.assertIn('printf "Deterministically sealed autorelease patch for \\`%s\\`.\\n\\nValidated commit: \\`%s\\`."', implement)
 
     def test_release_build_runs_apart_from_the_write_token(self):
         # StaticPHP runs third-party build scripts, so it may only run in a job

@@ -527,11 +527,9 @@ class Verifier:
             "new_branch:8.6",
             "branch_eol:8.2:2026-12-31",
             "recipe_rebuild:8.5.9:2",
-            "repair:8.5.9:deadbeef",
             "source_unhealthy:deadbeef",
             "health_failed:deadbeef",
             "policy_failure:deadbeef",
-            "auth_failure:deadbeef",
         ]
         for action_key in action_keys:
             mise_name = run(
@@ -829,7 +827,7 @@ class Verifier:
             "auditEvidence": [{"path": "evidence.json", "digest": sha256_file(evidence)}],
         }
         complete = audit_reconstruction(event, directory)
-        blocked = audit_reconstruction({**event, "actionKey": "repair:8.5.9:deadbeef", "state": "blocked"}, directory)
+        blocked = audit_reconstruction({**event, "actionKey": "policy_failure:deadbeef", "state": "blocked"}, directory)
         (directory / "audit.json").write_bytes(canonical_json({"complete": complete, "blocked": blocked}))
         return ["audit.json", "evidence.json"]
 
