@@ -57,7 +57,6 @@ jobs:
       group: autorelease-email-${{ inputs.run_id || github.event.workflow_run.id }}
       cancel-in-progress: false
     env:
-      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
       EMAIL_FROM: ${{ vars.AUTORELEASE_EMAIL_FROM }}
       EMAIL_TO: ${{ vars.AUTORELEASE_EMAIL_TO }}
       CALLED_WORKFLOW: ${{ inputs.workflow }}
@@ -72,6 +71,9 @@ jobs:
         id: gate
         # An unconfigured repository skips quietly instead of failing, so the
         # digest can merge ahead of the Resend secret and variables existing.
+        # The secret is only in this step and the send step, never in the job.
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
         run: |
           if [[ -n "$RESEND_API_KEY" && -n "$EMAIL_FROM" && -n "$EMAIL_TO" ]]; then
             echo "configured=true" >> "$GITHUB_OUTPUT"
@@ -143,6 +145,14 @@ jobs:
       - name: Send the digest through Resend
         if: steps.gate.outputs.configured == 'true'
         # The secret reaches exactly one place: the Authorization header.
+        # Transient failures are retried under one idempotency key per run attempt, so
+        # a retry after a lost reply cannot send the digest twice. A delivery that still
+        # fails fails this job, and with it the run: the digest is the report, so a red
+        # run is the only one left when the channel is down, and rerunning the failed
+        # jobs of a publish run whose other jobs passed repeats only this one.
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          WORKFLOW: ${{ steps.state.outputs.workflow }}
         run: |
           jq \
             --arg from "$EMAIL_FROM" \
@@ -151,7 +161,9 @@ jobs:
             email-run/digest.json > email-run/payload.json
           curl --fail-with-body --silent --show-error \
             --connect-timeout 10 --max-time 30 \
+            --retry 3 --retry-delay 15 --retry-connrefused \
             --request POST https://api.resend.com/emails \
+            --header "Idempotency-Key: php-bin-$WORKFLOW-$RUN_ID-$RUN_ATTEMPT" \
             --header "Authorization: Bearer $RESEND_API_KEY" \
             --header "Content-Type: application/json" \
             --data @email-run/payload.json

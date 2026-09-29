@@ -2234,6 +2234,17 @@ class AutoreleaseControlTests(unittest.TestCase):
         # An unconfigured repository still skips quietly on both routes.
         gate = next(step for step in digest["steps"] if step.get("name") == "Decide whether delivery is configured")
         self.assertIn('-n "$RESEND_API_KEY"', gate["run"])
+        # The secret is scoped to the two steps that read it, never to the whole job.
+        self.assertNotIn("RESEND_API_KEY", digest["env"])
+        self.assertEqual(
+            ["Decide whether delivery is configured", "Send the digest through Resend"],
+            [step.get("name") for step in digest["steps"] if "RESEND_API_KEY" in (step.get("env") or {})],
+        )
+        # Retries reuse one idempotency key per run attempt, so none can send twice.
+        send = next(step for step in digest["steps"] if step.get("name") == "Send the digest through Resend")
+        self.assertIn("--retry 3", send["run"])
+        self.assertIn('--header "Idempotency-Key: php-bin-$WORKFLOW-$RUN_ID-$RUN_ATTEMPT"', send["run"])
+        self.assertEqual("${{ steps.state.outputs.workflow }}", send["env"]["WORKFLOW"])
 
         callers = {
             path.name: [

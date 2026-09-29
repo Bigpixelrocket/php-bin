@@ -224,7 +224,11 @@ reaches the outbound channel, and the workflow skips quietly until the
 `RESEND_API_KEY` secret and the email variables exist. Run state that matches
 no template — including a corrupt retained artifact — still sends a fallback
 summary naming the exact rejection reason, so the channel cannot go silent on
-precisely the runs that need a look.
+precisely the runs that need a look. Delivery retries transient Resend errors
+under one idempotency key per run attempt; a delivery that still fails fails
+the digest job, and with it a publish run, because a red run is the only
+report left when the channel is down. Rerunning that run's failed jobs sends
+the digest again without repeating any job that passed.
 
 There is no repair phase. A failed classification input, admission, sealing,
 validation, build, or merge stops that run and raises the deduplicated owner
