@@ -178,10 +178,10 @@ only after the one before succeeded:
    watcher, ends the job without a second record, and a pull request or branch
    an earlier attempt left on the run's own `autorelease/event-<run id>` branch
    is withdrawn before the record is filed afresh. A complete record on main
-   that names another release stops the job. The rerun can only file the
-   record while main is still the commit the run was dispatched at, because
-   `Protected controls` binds a publish run's record to exactly that commit;
-   once main has moved on, the watcher's record recovery is the path.
+   that names another release stops the job. `Protected controls` accepts the
+   record while the run is still in progress and started on current main or
+   an ancestor of it, so a rerun files the record even after main has moved
+   on; the watcher's record recovery remains the path once the run has ended.
 
 Both install jobs pass their read-only token to `mise-php`, whose GitHub API
 reads would otherwise be rate limited, and restore no mise cache. Every
@@ -315,7 +315,13 @@ from the merged policy with its own deterministic scripts. The readiness and
 event records then merge on their own: `autorelease-events/`, `autorelease-state/`, and `mise-php`'s
 `readiness/` sit outside CODEOWNERS precisely so their exact-SHA automation
 PRs satisfy branch protection without a reviewer, while every protected
-control still cannot. Publication waits only on machine facts — matching
+control still cannot. `Protected controls` admits each record PR only from
+`github-actions[bot]` in this repository, as one file directly on the base
+commit, from the exact workflow run named by its branch while that run is in
+progress on main: evidence from the watcher, completed events from publish or
+the watcher, and a lifecycle's `php_bin_ready` record from the implementation
+run, which must name the base commit as its validated merge. A new branch
+therefore publishes with no human approval. Publication waits only on machine facts — matching
 `php_bin_ready` and `mise_ready` records at exact commits. The `mise_ready`
 record names the mise-php synchronization commit it validated, and the record
 itself merges on top of it, so the publish job requires the captured mise-php
@@ -376,7 +382,9 @@ autorelease-investigation-<run-id>`):
 
 Inspect `autorelease-events/`, generated `support-policy.json`, the reviewed
 `autorelease/policy-invariants.json`, retained workflow artifacts, and the
-event issue marker to reconstruct a decision. `scripts/verify-autorelease-system`
+event issue marker to reconstruct a decision. The notifier only trusts issues
+and comments written by `github-actions[bot]`: the repository is public, so a
+copied marker or fingerprint from anyone else is ignored. `scripts/verify-autorelease-system`
 writes `autorelease-verification.json` and `autorelease-verification.md` into
 its `--output` directory; both are per-run artifacts, not checked-in files.
 

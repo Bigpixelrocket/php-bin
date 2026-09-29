@@ -81,6 +81,7 @@ jobs:
           from autorelease.control import (
               ControlError,
               validate_completed_event_record,
+              validate_readiness_event_record,
               validate_evidence_attestation_predicate,
               validate_evidence_state_record,
           )
@@ -136,7 +137,21 @@ jobs:
               print(f"Protected paths changed by the configured owner {author}.")
               raise SystemExit(0)
 
-          # Both trusted-automation exemptions below bind the whole diff, not just
+          def started_on_main_history(run_sha):
+              """Whether a run's start commit is `base` or an ancestor of it.
+
+              Publish and implementation runs merge other records while they run, so
+              main can move past the commit they started from before they file their
+              own record. The record is still one commit directly on current main.
+              """
+              if not isinstance(run_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", run_sha):
+                  return False
+              if run_sha == base:
+                  return True
+              comparison = api_one(f"repos/{repo}/compare/{run_sha}...{base}")
+              return comparison.get("status") == "ahead" and comparison.get("behind_by") == 0
+
+          # The trusted-automation exemptions below bind the whole diff, not just
           # its protected subset: the watcher writes exactly one file, so any
           # unprotected passenger riding along is proof this is not that PR.
           evidence_run = re.fullmatch(r"autorelease/evidence-(\d+)", head_ref)
@@ -272,11 +287,49 @@ jobs:
                   and run.get("path") == expected_workflow
                   and run.get("event") in allowed_events
                   and run.get("head_branch") == "main"
-                  and run.get("head_sha") == base
                   and run.get("status") == "in_progress"
+                  and started_on_main_history(run.get("head_sha"))
               )
               if direct_parent and trusted_run:
                   print(f"Protected completed event approved from trusted run {run['id']}.")
+                  raise SystemExit(0)
+
+          # A lifecycle implementation merges its admitted patch, then files the
+          # php_bin_ready record for that exact merge commit. The record must sit
+          # directly on the commit it names, from the implementation run that is
+          # still in progress, so a new branch needs no owner review to publish.
+          readiness_run = re.fullmatch(r"autorelease/readiness-(\d+)", head_ref)
+          if (
+              len(files) == 1
+              and len(protected) == 1
+              and re.fullmatch(r"autorelease-events/[A-Za-z0-9._-]+\.json", protected[0])
+              and readiness_run
+              and author == "github-actions[bot]"
+              and head_repo.lower() == repo.lower()
+          ):
+              commit = api_one(f"repos/{repo}/commits/{head}")
+              run = api_one(f"repos/{repo}/actions/runs/{readiness_run.group(1)}")
+              content = api_one(f"repos/{repo}/contents/{protected[0]}?ref={head}")
+              try:
+                  decoded = base64.b64decode(content["content"].replace("\n", ""), validate=True)
+                  record = json.loads(decoded)
+                  merged_commit = validate_readiness_event_record(record)
+              except (KeyError, ValueError, json.JSONDecodeError, ControlError) as error:
+                  print(f"Invalid readiness record: {error}", file=sys.stderr)
+                  raise SystemExit(1) from error
+              expected_filename = record["actionKey"].translate(str.maketrans({":": "-", "/": "-"})) + ".json"
+              direct_parent = [parent.get("sha") for parent in commit.get("parents", [])] == [base]
+              trusted_run = (
+                  protected[0] == f"autorelease-events/{expected_filename}"
+                  and merged_commit == base
+                  and run.get("path") == ".github/workflows/autorelease-implement.yml"
+                  and run.get("event") == "workflow_dispatch"
+                  and run.get("head_branch") == "main"
+                  and run.get("status") == "in_progress"
+                  and started_on_main_history(run.get("head_sha"))
+              )
+              if direct_parent and trusted_run:
+                  print(f"Protected readiness record approved from trusted run {run['id']}.")
                   raise SystemExit(0)
 
           reviews = api(f"repos/{repo}/pulls/{number}/reviews")

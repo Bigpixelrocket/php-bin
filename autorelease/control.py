@@ -116,6 +116,7 @@ from autorelease._state import (  # noqa: E402
     transition_event,
     unrecorded_published_release,
     validate_completed_event_record,
+    validate_readiness_event_record,
     watch_decision,
 )
 from autorelease._validation import (  # noqa: E402
