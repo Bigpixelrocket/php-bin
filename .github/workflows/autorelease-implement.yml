@@ -168,7 +168,8 @@ jobs:
             # Nothing was applied, so the validated commit is the admitted base, which
             # every later job checks out; there is no commit to bundle.
             test "$(git rev-parse HEAD)" = "$BASE_SHA"
-            test -z "$(git diff --cached --name-only)"
+            # The verdict is bound to HEAD, so the tested tree must equal it exactly.
+            git diff --quiet HEAD --
           else
             export GIT_AUTHOR_NAME=autorelease-validator
             export GIT_AUTHOR_EMAIL=autorelease@invalid
