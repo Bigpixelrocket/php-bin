@@ -2729,6 +2729,8 @@ class AutoreleaseControlTests(unittest.TestCase):
                 self.assertNotIn("approved from trusted run", output)
         code, output = scenario(files=(path.replace("8.6", "8.7"),))
         self.assertNotEqual(0, code, output)
+        code, output = scenario(compare=None)
+        self.assertIn("could not be compared with", output)
 
     def test_readiness_record_validator_rejects_every_deviation(self):
         commit = "b" * 40
@@ -2760,6 +2762,11 @@ class AutoreleaseControlTests(unittest.TestCase):
             "a malformed digest": {**record, "supportPolicyDigest": "2" * 64},
             "a classification that disagrees": {**record, "classification": "new_branch"},
             "a second transition": {**record, "history": [*record["history"], record["history"][0]]},
+            "a legal but longer history": transition_event(
+                transition_event({**record, "state": "detected", "history": []}, "blocked", [merge]),
+                "php_bin_ready",
+                [merge],
+            ),
         }
         for label, candidate in invalid.items():
             with self.subTest(label):

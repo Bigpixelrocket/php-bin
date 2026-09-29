@@ -151,7 +151,7 @@ jobs:
                   return True
               try:
                   comparison = api_one(f"repos/{repo}/compare/{run_sha}...{base}")
-              except subprocess.CalledProcessError:
+              except (subprocess.CalledProcessError, json.JSONDecodeError):
                   print(f"Run start commit {run_sha} could not be compared with {base}.", file=sys.stderr)
                   return False
               return comparison.get("status") == "ahead" and comparison.get("behind_by") == 0
