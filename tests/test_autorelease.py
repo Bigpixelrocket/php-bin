@@ -2208,6 +2208,226 @@ class AutoreleaseControlTests(unittest.TestCase):
                     (main_record is not None, merge_outcome, already),
                 )
 
+    def test_a_resumed_lifecycle_records_the_validated_main_commit_without_a_merge(self):
+        from autorelease.control import classify_evidence, render_support_policy
+        from autorelease.verify import FIXTURE_HEADS, fixture_capture, load_workflow, support_page
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        jobs = load_workflow(root / ".github/workflows/autorelease-implement.yml")["jobs"]
+
+        def step(job, name):
+            return next(item for item in jobs[job]["steps"] if item.get("name") == name)
+
+        # The lifecycle PR and its merge run only for a real edit; an already-applied
+        # edit takes the on-main step instead, and the record binds whichever ran.
+        skipped = "needs.implement.outputs.already_applied != 'true'"
+        self.assertEqual("${{ steps.sealed.outputs.already_applied }}", jobs["implement"]["outputs"]["already_applied"])
+        for name in ("Create or reuse automation PR", "Wait for required checks on exact head",
+                     "Re-verify exact SHA, sealed tree, and preconditions", "Merge admitted exact commit"):
+            self.assertEqual(skipped, step("merge", name).get("if"), name)
+        on_main = step("merge", "Re-verify the already-merged edit at the validated commit")
+        self.assertEqual("needs.implement.outputs.already_applied == 'true'", on_main["if"])
+        readiness = step("merge", "Commit deterministic php_bin_ready event record")
+        self.assertEqual(
+            "${{ steps.merged.outputs.commit || steps.onmain.outputs.commit }}", readiness["env"]["MERGED_COMMIT"]
+        )
+        self.assertNotIn("if", readiness)
+        self.assertNotIn("steps.merged.outputs", readiness["run"])
+        scripts = [
+            step("implement", "Apply the admitted lifecycle edit")["run"],
+            step("implement", "Seal exact deterministic diff")["run"],
+            step("validate", "Apply exact sealed bytes")["run"],
+            step("validate", "Record validated SHA and tree")["run"],
+            step("merge", "Restore exact validated commit")["run"],
+            on_main["run"],
+            readiness["run"].replace("${{ github.run_id }}", "77"),
+        ]
+        for script in scripts:
+            self.assertNotIn("${{", script)
+        # The branch build restores the validated commit exactly as the merge job does.
+        build_restore = step("build-new-branch", "Restore exact validated commit")
+        self.assertTrue(build_restore["run"].startswith(scripts[4]), build_restore["run"])
+        self.assertEqual(step("merge", "Restore exact validated commit")["env"], build_restore["env"])
+
+        def git_in(path, *args):
+            return subprocess.run(
+                ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@invalid", *args],
+                cwd=path, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            ).stdout.strip()
+
+        def fixture(work):
+            """Return a clone of an origin whose main already carries new_branch:8.6."""
+            source = work / "source"
+            tracked = git_in(root, "ls-files", "-z").split("\0")
+            for path in filter(None, tracked):
+                if (root / path).is_file():
+                    (source / path).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(root / path, source / path)
+            policy = json.loads((source / "support-policy.json").read_text())
+            maintained = [*policy["maintainedBranches"], "8.6"]
+            policy.update(maintainedBranches=maintained, sourceEvidenceDigests=["sha256:" + "e" * 64],
+                          actionKey="new_branch:8.6", acceptedAt="2026-09-27T00:00:00Z")
+            (source / "support-policy.json").write_text(render_support_policy(policy))
+            shutil.copy(source / f"expected-modules/{maintained[-2]}.txt", source / "expected-modules/8.6.txt")
+            git_in(work, "init", "-q", "-b", "main", str(source))
+            git_in(source, "add", "-A")
+            git_in(source, "commit", "-q", "-m", "chore: new_branch:8.6")
+            origin = work / "origin.git"
+            git_in(work, "clone", "-q", "--bare", str(source), str(origin))
+            clone = work / "clone"
+            git_in(work, "clone", "-q", str(origin), str(clone))
+            base = git_in(clone, "rev-parse", "HEAD")
+            git_in(clone, "checkout", "-q", "--detach", base)
+            # The admitted resume plan, exactly as the watcher retains it.
+            feeds = {branch: f"{branch}.1" for branch in maintained}
+            feeds["8.6"] = "8.6.0"
+            rows = {branch: ("stable", "31 Dec 2030") for branch in maintained}
+            manifest = fixture_capture(
+                clone / "autorelease-run", branch_feeds=feeds, aggregate="8.6.0", page=support_page(rows),
+                releases=[{"tag_name": f"{branch}.1"} for branch in maintained[:-1]],
+            )
+            preconditions = {**FIXTURE_HEADS, "phpBinHead": base,
+                             "supportPolicyDigest": sha256_file(clone / "support-policy.json")}
+            plan = classify_evidence(manifest, preconditions, [], maintained, "new_branch:8.6")
+            self.assertEqual(("new_branch:8.6", True, []), (plan["actionKey"], plan["editsRequired"], plan["allowedPaths"]["php-bin"]))
+            (clone / "autorelease-run/autorelease-plan.json").write_text(json.dumps(plan))
+            (work / "bin").mkdir()
+            (work / "bin/gh").write_text(
+                "#!/usr/bin/env bash\n"
+                'echo "$*" >> "$FAKE_LOG"\n'
+                'case "$1 $2" in\n'
+                '  "pr create") echo https://github.com/o/r/pull/9 ;;\n'
+                '  "pr list") echo "${FAKE_PRS:-[]}" ;;\n'
+                '  "pr close") ;;\n'
+                '  "auth setup-git") ;;\n'
+                "  *) exit 3 ;;\n"
+                "esac\n"
+            )
+            (work / "bin/gh").chmod(0o755)
+            return clone, origin, base
+
+        def run_step(work, clone, script, **env):
+            output = work / "output.txt"
+            output.write_text("")
+            result = subprocess.run(
+                ["bash", "-eo", "pipefail", "-c", script], cwd=clone, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env={**os.environ, "PATH": f"{work / 'bin'}:{os.environ['PATH']}", "GITHUB_OUTPUT": str(output),
+                     "FAKE_LOG": str(work / "gh.log"), "GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "fixture@invalid",
+                     "GIT_COMMITTER_NAME": "Fixture", "GIT_COMMITTER_EMAIL": "fixture@invalid", **env},
+            )
+            outputs = dict(line.split("=", 1) for line in output.read_text().splitlines() if "=" in line)
+            return result, outputs
+
+        def run_through_on_main(work, clone, base):
+            """Run implement, validate, and the merge job's checks; return the on-main outputs."""
+            for script in scripts[:5]:
+                result, outputs = run_step(work, clone, script, BASE_SHA=base)
+                self.assertEqual(0, result.returncode, result.stderr)
+                if "already_applied=" in script:
+                    self.assertEqual("true", outputs["already_applied"])
+            validation = json.loads((clone / "autorelease-run/validation.json").read_text())
+            self.assertEqual((base, git_in(clone, "rev-parse", "HEAD^{tree}")), (validation["headSha"], validation["tree"]))
+            self.assertFalse((clone / "autorelease-run/validated.bundle").exists())
+            return run_step(work, clone, scripts[5])
+
+        with tempfile.TemporaryDirectory() as temporary:
+            work = pathlib.Path(temporary)
+            clone, origin, base = fixture(work)
+            result, outputs = run_through_on_main(work, clone, base)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(base, outputs["commit"])
+            # An earlier attempt's readiness PR for this key is closed; nothing else is.
+            open_prs = [
+                {"number": 5, "headRefName": "autorelease/readiness-41", "title": "chore: record new_branch:8.6 php-bin readiness"},
+                {"number": 6, "headRefName": "autorelease/readiness-42", "title": "chore: record new_branch:8.7 php-bin readiness"},
+                {"number": 7, "headRefName": "autorelease/new_branch-8.6", "title": "chore: record new_branch:8.6 php-bin readiness"},
+                {"number": 8, "headRefName": "autorelease/readiness-77", "title": "chore: record new_branch:8.6 php-bin readiness"},
+            ]
+            result, outputs = run_step(work, clone, scripts[6], MERGED_COMMIT=outputs["commit"], FAKE_PRS=json.dumps(open_prs),
+                                       GITHUB_REPOSITORY="o/r")
+            self.assertEqual(0, result.returncode, result.stderr)
+            # Only the readiness record reached a branch and a PR: nothing was merged.
+            calls = (work / "gh.log").read_text()
+            self.assertNotIn("pr merge", calls)
+            self.assertIn("pr list --state open --author app/github-actions", calls)
+            self.assertEqual(["pr close 5 --repo o/r --delete-branch"],
+                             [line.split(" --comment")[0] for line in calls.splitlines() if line.startswith("pr close")])
+            self.assertEqual(1, calls.count("pr create"))
+            self.assertIn("--head autorelease/readiness-77", calls)
+            self.assertEqual("autorelease/readiness-77", git_in(origin, "branch", "--list", "autorelease/*").strip("* "))
+            self.assertEqual(base, git_in(origin, "rev-parse", "main"))
+            head = git_in(origin, "rev-parse", "autorelease/readiness-77")
+            self.assertEqual((base, head), (outputs["base_sha"], outputs["head_sha"]))
+            self.assertEqual(f"{head} {base}", git_in(origin, "rev-list", "--parents", "-n", "1", head))
+            record_path = "autorelease-events/new_branch-8.6.json"
+            self.assertEqual(record_path, git_in(origin, "diff", "--name-only", base, head))
+            record = json.loads(git_in(origin, "show", f"{head}:{record_path}"))
+            # The record binds the validated main commit and the policy of that tree.
+            self.assertEqual(("php_bin_ready", "new_branch", base), (record["state"], record["classification"], record["phpBinCommit"]))
+            self.assertEqual(
+                [{"kind": "validated_merge", "commit": base, "planDigest": record["planDigest"]}],
+                record["history"][0]["evidence"],
+            )
+            self.assertEqual(sha256_bytes(git_in(origin, "show", f"{base}:support-policy.json").encode() + b"\n"),
+                             record["supportPolicyDigest"])
+            self.assertEqual(sha256_file(clone / "autorelease/policy-invariants.json"), record["policyInvariantsDigest"])
+
+        # Each step refuses any state other than an untouched admitted base.
+        with tempfile.TemporaryDirectory() as temporary:
+            work = pathlib.Path(temporary)
+            clone, origin, base = fixture(work)
+            for script in scripts[:2]:
+                result, _outputs = run_step(work, clone, script, BASE_SHA=base)
+                self.assertEqual(0, result.returncode, result.stderr)
+            sealed = clone / "autorelease-run/sealed"
+            manifest = json.loads((sealed / "patch-manifest.json").read_text())
+
+            def refused(script, label, **env):
+                result, _outputs = run_step(work, clone, script, **{"BASE_SHA": base, **env})
+                self.assertNotEqual(0, result.returncode, label)
+
+            (sealed / "patch-manifest.json").write_text(json.dumps({**manifest, "files": [{"path": "support-policy.json"}]}))
+            refused(scripts[2], "a sealed file rides along")
+            (sealed / "sealed.patch").write_text("diff\n")
+            (sealed / "patch-manifest.json").write_text(
+                json.dumps({**manifest, "patchDigest": sha256_file(sealed / "sealed.patch")}))
+            refused(scripts[2], "a non-empty patch")
+            (sealed / "sealed.patch").write_text("")
+            (sealed / "patch-manifest.json").write_text(json.dumps(manifest))
+            refused(scripts[3], "the checkout is not the admitted base", BASE_SHA="0" * 40)
+            (clone / "staged.txt").write_text("staged\n")
+            git_in(clone, "add", "staged.txt")
+            refused(scripts[3], "a staged change")
+            git_in(clone, "rm", "-q", "--cached", "staged.txt")
+            (clone / "staged.txt").unlink()
+            policy = (clone / "support-policy.json").read_text()
+            (clone / "support-policy.json").write_text(policy + "\n")
+            refused(scripts[3], "an unstaged change to a tracked file")
+            (clone / "support-policy.json").write_text(policy)
+            result, _outputs = run_step(work, clone, scripts[3], BASE_SHA=base)
+            self.assertEqual(0, result.returncode, result.stderr)
+            validation = json.loads((clone / "autorelease-run/validation.json").read_text())
+            (clone / "autorelease-run/validation.json").write_text(json.dumps({**validation, "headSha": "0" * 40}))
+            refused(scripts[4], "a validated commit other than the base")
+            self.assertFalse((work / "gh.log").exists())
+
+        # Main moving on after validation stops the run before any record is filed.
+        with tempfile.TemporaryDirectory() as temporary:
+            work = pathlib.Path(temporary)
+            clone, origin, base = fixture(work)
+            other = work / "other"
+            git_in(work, "clone", "-q", str(origin), str(other))
+            (other / "later.txt").write_text("later\n")
+            git_in(other, "add", "later.txt")
+            git_in(other, "commit", "-q", "-m", "later")
+            git_in(other, "push", "-q", "origin", "main")
+            result, outputs = run_through_on_main(work, clone, base)
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("merge admission rejected", result.stderr)
+            self.assertNotIn("commit", outputs)
+            self.assertFalse((work / "gh.log").exists())
+
     def test_publish_runs_email_their_own_digest_exactly_once(self):
         from autorelease.verify import load_workflow
 

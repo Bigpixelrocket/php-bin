@@ -8,6 +8,11 @@ inputs stay reviewable. The new policy is bound to the plan's own evidence diges
 action key, and accepted at the capture time, so the same admitted plan always
 produces the same bytes.
 
+A lifecycle resume (`_admission.is_lifecycle_resume`) allows no path at all: its edit
+merged in an earlier run that stopped before recording readiness. The edit is then
+verified present on the base and nothing is written, so the run validates, builds, and
+records the exact commit already on main.
+
 These edits are proposals, not authority. `_admission.seal_patch` re-checks every path
 against the plan, the policy against its invariants and evidence, and the clean
 validation and exact-SHA merge gates run after it. A copied module list that does not
@@ -23,7 +28,12 @@ import pathlib
 import re
 from typing import Any
 
-from ._admission import validate_support_policy
+from ._admission import (
+    is_lifecycle_resume,
+    recorded_action_keys,
+    validate_lifecycle_on_base,
+    validate_support_policy,
+)
 from ._validation import ControlError, contained_path, require, sha256_file
 
 
@@ -70,11 +80,15 @@ def apply_lifecycle_plan(
     `repo` is a checkout of the plan's exact base commit and `manifest` the evidence
     manifest the plan was admitted against. The accepted policy in `repo` must still
     validate, and a plan for any other action is rejected: only lifecycle work edits the
-    repository.
+    repository. A lifecycle resume writes nothing and returns no path, once its edit is
+    verified present and no event record exists for it.
     """
     action = plan.get("action")
     require(action in LIFECYCLE_ACTIONS, f"no deterministic repository edit exists for action: {action}")
     require(plan.get("editsRequired") is True, "lifecycle plan does not require edits")
+    if is_lifecycle_resume(plan):
+        validate_lifecycle_on_base(repo, plan, recorded_action_keys(repo / "autorelease-events"))
+        return []
     key = plan.get("actionKey", "")
     match = re.fullmatch(r"(?:new_branch:(\d+\.\d+)|branch_eol:(\d+\.\d+):\d{4}-\d{2}-\d{2})", key)
     require(bool(match), f"lifecycle action key is invalid: {key}")

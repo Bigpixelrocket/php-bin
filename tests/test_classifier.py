@@ -14,12 +14,14 @@ from autorelease.control import (
     canonical_json,
     classify_evidence,
     parse_supported_versions,
+    recorded_action_keys,
     render_support_policy,
     route_watch_action,
     seal_patch,
     sha256_bytes,
     sha256_file,
     validate_plan,
+    verify_merge,
 )
 from autorelease.verify import FIXTURE_HEADS, FIXTURE_POLICY_DIGEST, fixture_capture, support_page
 
@@ -70,6 +72,50 @@ class ClassifierTests(unittest.TestCase):
 
     def admit(self, plan, manifest, pending=None, completed=()):
         return validate_plan(plan, manifest, FIXTURE_HEADS, FIXTURE_POLICY_DIGEST, set(completed), pending)
+
+    def base(self, maintained, key, modules=(), records=()):
+        """Return a checked-out base whose accepted policy was written by `key`."""
+        self.count += 1
+        repo = self.tmp / f"base-{self.count}"
+        (repo / "autorelease").mkdir(parents=True)
+        shutil.copy(ROOT / "autorelease/policy-invariants.json", repo / "autorelease/policy-invariants.json")
+        policy = {
+            "schemaVersion": 1,
+            "policyInvariantsDigest": sha256_file(repo / "autorelease/policy-invariants.json"),
+            "maintainedBranches": list(maintained),
+            "sourceEvidenceDigests": ["sha256:" + "e" * 64],
+            "actionKey": key,
+            "acceptedAt": "2026-09-27T00:00:00Z",
+        }
+        (repo / "support-policy.json").write_text(render_support_policy(policy))
+        (repo / "expected-modules").mkdir()
+        for branch in modules:
+            (repo / f"expected-modules/{branch}.txt").write_text("Core\n")
+        (repo / "autorelease-events").mkdir()
+        for record_key in records:
+            (repo / f"autorelease-events/{record_key.replace(':', '-')}.json").write_text(
+                json.dumps({"actionKey": record_key, "state": "complete"})
+            )
+        return repo
+
+    def classify_on(self, manifest, repo, events=None):
+        """Classify exactly as the watcher does on the checked-out `repo` and its records."""
+        if events is None:
+            events = [json.loads(path.read_text()) for path in sorted((repo / "autorelease-events").glob("*.json"))]
+        policy = json.loads((repo / "support-policy.json").read_text())
+        preconditions = {**FIXTURE_HEADS, "supportPolicyDigest": sha256_file(repo / "support-policy.json")}
+        return classify_evidence(manifest, preconditions, list(events), policy["maintainedBranches"], policy["actionKey"])
+
+    def admit_on(self, plan, manifest, repo, completed=(), keys="records"):
+        """Admit exactly as the watcher's admission script does on the checked-out `repo`.
+
+        The plan is bound to `repo`'s policy digest, as if classified there, so a rejection
+        comes from the base's contents rather than from a stale policy precondition.
+        """
+        digest = sha256_file(repo / "support-policy.json")
+        plan = {**plan, "preconditions": {**plan["preconditions"], "supportPolicyDigest": digest}}
+        recorded = recorded_action_keys(repo / "autorelease-events") if keys == "records" else keys
+        return validate_plan(plan, manifest, FIXTURE_HEADS, digest, set(completed), None, repo, recorded)
 
     # The supported-versions reader ----------------------------------------------------
 
@@ -402,6 +448,135 @@ class ClassifierTests(unittest.TestCase):
             self.admit(patch, manifest)
         self.admit(patch, manifest, completed=["new_branch:8.6"])
 
+    def test_a_merged_new_branch_without_its_record_resumes_the_lifecycle(self):
+        # The new_branch:8.6 edit merged, then its run stopped before the readiness
+        # record: main maintains 8.6, the policy carries that edit's key, and no record
+        # or release exists.
+        feeds = {"8.4": "8.4.20", "8.5": "8.5.9", "8.6": "8.6.0"}
+        rows = {**MAINTAINED, "8.6": ("stable", "31 Dec 2030")}
+        repo = self.base(("8.4", "8.5", "8.6"), "new_branch:8.6", modules=("8.4", "8.5", "8.6"))
+        manifest = self.capture(feeds=feeds, rows=rows, aggregate="8.6.0")
+        plan = self.classify_on(manifest, repo)
+        self.assertEqual(("new_branch", "new_branch:8.6", True), (plan["action"], plan["actionKey"], plan["editsRequired"]))
+        self.assertEqual({"php-bin": [], "mise-php": []}, plan["allowedPaths"])
+        self.assertEqual({"version": "8.6.0", "sourceIdentifier": "php_release_feed_8.6"}, plan["releaseIntent"])
+        self.assertEqual(["php_release_feed_8.6"], [item["captureId"] for item in plan["evidence"]])
+        self.assertEqual(("lifecycle", ["php-bin", "mise-php"]), (plan["risk"], plan["repositories"]))
+        self.admit_on(plan, manifest, repo)
+        decision = route_watch_action(plan)
+        self.assertEqual(("dispatch_implementation", "lifecycle"), (decision["route"], decision["notify"]))
+        # A recovered record moving main defers it like any other implementation.
+        deferred = route_watch_action({**plan, "recoveryMerged": True})
+        self.assertEqual(("none", "dispatch_deferred_by_recovery"), (deferred["route"], deferred["reason"]))
+
+        # Admission re-checks the base on its own and rejects anything short of it.
+        rejected = {
+            "admitted only against the checked-out base": lambda: validate_plan(
+                plan, manifest, FIXTURE_HEADS, sha256_file(repo / "support-policy.json"), set(), None),
+            "event records needed to resume new_branch:8.6 were not supplied": lambda: self.admit_on(
+                plan, manifest, repo, keys=None),
+            "an event record for new_branch:8.6 already exists": lambda: self.admit_on(
+                plan, manifest, repo, keys={"new_branch:8.6"}),
+            "policy was not written by new_branch:8.6": lambda: self.admit_on(
+                plan, manifest, self.base(("8.4", "8.5", "8.6"), "branch_eol:8.3:2025-12-31", modules=("8.6",))),
+            "does not maintain PHP 8.6": lambda: self.admit_on(
+                plan, manifest, self.base(("8.4", "8.5"), "new_branch:8.6", modules=("8.6",))),
+            "module list of PHP 8.6 is missing": lambda: self.admit_on(
+                plan, manifest, self.base(("8.4", "8.5", "8.6"), "new_branch:8.6", modules=("8.5",))),
+            "PHP 8.6 already shipped": lambda: self.admit_on(
+                plan, self.capture(feeds=feeds, rows=rows, aggregate="8.6.0", releases=[*PUBLISHED, {"tag_name": "8.6.0"}]),
+                repo),
+        }
+        for reason, admit in rejected.items():
+            with self.assertRaisesRegex(ControlError, reason):
+                admit()
+        # A completed record naming a release on the branch also means it shipped.
+        with self.assertRaisesRegex(ControlError, "PHP 8.6 already shipped"):
+            self.admit_on(plan, manifest, repo, completed=["new_patch:8.6.0"])
+        # The checked-out policy must be the one the plan was classified against.
+        other = self.base(("8.4", "8.5", "8.6"), "new_branch:8.6", modules=("8.6",))
+        (other / "support-policy.json").write_text((other / "support-policy.json").read_text().replace("e" * 64, "f" * 64))
+        with self.assertRaisesRegex(ControlError, "not the one the plan was classified against"):
+            validate_plan(plan, manifest, FIXTURE_HEADS, sha256_file(repo / "support-policy.json"), set(), None, other,
+                          recorded_action_keys(other / "autorelease-events"))
+
+        # Without the edit's own key on the policy a human still restores the record.
+        other = self.base(("8.4", "8.5", "8.6"), "bootstrap", modules=("8.6",))
+        stopped = self.classify_on(manifest, other)
+        self.assertEqual(("needs_human", "new_branch:8.6"), (stopped["action"], stopped["actionKey"]))
+        self.assertEqual("needs_human", self.classify(manifest, branches=("8.4", "8.5", "8.6"))["action"])
+        # A record in flight is resumed through its own next transition instead.
+        waiting = self.capture(feeds=feeds, rows=rows, aggregate="8.6.0", incomplete=["new_branch:8.6"])
+        resumed = self.classify_on(waiting, repo, [{"actionKey": "new_branch:8.6", "state": "php_bin_ready"}])
+        self.assertEqual(("new_branch:8.6", False), (resumed["actionKey"], resumed["editsRequired"]))
+        # Any record for the key, even one the watch decision did not list, rules it out.
+        listed = self.classify_on(manifest, repo, [{"actionKey": "new_branch:8.6", "state": "php_bin_ready"}])
+        self.assertEqual(("needs_human", "new_branch:8.6"), (listed["action"], listed["actionKey"]))
+        # A due patch on an older branch still goes first.
+        due = self.capture(feeds={**feeds, "8.4": "8.4.21"}, rows=rows, aggregate="8.6.0")
+        self.assertEqual("new_patch:8.4.21", self.classify_on(due, repo)["actionKey"])
+        # A first release the aggregate feed already supersedes waits for its own feed.
+        ahead = self.capture(feeds=feeds, rows=rows, aggregate="8.6.1")
+        self.assertEqual("no_change", self.classify_on(ahead, repo)["action"])
+        # While it waits, no fresh lifecycle edit rewrites the policy's key and loses it.
+        retiring = {**rows, "8.4": ("eol", "31 Dec 2025")}
+        waiting_eol = self.capture(feeds=feeds, rows=retiring, aggregate="8.6.1")
+        self.assertEqual("no_change", self.classify_on(waiting_eol, repo)["action"])
+        # Once the branch has shipped, lifecycle work goes on as before.
+        shipped = self.capture(feeds=feeds, rows=retiring, aggregate="8.6.0", releases=[*PUBLISHED, {"tag_name": "8.6.0"}])
+        self.assertEqual("branch_eol:8.4:2025-12-31", self.classify_on(shipped, repo)["actionKey"])
+        # So does a policy that carries the key but no longer maintains the branch.
+        dropped = self.base(("8.4", "8.5"), "new_branch:8.6", modules=("8.4", "8.5"))
+        unmaintained = self.capture(feeds={"8.4": "8.4.20", "8.5": "8.5.9"}, rows={**MAINTAINED, "8.4": ("eol", "31 Dec 2025")})
+        self.assertEqual("branch_eol:8.4:2025-12-31", self.classify_on(unmaintained, dropped)["actionKey"])
+
+    def test_a_merged_retirement_without_its_record_resumes_the_lifecycle(self):
+        key = "branch_eol:8.4:2026-12-31"
+        repo = self.base(("8.5",), key, modules=("8.4", "8.5"))
+        feeds = {"8.5": "8.5.9"}
+        # php.net still lists the retired branch: its end-of-life row is the evidence.
+        manifest = self.capture(feeds=feeds, rows={**MAINTAINED, "8.4": ("eol", "31 Dec 2026")})
+        plan = self.classify_on(manifest, repo)
+        self.assertEqual(("branch_eol", key, True), (plan["action"], plan["actionKey"], plan["editsRequired"]))
+        self.assertEqual({"php-bin": [], "mise-php": []}, plan["allowedPaths"])
+        self.assertIsNone(plan["releaseIntent"])
+        self.assertIn('<tr class="eol">', plan["evidence"][0]["locator"]["value"])
+        self.admit_on(plan, manifest, repo)
+        self.assertEqual("dispatch_implementation", route_watch_action(plan)["route"])
+        # Once php.net drops the row, the capture that no longer lists it is cited.
+        dropped = self.capture(feeds=feeds, rows={"8.5": MAINTAINED["8.5"]})
+        plan = self.classify_on(dropped, repo)
+        self.assertEqual((key, "evidence_manifest"), (plan["actionKey"], plan["evidence"][0]["captureId"]))
+        self.admit_on(plan, dropped, repo)
+        # It goes before new lifecycle work, whose edit would rewrite the policy's key.
+        newer = self.capture(feeds=feeds, rows={**MAINTAINED, "8.4": ("eol", "31 Dec 2026"), "8.6": ("stable", "31 Dec 2030")},
+                             aggregate="8.6.0")
+        self.assertEqual(key, self.classify_on(newer, repo)["actionKey"])
+        # A due patch still goes first.
+        due = self.capture(feeds={"8.5": "8.5.10"}, aggregate="8.5.10", rows={"8.5": MAINTAINED["8.5"]})
+        self.assertEqual("new_patch:8.5.10", self.classify_on(due, repo)["actionKey"])
+        # A policy that still maintains the branch retires it afresh, with its edit.
+        fresh = self.classify_on(manifest, self.base(("8.4", "8.5"), key))
+        self.assertEqual((key, ["support-policy.json"]), (fresh["actionKey"], fresh["allowedPaths"]["php-bin"]))
+        # A retired newest branch php.net still calls supported is never resumed as retired.
+        newest = self.classify_on(self.capture(feeds={"8.4": "8.4.20"}), self.base(("8.4",), "branch_eol:8.5:2029-12-31"))
+        self.assertEqual("new_branch:8.5", newest["actionKey"])
+        # A finished retirement, or a branch php.net calls supported, is not resumed.
+        finished = self.base(("8.5",), key, records=(key,))
+        self.assertEqual("no_change", self.classify_on(dropped, finished)["action"])
+        self.assertEqual(
+            "needs_human", self.classify_on(self.capture(feeds=feeds, rows={**MAINTAINED, "8.4": ("security", "31 Dec 2026")}), repo)["action"]
+        )
+        # Admission rejects a retirement that is not fully on the base, or already recorded.
+        for reason, admit in {
+            "still maintains PHP 8.4": lambda: self.admit_on(plan, dropped, self.base(("8.4", "8.5"), key)),
+            f"policy was not written by {key}": lambda: self.admit_on(
+                plan, dropped, self.base(("8.5",), "branch_eol:8.3:2025-12-31")),
+            f"an event record for {key} already exists": lambda: self.admit_on(plan, dropped, finished),
+        }.items():
+            with self.assertRaisesRegex(ControlError, reason):
+                admit()
+
     def test_inconsistent_watcher_inputs_fail_the_job(self):
         manifest = self.capture()
         with self.assertRaisesRegex(ControlError, "preconditions"):
@@ -497,11 +672,85 @@ class LifecycleEditTests(unittest.TestCase):
         self.assertEqual("2026-09-28T00:00:00Z", policy["acceptedAt"])
         sealed = seal_patch(self.repo, self.base, plan, self.tmp / "sealed")
         self.assertEqual(changed, [item["path"] for item in sealed["files"]])
+        self.assertIs(False, sealed["alreadyApplied"])
         # A reviewed module list already on main is never overwritten on a retry.
         subprocess.run(["git", "checkout", "-q", "--", "support-policy.json"], cwd=self.repo, check=True)
         (self.repo / f"expected-modules/{branch}.txt").write_text("reviewed\n")
         self.assertEqual(["support-policy.json"], apply_lifecycle_plan(self.repo, plan, json.loads(manifest.read_text())))
         self.assertEqual("reviewed\n", (self.repo / f"expected-modules/{branch}.txt").read_text())
+
+    def git(self, *argv):
+        return subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@invalid", *argv],
+                              cwd=self.repo, check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
+
+    def test_a_resumed_lifecycle_writes_nothing_and_seals_an_explicit_empty_patch(self):
+        # The fresh edit merges first, exactly as a run that then stopped would leave it.
+        newest = self.maintained[-1]
+        major, minor = newest.split(".")
+        branch = f"{major}.{int(minor) + 1}"
+        rows = {item: ("stable", "31 Dec 2029") for item in self.maintained}
+        rows[branch] = ("stable", "31 Dec 2031")
+        fresh, manifest = self.lifecycle_plan(rows, f"{branch}.0")
+        apply_lifecycle_plan(self.repo, fresh, json.loads(manifest.read_text()))
+        (self.repo / "autorelease-events").mkdir()
+        (self.repo / "autorelease-events/.keep").write_text("")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", f"chore: {fresh['actionKey']}")
+        merged = self.git("rev-parse", "HEAD")
+        maintained = [*self.maintained, branch]
+        feeds = {item: f"{item}.1" for item in self.maintained}
+        feeds[branch] = f"{branch}.0"
+        capture = fixture_capture(self.tmp / "resume", branch_feeds=feeds, aggregate=f"{branch}.0", page=page(rows),
+                                  releases=[{"tag_name": f"{item}.1"} for item in self.maintained])
+        preconditions = {**PRECONDITIONS, "phpBinHead": merged}
+        plan = classify_evidence(capture, preconditions, [], maintained, fresh["actionKey"])
+        self.assertEqual({"php-bin": [], "mise-php": []}, plan["allowedPaths"])
+
+        self.assertEqual([], apply_lifecycle_plan(self.repo, plan, json.loads(capture.read_text())))
+        self.assertEqual("", self.git("status", "--porcelain"))
+        sealed = seal_patch(self.repo, merged, plan, self.tmp / "sealed")
+        self.assertEqual(([], True), (sealed["files"], sealed["alreadyApplied"]))
+        self.assertEqual(0, (self.tmp / "sealed/sealed.patch").stat().st_size)
+        self.assertEqual(sha256_bytes(b""), sealed["patchDigest"])
+
+        # Nothing merges: the validated commit is the sealed base and must still be main.
+        checks = {"Script checks": "success"}
+        on_main = {"phpBinHead": merged, "supportPolicyDigest": "sha256:" + "d" * 64}
+        self.assertTrue(verify_merge(self.repo, merged, sealed, checks, on_main, on_main)["admitted"])
+        moved = {**on_main, "phpBinHead": "0" * 40}
+        for reason, arguments in {
+            "merge preconditions changed": (sealed, on_main, moved),
+            "main is not the validated commit": (sealed, moved, moved),
+            "cannot seal file changes": ({**sealed, "files": [{"path": "support-policy.json"}]}, on_main, on_main),
+            "must be an already-applied lifecycle": ({**sealed, "alreadyApplied": False}, on_main, on_main),
+        }.items():
+            with self.assertRaisesRegex(ControlError, reason):
+                verify_merge(self.repo, merged, arguments[0], checks, arguments[1], arguments[2])
+        (self.repo / "later.txt").write_text("later\n")
+        self.git("add", "later.txt")
+        self.git("commit", "-q", "-m", "later")
+        later = self.git("rev-parse", "HEAD")
+        with self.assertRaisesRegex(ControlError, "sealed base itself"):
+            verify_merge(self.repo, later, sealed, checks, {**on_main, "phpBinHead": later}, {**on_main, "phpBinHead": later})
+        self.git("reset", "-q", "--hard", merged)
+
+        # A resume never edits: any change is unadmitted, and a record ends it.
+        (self.repo / f"expected-modules/{branch}.txt").write_text("edited\n")
+        with self.assertRaisesRegex(ControlError, "unadmitted path"):
+            seal_patch(self.repo, merged, plan, self.tmp / "sealed-edit")
+        self.git("checkout", "-q", "--", ".")
+        (self.repo / f"autorelease-events/new_branch-{branch}.json").write_text(
+            json.dumps({"actionKey": plan["actionKey"], "state": "php_bin_ready"}))
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "record")
+        recorded = self.git("rev-parse", "HEAD")
+        for attempt in (lambda: apply_lifecycle_plan(self.repo, plan, json.loads(capture.read_text())),
+                        lambda: seal_patch(self.repo, recorded, plan, self.tmp / "sealed-recorded")):
+            with self.assertRaisesRegex(ControlError, "already exists"):
+                attempt()
+        # A fresh plan that finds nothing to write is still no patch at all.
+        with self.assertRaisesRegex(ControlError, "produced no patch"):
+            seal_patch(self.repo, recorded, fresh, self.tmp / "sealed-fresh")
 
     def test_branch_eol_only_removes_the_branch_from_the_policy(self):
         oldest = self.maintained[0]
