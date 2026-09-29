@@ -159,7 +159,11 @@ only after the one before succeeded:
    handoff without repeating that job's recapture. Evidence that moved stops
    the run with the verified draft left in place, and the next admitted
    dispatch reuses that draft. It then re-reads the draft
-   once more, records `publishing`, and only then makes the release public. A
+   once more, records `publishing`, and only then makes the release public. The
+   publication sets GitHub's "Latest" flag explicitly: on only when no published
+   release sorts above this version, comparing major, minor, patch, and revision
+   as numbers, so a rebuild of an older branch never takes the badge from the
+   newest version. A
    run that stops between the publication and its record is therefore still
    known to be possibly live, and reports a warning rather than a failed
    release; so does a rerun that stops early after an earlier attempt already
@@ -169,14 +173,24 @@ only after the one before succeeded:
 4. `verify-public`, read-only like `verify-draft`, runs fresh public
    exact-version and branch-shorthand installs.
 5. `finalize` completes the durable event record through an exact-SHA pull
-   request.
+   request. Rerunning it is safe: a record already on main that completes
+   exactly this release, merged by an earlier attempt or recovered by the
+   watcher, ends the job without a second record, and a pull request or branch
+   an earlier attempt left on the run's own `autorelease/event-<run id>` branch
+   is withdrawn before the record is filed afresh. A complete record on main
+   that names another release stops the job. The rerun can only file the
+   record while main is still the commit the run was dispatched at, because
+   `Protected controls` binds a publish run's record to exactly that commit;
+   once main has moved on, the watcher's record recovery is the path.
 
 Both install jobs pass their read-only token to `mise-php`, whose GitHub API
 reads would otherwise be rate limited, and restore no mise cache. Every
 artifact a job retains is named per run attempt, so rerunning a failed job
 never collides with what an earlier attempt kept, and the transaction state
 the failure notification and the email digest read is taken from the newest
-attempt that retained one.
+attempt that retained one. That state records whether the event record is on
+main by reading main itself whenever the attempt did not merge it, so a
+failed rerun after an earlier merge still reports the record as complete.
 
 Validation deliberately runs the repository's own scripts at the sealed
 commit: `autorelease-implement.yml`, and `autorelease-consumer.yml` in
@@ -197,15 +211,24 @@ action, or final-result change adds a comment. Critical failures stop mutation.
 GitHub Actions failure email is an independent fallback.
 
 `Autorelease email digest` additionally sends one fixed-template TL;DR email
-after every completed watcher or publish run, including quiet healthy days, so
-silence stops being ambiguous between "no change" and "the schedule stopped".
+after every completed watcher or publish run attempt, including quiet healthy
+days, so silence stops being ambiguous between "no change" and "the schedule
+stopped". A watcher run reaches it through `workflow_run`. The watcher
+dispatches the publish transaction with `GITHUB_TOKEN`, for which GitHub
+starts no `workflow_run`, so the publish run calls the digest workflow from its
+own last job instead, with the conclusion its other jobs reached; publish is
+not a `workflow_run` trigger, so no run is emailed twice.
 The template is selected by `email-digest` in `autorelease/control.py` from
 retained run state alone and delivered through Resend; no free-form plan prose
 reaches the outbound channel, and the workflow skips quietly until the
 `RESEND_API_KEY` secret and the email variables exist. Run state that matches
 no template — including a corrupt retained artifact — still sends a fallback
 summary naming the exact rejection reason, so the channel cannot go silent on
-precisely the runs that need a look.
+precisely the runs that need a look. Delivery retries transient Resend errors
+under one idempotency key per run attempt; a delivery that still fails fails
+the digest job, and with it a publish run, because a red run is the only
+report left when the channel is down. Rerunning that run's failed jobs sends
+the digest again without repeating any job that passed.
 
 There is no repair phase. A failed classification input, admission, sealing,
 validation, build, or merge stops that run and raises the deduplicated owner

@@ -1,24 +1,46 @@
 name: Autorelease email digest
 
-# One deterministic TL;DR email per completed pipeline run. The digest is
+# One deterministic TL;DR email per completed pipeline run attempt. The digest is
 # rendered by `./autorelease/control.py email-digest` from retained run state
 # only, so a template is selected — never written — at runtime, and no
 # model-authored prose can reach the outbound channel.
+#
+# Each run reaches this workflow by exactly one route. The watcher is started by
+# its schedule or by a person, so its completion fires `workflow_run`. The publish
+# transaction is dispatched by the watcher with GITHUB_TOKEN, and GitHub starts no
+# `workflow_run` for runs that token started, so the publish workflow calls this
+# one from its own last job instead and passes the conclusion its jobs reached.
 on:
   workflow_run:
     workflows:
       - PHP autorelease watcher
-      - Autorelease publish transaction
     types:
       - completed
+  workflow_call:
+    inputs:
+      run_id:
+        description: Run whose retained state the digest describes
+        required: true
+        type: string
+      run_attempt:
+        description: Attempt of that run
+        required: true
+        type: string
+      workflow:
+        description: Calling pipeline workflow; only publish calls this one
+        required: true
+        type: string
+      conclusion:
+        description: Conclusion the calling run's jobs reached
+        required: true
+        type: string
+    secrets:
+      RESEND_API_KEY:
+        required: false
 
 permissions:
   contents: read
   actions: read
-
-concurrency:
-  group: autorelease-email-${{ github.event.workflow_run.id }}
-  cancel-in-progress: false
 
 defaults:
   run:
@@ -29,21 +51,29 @@ jobs:
     name: Send run digest
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Inside a call, `github.event` is the caller's dispatch event, so each value
+    # comes from the inputs when called and from the completed run otherwise.
+    concurrency:
+      group: autorelease-email-${{ inputs.run_id || github.event.workflow_run.id }}
+      cancel-in-progress: false
     env:
-      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
       EMAIL_FROM: ${{ vars.AUTORELEASE_EMAIL_FROM }}
       EMAIL_TO: ${{ vars.AUTORELEASE_EMAIL_TO }}
-      RUN_ID: ${{ github.event.workflow_run.id }}
-      RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
-      RUN_URL: ${{ github.event.workflow_run.html_url }}
+      CALLED_WORKFLOW: ${{ inputs.workflow }}
+      RUN_ID: ${{ inputs.run_id || github.event.workflow_run.id }}
+      RUN_ATTEMPT: ${{ inputs.run_attempt || github.event.workflow_run.run_attempt }}
+      RUN_URL: ${{ inputs.run_id && format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, inputs.run_id) || github.event.workflow_run.html_url }}
       RUN_NAME: ${{ github.event.workflow_run.name }}
-      RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+      RUN_CONCLUSION: ${{ inputs.conclusion || github.event.workflow_run.conclusion }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Decide whether delivery is configured
         id: gate
         # An unconfigured repository skips quietly instead of failing, so the
         # digest can merge ahead of the Resend secret and variables existing.
+        # The secret is only in this step and the send step, never in the job.
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
         run: |
           if [[ -n "$RESEND_API_KEY" && -n "$EMAIL_FROM" && -n "$EMAIL_TO" ]]; then
             echo "configured=true" >> "$GITHUB_OUTPUT"
@@ -60,13 +90,26 @@ jobs:
         if: steps.gate.outputs.configured == 'true'
         run: |
           mkdir -p email-run/state
+          [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
-          case "$RUN_NAME" in
-            "PHP autorelease watcher")
+          if [[ -n "$CALLED_WORKFLOW" ]]; then
+            if [[ "$CALLED_WORKFLOW" != publish ]]; then
+              echo "unrouted calling workflow: $CALLED_WORKFLOW" >&2
+              exit 1
+            fi
+            workflow=publish
+          elif [[ "$RUN_NAME" == "PHP autorelease watcher" ]]; then
+            workflow=watcher
+          else
+            echo "unrouted triggering workflow: $RUN_NAME" >&2
+            exit 1
+          fi
+          case "$workflow" in
+            watcher)
               echo "workflow=watcher" >> "$GITHUB_OUTPUT"
               artifacts=("autorelease-investigation-$RUN_ID")
               ;;
-            "Autorelease publish transaction")
+            publish)
               echo "workflow=publish" >> "$GITHUB_OUTPUT"
               # Each attempt retains its own state, and a rerun of only the failed
               # jobs keeps the state an earlier attempt retained, so the newest
@@ -75,10 +118,6 @@ jobs:
               for ((attempt = RUN_ATTEMPT; attempt > 0; attempt--)); do
                 artifacts+=("release-transaction-state-$RUN_ID-$attempt")
               done
-              ;;
-            *)
-              echo "unrouted triggering workflow: $RUN_NAME" >&2
-              exit 1
               ;;
           esac
           # A run that crashed before retaining its state has no artifact; the
@@ -106,6 +145,14 @@ jobs:
       - name: Send the digest through Resend
         if: steps.gate.outputs.configured == 'true'
         # The secret reaches exactly one place: the Authorization header.
+        # Transient failures are retried under one idempotency key per run attempt, so
+        # a retry after a lost reply cannot send the digest twice. A delivery that still
+        # fails fails this job, and with it the run: the digest is the report, so a red
+        # run is the only one left when the channel is down, and rerunning the failed
+        # jobs of a publish run whose other jobs passed repeats only this one.
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          WORKFLOW: ${{ steps.state.outputs.workflow }}
         run: |
           jq \
             --arg from "$EMAIL_FROM" \
@@ -114,7 +161,9 @@ jobs:
             email-run/digest.json > email-run/payload.json
           curl --fail-with-body --silent --show-error \
             --connect-timeout 10 --max-time 30 \
+            --retry 3 --retry-delay 15 --retry-connrefused \
             --request POST https://api.resend.com/emails \
+            --header "Idempotency-Key: php-bin-$WORKFLOW-$RUN_ID-$RUN_ATTEMPT" \
             --header "Authorization: Bearer $RESEND_API_KEY" \
             --header "Content-Type: application/json" \
             --data @email-run/payload.json

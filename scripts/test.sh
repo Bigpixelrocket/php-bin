@@ -191,14 +191,25 @@ mkdir -p "$SCRATCH_DIR/failing-install"
 cat > "$SCRATCH_DIR/failing-install/install" <<'SH'
 #!/usr/bin/env bash
 for argument in "$@"; do
-  [[ "$argument" == */include/sodium/export.h ]] && exit 1
+  if [[ "$argument" == */include/sodium/export.h ]]; then
+    echo "install: fixture refused to copy $argument" >&2
+    exit 1
+  fi
 done
 exec /usr/bin/install "$@"
 SH
 chmod +x "$SCRATCH_DIR/failing-install/install"
 if PATH="$SCRATCH_DIR/failing-install:$PATH" \
-  "$SCRIPT_DIR/package.sh" "$FIXTURE_ROOT/bin/php" 8.4.99 2>/dev/null; then
+  "$SCRIPT_DIR/package.sh" "$FIXTURE_ROOT/bin/php" 8.4.99 \
+  > "$SCRATCH_DIR/failing-install.out" 2> "$SCRATCH_DIR/failing-install.log"; then
   echo "Expected packaging to reject a library header it could not copy." >&2
+  exit 1
+fi
+# The refused copy is what stopped packaging, before any archive was written.
+grep -Fq "install: fixture refused to copy $FIXTURE_ROOT/include/sodium/export.h" \
+  "$SCRATCH_DIR/failing-install.log"
+if grep -F 'Created' "$SCRATCH_DIR/failing-install.out"; then
+  echo "Packaging wrote an archive although a library header failed to copy." >&2
   exit 1
 fi
 

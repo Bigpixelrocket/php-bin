@@ -24,7 +24,7 @@
       },
       "afterSnapshot": {
         "path": "../mise-php/docs/admin-state/mise-php-after.json",
-        "digest": "sha256:e50672433148e1054cd0436af11f47cbc7bf643db650eaed166ffcd1633fa632"
+        "digest": "sha256:da186692248707dc17c433cfe7abbaca73586dfa616dc3149083dd9d6268927c"
       },
       "settingsPullRequests": [
         "https://github.com/Bigpixelrocket/mise-php/pull/9",

@@ -427,8 +427,9 @@ jobs:
             head="$(git rev-parse HEAD)"
             record_digest="sha256:$(shasum -a 256 autorelease-state/last-evidence.json | awk '{print $1}')"
             gh auth setup-git
+            # Forced, so the lease below is exactly the branch head GitHub reports now.
             if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
-              git fetch origin "$branch:refs/remotes/origin/$branch"
+              git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch"
             fi
             git push --force-with-lease origin "HEAD:refs/heads/$branch"
             number="$(gh pr list --state open --head "$branch" --json number --jq '.[0].number // empty')"
