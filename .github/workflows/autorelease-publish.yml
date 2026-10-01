@@ -415,7 +415,7 @@ jobs:
           persist-credentials: false
       # mise installs no tools here. Without the cache it never runs a mise binary
       # another job could have saved.
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+      - uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5 # v5.0.0
         with:
           github_token: ${{ github.token }}
           cache: false
@@ -672,7 +672,7 @@ jobs:
           ref: ${{ needs.release.outputs.mise_commit }}
           path: mise-php
           persist-credentials: false
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+      - uses: jdx/mise-action@9149ea85001c7435d5a66bb127d6a1b6227cb0a5 # v5.0.0
         with:
           github_token: ${{ github.token }}
           cache: false
