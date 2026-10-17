@@ -72,6 +72,23 @@ from autorelease.control import (
 )
 
 
+def setUpModule():
+    """Keep fixture repositories free of background git maintenance.
+
+    Commits and pushes start a detached `git maintenance run --auto`, which writes
+    objects/maintenance.lock and can race TemporaryDirectory cleanup into "Directory
+    not empty". A global config is the only switch that also reaches receive-pack
+    behind a local push, since that transport drops -c and GIT_CONFIG_COUNT.
+    """
+    directory = tempfile.TemporaryDirectory()
+    unittest.addModuleCleanup(directory.cleanup)
+    config = pathlib.Path(directory.name) / "gitconfig"
+    config.write_text("[maintenance]\n\tauto = false\n")
+    patcher = mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(config)})
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+
+
 def full_plan(**fields) -> dict:
     """Return a plan with every reviewed field, overridden by `fields`."""
     return {

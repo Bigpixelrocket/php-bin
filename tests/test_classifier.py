@@ -1,10 +1,12 @@
 import json
+import os
 import pathlib
 import re
 import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from autorelease.control import (
     ROOT,
@@ -39,6 +41,22 @@ PAGE_SHELL = (
     '<tr class="stable"><td>Active support</td><td>Maintained.</td></tr>\n'
     '<tr class="eol"><td>End of life</td><td>Unsupported.</td></tr>\n</table>\n'
 )
+
+
+def setUpModule():
+    """Keep fixture repositories free of background git maintenance.
+
+    A commit starts a detached `git maintenance run --auto`, which writes
+    objects/maintenance.lock and can race TemporaryDirectory cleanup into
+    "Directory not empty".
+    """
+    directory = tempfile.TemporaryDirectory()
+    unittest.addModuleCleanup(directory.cleanup)
+    config = pathlib.Path(directory.name) / "gitconfig"
+    config.write_text("[maintenance]\n\tauto = false\n")
+    patcher = mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(config)})
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
 
 
 def page(rows=None) -> bytes:
