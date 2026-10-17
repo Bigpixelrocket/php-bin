@@ -308,6 +308,11 @@ def retained_notification_issue(prior: dict[str, Any] | None) -> dict[str, Any] 
 
 
 EMAIL_SUBJECT_PREFIX = "[php-bin autorelease]"
+# A publish run only succeeds once it has dispatched the next watcher run.
+EMAIL_NEXT_WATCHER_SENTENCE = "The next watcher run was started to take the next due release, if any."
+# The admitted actions whose route moves main or starts work, all of which wait while a
+# publish run has not recorded its release (WATCH_ROUTES_HELD_FOR_PUBLISH).
+EMAIL_HELD_FOR_PUBLISH_ACTIONS = frozenset({"no_change", "new_patch", "new_branch", "branch_eol", "recipe_rebuild"})
 # Repository slugs reach the digest from `github.repository`, never from run state.
 EMAIL_REPOSITORY_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 # ACTION_KEY_RE fixes key syntax only, so each version-deriving action also pins
@@ -754,7 +759,7 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
                 f"The rebuild revision PHP {version} for macOS arm64 is live and fresh public "
                 f"installs of it were verified: https://github.com/{repository}/releases/tag/{version}. "
                 f"Earlier PHP {base} releases stay published unchanged, and installs of the plain "
-                f"version {base} now resolve to this revision.",
+                f"version {base} now resolve to this revision. {EMAIL_NEXT_WATCHER_SENTENCE}",
                 run_url=run_url,
             )
         if released and conclusion == "success":
@@ -762,19 +767,22 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
                 "release_published",
                 f"PHP {version} published",
                 f"The immutable PHP {version} release for macOS arm64 is live and fresh public "
-                f"installs of it were verified: https://github.com/{repository}/releases/tag/{version}.",
+                f"installs of it were verified: https://github.com/{repository}/releases/tag/{version}. "
+                f"{EMAIL_NEXT_WATCHER_SENTENCE}",
                 run_url=run_url,
             )
         if released and recorded:
             # The release job reconciles an existing release even when the fresh build
-            # fails, so a run can finish the release and its record and still fail.
+            # fails, and the next watcher run is dispatched after the record merged, so a
+            # run can finish the release and its record and still fail.
             return _email(
                 "release_complete_run_failed",
                 f"PHP {version} published and recorded; run failed",
                 f"The PHP {version} release is live and its durable event record was completed, "
                 f"but the publish run still finished with conclusion '{conclusion}'. That happens "
-                "when the release was reconciled from its existing assets while another job, such "
-                "as the fresh build that reconciliation did not need, failed. The release itself "
+                "when another job failed around the finished release: the fresh build that "
+                "reconciling an existing release did not need, or starting the next watcher run, "
+                "which leaves any further due release to the daily schedule. The release itself "
                 "needs nothing; check the run if the failure recurs.",
                 run_url=run_url,
             )
@@ -783,8 +791,9 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
                 "release_record_pending",
                 f"PHP {version} published; record recovery pending",
                 f"The PHP {version} release went live, but the publish run failed after publication, "
-                "so its durable event record is missing. Tomorrow's watcher recovers the record "
-                "automatically; nothing needs doing unless that recovery also fails.",
+                "so its durable event record is missing and no next watcher run was started. The next "
+                "scheduled watcher run recovers the record automatically; nothing needs doing unless "
+                "that recovery also fails.",
                 run_url=run_url,
             )
         return _email(
@@ -802,7 +811,7 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
         return _email(
             "watcher_failed",
             f"Watcher run failed ({conclusion})",
-            f"The daily autorelease watcher finished with conclusion '{conclusion}'. If the "
+            f"The autorelease watcher run finished with conclusion '{conclusion}'. If the "
             "failure was actionable, a critical GitHub issue has been filed and assigned. The "
             "watcher is idempotent, so re-dispatching it after the cause is fixed is safe.",
             status_paragraph,
@@ -848,6 +857,19 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
         "admitted plan action key does not match its action",
     )
     version = action_key.split(":")[1] if ":" in action_key else ""
+    publish_in_flight = report.get("publishInFlight", False)
+    require(isinstance(publish_in_flight, bool), "publish in flight flag is invalid")
+    if publish_in_flight and action in EMAIL_HELD_FOR_PUBLISH_ACTIONS:
+        return _email(
+            "held_for_publish",
+            f"Watcher: {action_key} waits for the publish in flight",
+            f"A publish run had not recorded its release when this run started, so the watcher "
+            f"admitted {action_key} but changed nothing on main and dispatched nothing. That "
+            "publish run starts the next watcher run once its release is recorded, and that run "
+            "takes whatever is due then; if the publish fails, the daily schedule does.",
+            status_paragraph,
+            run_url=run_url,
+        )
     if action == "recipe_rebuild":
         revision = f"{version}-{action_key.split(':')[2]}"
         return _email(
@@ -1200,6 +1222,14 @@ WATCH_LIFECYCLE_NOTIFICATION_ACTIONS = frozenset({"new_branch", "branch_eol"})
 # owns that repair, so it is a route the plan never takes rather than an unrouted one.
 WATCH_RECOVERY_ACTION = "record_completed_event"
 WATCH_PUBLISH_ACTIONS = frozenset({"new_patch", "new_branch", "recipe_rebuild"})
+# The plan routes that move main or start work that does. A publish run still in flight
+# recaptures `php_bin_state` before publication, and a plan admitted meanwhile was
+# classified before that run's record existed, so each of these waits for the watcher
+# run the publish starts once its record is on main. The recovery overlay, which also
+# moves main, waits under the same flag in `route_watch_action`.
+WATCH_ROUTES_HELD_FOR_PUBLISH = frozenset(
+    {"no_change_evidence", "dispatch_implementation", "dispatch_publish", "complete_branch_eol"}
+)
 
 
 def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:
@@ -1215,13 +1245,23 @@ def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:
     Anything else raises instead of falling through to a silent success, which is what an
     unrouted combination used to do.
 
-    Invariant: `recoveryRoute` must depend on `recordActionKey` alone. The watch workflow
-    calls this function twice in one run — the recover step reads `recoveryRoute` from a
-    call that supplies only the record key, then the dispatch step reads `route` from a
-    call that supplies the whole decision. Both agree today only because the recovery
-    overlay ignores every other field. A field added to the recovery decision would make
-    the first call answer from an incomplete decision and silently disagree with the
-    second, so it must be passed to both callers in the same change.
+    Invariant: `recoveryRoute` must depend on `recordActionKey` and `publishInFlight`
+    alone. The watch workflow calls this function twice in one run — the recover step
+    reads `recoveryRoute` from a call that supplies only those two fields, then the
+    dispatch step reads `route` from a call that supplies the whole decision. Both agree
+    only because the recovery overlay ignores every other field. A field added to the
+    recovery decision would make the first call answer from an incomplete decision and
+    silently disagree with the second, so it must be passed to both callers in the same
+    change.
+
+    `publishInFlight` says a publish run had not yet recorded its release when this run
+    started. Each successful publish starts the next watcher run once its record is on
+    main, so every route that moves main or starts work waits for that run instead of
+    re-admitting the release in flight from evidence captured before its record; a
+    publish that fails starts nothing, which leaves the work to the daily schedule. The
+    record recovery waits too: that publish files the record itself, and a recovered
+    record merged first would move main under its record pull request. The deferral
+    replaces only the routes; validation and notification are unchanged.
     """
     action = str(decision.get("action") or "")
     action_key = str(decision.get("actionKey") or "")
@@ -1229,12 +1269,15 @@ def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:
     edits_required = bool(decision.get("editsRequired"))
     recovery_merged = bool(decision.get("recoveryMerged"))
     evidence_recorded = bool(decision.get("evidenceAlreadyRecorded"))
+    publish_in_flight = bool(decision.get("publishInFlight"))
 
     # The workflow passes the recovery key separately, but a caller handing this function
     # a raw `watch_decision` carries it as that decision's own key, so both are accepted.
     recovery_key = record_action_key or (action_key if action == WATCH_RECOVERY_ACTION else "")
 
     def routed(route: str, reason: str, notify: str = "none") -> dict[str, Any]:
+        if publish_in_flight and route in WATCH_ROUTES_HELD_FOR_PUBLISH:
+            route, reason = "none", "deferred_to_publish_in_flight"
         return {
             "schemaVersion": 1,
             "route": route,
@@ -1243,7 +1286,7 @@ def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:
             "action": action,
             "actionKey": action_key,
             "recordActionKey": recovery_key,
-            "recoveryRoute": "recover_record" if recovery_key else "none",
+            "recoveryRoute": "recover_record" if recovery_key and not publish_in_flight else "none",
         }
 
     if action in {"", "none"}:

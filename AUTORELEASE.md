@@ -4,8 +4,9 @@ How this repository detects new upstream PHP releases and lifecycle
 changes, prepares bounded repository work, and publishes immutable,
 verified macOS 26 arm64 CLI binaries without a human in the loop.
 
-`PHP autorelease watcher` runs daily and can also be dispatched manually. It
-captures the raw PHP lifecycle page, release feed, php-src tags, and public
+`PHP autorelease watcher` runs daily, starts again after every recorded
+release (see [Chained runs](#chained-runs)), and can also be dispatched
+manually. It captures the raw PHP lifecycle page, release feed, php-src tags, and public
 state of both repositories, including response metadata and SHA-256 digests.
 The aggregate release feed names only the newest release of each major, so the
 watcher also captures one feed per branch in `support-policy.json`
@@ -133,6 +134,8 @@ flowchart TD
   merge --> release["Immutable release transaction"]
   release --> draft["Verify draft bytes and temporary install"]
   draft --> public["Publish unchanged bytes and verify public installs"]
+  public --> chain["Recorded release starts the next watcher run"]
+  chain --> capture
 ```
 
 The release transaction is the only component allowed to create an annotated
@@ -220,11 +223,15 @@ GitHub Actions failure email is an independent fallback.
 `Autorelease email digest` additionally sends one fixed-template TL;DR email
 after every completed watcher or publish run attempt, including quiet healthy
 days, so silence stops being ambiguous between "no change" and "the schedule
-stopped". A watcher run reaches it through `workflow_run`. The watcher
-dispatches the publish transaction with `GITHUB_TOKEN`, for which GitHub
-starts no `workflow_run`, so the publish run calls the digest workflow from its
-own last job instead, with the conclusion its other jobs reached; publish is
-not a `workflow_run` trigger, so no run is emailed twice.
+stopped". Both workflows call the digest workflow from their own last job,
+with the conclusion their other jobs reached, and nothing else starts it.
+GitHub starts no `workflow_run` for a run `GITHUB_TOKEN` started: the watcher
+starts every publish run that way, and every recorded release starts the next
+watcher run that way (see [Chained runs](#chained-runs)). A `workflow_run`
+route would therefore miss those runs and, beside the calls, email the others
+twice, so it is not used. A scheduled run, a person's dispatch, and a chained
+run each send exactly one digest. The watcher leaves its Pages deployment out
+of that conclusion, because a failed deployment never turns the run red.
 The template is selected by `email-digest` in `autorelease/control.py` from
 retained run state alone and delivered through Resend; no free-form plan prose
 reaches the outbound channel, and the workflow skips quietly until the
@@ -233,8 +240,8 @@ no template — including a corrupt retained artifact — still sends a fallback
 summary naming the exact rejection reason, so the channel cannot go silent on
 precisely the runs that need a look. Delivery retries transient Resend errors
 under one idempotency key per run attempt; a delivery that still fails fails
-the digest job, and with it a publish run, because a red run is the only
-report left when the channel is down. Rerunning that run's failed jobs sends
+the digest job, and with it the watcher or publish run, because a red run is
+the only report left when the channel is down. Rerunning that run's failed jobs sends
 the digest again without repeating any job that passed.
 Every watcher digest also carries the fixed-format branch table from that
 run's status document (see [Branch status](#branch-status)), followed by one
@@ -262,6 +269,67 @@ flowchart TD
   issue --> email["GitHub inbox and email"]
   issue --> actions["Actions failure email fallback"]
 ```
+
+## Chained runs
+
+The classifier admits one action per watcher run, but one upstream release day
+brings a patch on every maintained branch, oldest first, and a recipe change
+makes every published version rebuild-due. A publish run whose `finalize` job
+succeeded therefore ends with `Start the next watcher run`: the release is
+live, fresh public installs of it passed, and its event record is complete on
+main, merged by that job or found already there. The job holds only
+`actions: write`, runs no repository code, and dispatches
+`autorelease-watch.yml` on main with `GITHUB_TOKEN`, which GitHub allows to
+start `workflow_dispatch` runs. The new run captures fresh evidence and admits
+the next due action through the unchanged classification and admission, so a
+release day across four branches, or a full rebuild, finishes in hours instead
+of days. Dispatching the watcher by hand stays safe but is no longer how a
+cascade drains.
+
+- Only that outcome chains. A failed release, a run that stops after
+  publication with the release possibly live, and a release whose record did
+  not merge start nothing. Selection has no skip, so a rebuild that keeps
+  failing is retried by the daily schedule exactly as before, and that
+  scheduled run's recovery files a pending record.
+- A chain ends on its own. The next run checks out the main that holds the
+  completed record and captures `php_bin_releases` with the release in it, so
+  it cannot select that action again, and admission rejects a completed action
+  key regardless. A run with nothing due is quiet or records `no_change`;
+  neither dispatches a publish run, so neither starts another watcher run.
+  Every link publishes a version or revision that did not exist before, and a
+  revision that records the current recipe identity is no longer due, so a
+  chain is never longer than the list of due actions.
+- Chained runs share the `php-autorelease-watcher` concurrency group with
+  scheduled and dispatched runs, and none cancels a run in progress. GitHub
+  keeps one pending run per group and cancels the older pending one when
+  another arrives. Watcher runs take no inputs and capture everything afresh,
+  so the run that remains does exactly what the replaced one would have done.
+  A replaced run never started a job, so it captured nothing and sends no
+  digest; the run that replaced it reports that work. Only `workflow_run` could
+  reach a run that never started, and it would miss a replaced chained run
+  while emailing every other run a second time beside the calls.
+- A watcher run that starts while a publish run has not yet completed its
+  `Record the verified release` job moves nothing on main and dispatches
+  nothing: `route-watch-action` returns `deferred_to_publish_in_flight` for
+  every plan route that would, and no record recovery for the overlay. Its
+  capture predates that record, so it would admit the release in flight a
+  second time, and the duplicate would fail its recapture once the first one
+  landed. Any change to main would also stop the publish at its own recapture,
+  and a recovered record merged ahead of the publish's own record would stop
+  its record pull request. The publish starts the run that takes the work once
+  it succeeds, and a failed one leaves the work and any missing record to the
+  daily schedule. Only watcher runs dispatch publish runs, and they never
+  overlap, so the investigation reads this before it captures and retains the
+  answer in `publish-in-flight.json`. Classification, admission, and
+  notifications still run as usual, and the digest of such a run says it held
+  the admitted action back.
+- `autorelease-implement.yml` does not chain. After its edit, a new branch or
+  a retirement waits for `mise-php` readiness, which that repository's own
+  daily consumer records, so a watcher run started then would only find the
+  readiness missing. The first release of a new branch is a publish run, and it
+  chains like any other.
+- Each chained run on main republishes the [branch status](#branch-status), so
+  `status.json` shows a new release within minutes of its record.
 
 ## Branch status
 
@@ -362,12 +430,14 @@ watcher decides which one is due:
   rejected while a rebuild is due, so recorded evidence can never leave one
   pending.
 - The admitted rebuild goes straight to the publish transaction. Each
-  publication changes `php_bin_releases`, so the next run selects the next
-  rebuild until none is due. Incomplete records, new branches, EOL, and new
+  recorded publication changes `php_bin_releases` and starts the next watcher
+  run (see [Chained runs](#chained-runs)), which selects the next rebuild,
+  until none is due. Incomplete records, new branches, EOL, and new
   patches take priority in the classifier.
 - Selection has no skip: a version whose rebuild keeps failing is selected
   again on every run and holds back the rebuilds ordered after it until the
-  recipe is fixed. The `php_bin_releases` capture reads every page of the
+  recipe is fixed. A failed rebuild starts no next run, so it is retried once
+  a day by the schedule rather than in a loop. The `php_bin_releases` capture reads every page of the
   releases list, up to 20 pages of 100, and fails as unhealthy rather than
   truncate a longer list.
 

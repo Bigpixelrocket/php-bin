@@ -876,6 +876,32 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+  # The watcher admits one action per run and runs once a day, while one upstream
+  # release day brings a patch on every maintained branch and a recipe change makes
+  # every published version rebuild-due. So a release that is live, verified, and
+  # recorded on main starts the next watcher run at once, and that run admits the next
+  # due action, if any, through the unchanged classification and admission. Only this
+  # outcome chains: a failed or possibly-live run starts nothing, so a rebuild that keeps
+  # failing waits for the daily schedule exactly as before, and a pending record is left
+  # to that run's recovery. The chain ends on its own because the next run reads the
+  # record on main and the release in `php_bin_releases`, so it never re-admits this
+  # action; a quiet or no-change run dispatches no publish and therefore chains nothing.
+  # The job holds only `actions: write` and runs no repository code.
+  next-watcher:
+    name: Start the next watcher run
+    needs: finalize
+    if: ${{ !cancelled() && needs.finalize.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch the watcher on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: gh workflow run autorelease-watch.yml --repo "$REPOSITORY" --ref main
+
   notify-failure:
     name: Notify actionable release failure
     needs: [preflight, release, verify-draft, publish, verify-public, finalize]
@@ -972,7 +998,7 @@ jobs:
   # `workflow_run` would.
   email:
     name: Email the run digest
-    needs: [preflight, build, release, verify-draft, publish, verify-public, finalize, notify-failure]
+    needs: [preflight, build, release, verify-draft, publish, verify-public, finalize, next-watcher, notify-failure]
     if: always()
     permissions:
       actions: read
