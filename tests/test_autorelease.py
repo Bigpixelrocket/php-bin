@@ -1558,6 +1558,37 @@ class AutoreleaseControlTests(unittest.TestCase):
                 "release_published",
                 "releases/tag/8.5.9",
             ),
+            # Only a successful publish run has started the next watcher run.
+            (
+                {**base, "workflow": "publish", "transaction": {"released": True, "version": "8.5.9"}},
+                "release_published",
+                "The next watcher run was started",
+            ),
+            (
+                {**base, "workflow": "publish", "transaction": {"released": True, "version": "8.5.9-2"}},
+                "rebuild_published",
+                "The next watcher run was started",
+            ),
+            (
+                {
+                    **base,
+                    "workflow": "publish",
+                    "conclusion": "failure",
+                    "transaction": {"released": True, "version": "8.5.9"},
+                },
+                "release_record_pending",
+                "no next watcher run was started",
+            ),
+            (
+                {
+                    **base,
+                    "workflow": "publish",
+                    "conclusion": "failure",
+                    "transaction": {"released": True, "recorded": True, "version": "8.5.9"},
+                },
+                "release_complete_run_failed",
+                "starting the next watcher run",
+            ),
             (
                 {
                     **base,
@@ -1943,6 +1974,43 @@ class AutoreleaseControlTests(unittest.TestCase):
         )
         with self.assertRaises(ControlError):
             route_watch_action({"action": "publish", "editsRequired": False})
+        # While a publish run has not recorded its release, every route that moves main or
+        # starts work waits for the watcher run that publish starts once it has.
+        for held in (
+            {"action": "new_patch", "actionKey": "new_patch:8.5.9"},
+            {"action": "recipe_rebuild", "actionKey": "recipe_rebuild:8.5.9:2"},
+            {"action": "new_branch", "actionKey": "new_branch:8.6"},
+            {"action": "new_branch", "actionKey": "new_branch:8.6", "editsRequired": True},
+            {"action": "branch_eol", "actionKey": "branch_eol:8.1:2026-12-31"},
+            {"action": "no_change", "actionKey": "no_change:" + "0" * 16},
+        ):
+            with self.subTest(held=held):
+                self.assertNotEqual("none", route(**held)["route"])
+                decision = route(publishInFlight=True, **held)
+                self.assertEqual("none", decision["route"])
+                self.assertEqual("deferred_to_publish_in_flight", decision["reason"])
+                # A lifecycle action still announces itself, and recovery stays an overlay.
+                self.assertEqual(route(**held)["notify"], decision["notify"])
+                self.assertEqual(
+                    "recover_record",
+                    route(publishInFlight=True, recordActionKey="new_patch:8.5.8", **held)["recoveryRoute"],
+                )
+        # Routes that move nothing, and the reasons that already route nowhere, are unchanged.
+        self.assertEqual("notify_blocked", route(action="blocked", publishInFlight=True)["route"])
+        self.assertEqual("no_admitted_plan", route(action="none", publishInFlight=True)["reason"])
+        self.assertEqual(
+            "dispatch_deferred_by_recovery",
+            route(action="new_patch", recordActionKey="new_patch:8.5.8", recoveryMerged=True, publishInFlight=True)[
+                "reason"
+            ],
+        )
+        self.assertEqual(
+            "evidence_state_already_recorded",
+            route(action="no_change", evidenceAlreadyRecorded=True, publishInFlight=True)["reason"],
+        )
+        # A combination with no route still fails loudly rather than hiding behind the wait.
+        with self.assertRaises(ControlError):
+            route_watch_action({"action": "repair", "editsRequired": True, "publishInFlight": True})
 
     def test_operator_gate_blocks_paused_state(self):
         self.assertTrue(mutation_allowed({"unattendedMutation": "enabled"}))
@@ -1986,6 +2054,13 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertEqual(1, run_control("route-watch-action", "--action", "repair")[0])
         # Only exact booleans reach the table.
         self.assertEqual(1, run_control("route-watch-action", "--action", "repair", "--edits-required", "yes")[0])
+        self.assertEqual(1, run_control("route-watch-action", "--action", "new_patch", "--publish-in-flight", "1")[0])
+        for flag, route in (("true", "none"), ("false", "dispatch_publish"), ("", "dispatch_publish")):
+            status, output = run_control(
+                "route-watch-action", "--action", "new_patch", "--action-key", "new_patch:8.5.9",
+                "--publish-in-flight", flag,
+            )
+            self.assertEqual((0, route), (status, json.loads(output)["route"]), flag)
 
     def test_invariants_and_durable_state_are_protected(self):
         self.assertTrue(path_is_protected("autorelease/policy-invariants.json"))
@@ -2493,7 +2568,7 @@ class AutoreleaseControlTests(unittest.TestCase):
             self.assertNotIn("commit", outputs)
             self.assertFalse((work / "gh.log").exists())
 
-    def test_publish_runs_email_their_own_digest_exactly_once(self):
+    def test_every_pipeline_run_emails_its_own_digest_exactly_once(self):
         from autorelease.verify import load_workflow
 
         root = pathlib.Path(__file__).resolve().parents[1]
@@ -2501,22 +2576,21 @@ class AutoreleaseControlTests(unittest.TestCase):
         email = load_workflow(workflows / "autorelease-email.yml")
         # YAML 1.1 reads the bare `on` key as true.
         triggers = email.get("on") or email["true"]
-        # The watcher is started by its schedule or a person, so workflow_run reaches it.
-        # GitHub starts no workflow_run for a publish run GITHUB_TOKEN dispatched, and a
-        # publish run dispatched any other way must not email twice, so publish is not a
-        # workflow_run trigger at all and reaches the digest only by calling it.
-        self.assertEqual(["PHP autorelease watcher"], triggers["workflow_run"]["workflows"])
+        # GitHub starts no workflow_run for a run GITHUB_TOKEN started. The watcher starts
+        # every publish run that way and each successful publish starts the next watcher run
+        # that way, so a workflow_run route would leave those runs silent while emailing a
+        # scheduled or person-dispatched run through a second route. Calls are the only one.
+        self.assertEqual({"workflow_call"}, set(triggers))
         call = triggers["workflow_call"]
         self.assertEqual({"run_id", "run_attempt", "workflow", "conclusion"}, set(call["inputs"]))
         self.assertTrue(all(spec["required"] and spec["type"] == "string" for spec in call["inputs"].values()))
         self.assertEqual({"RESEND_API_KEY": {"required": False}}, call["secrets"])
         digest = email["jobs"]["digest"]
-        self.assertEqual("${{ inputs.run_id || github.event.workflow_run.id }}", digest["env"]["RUN_ID"])
-        self.assertEqual("${{ inputs.conclusion || github.event.workflow_run.conclusion }}", digest["env"]["RUN_CONCLUSION"])
-        self.assertIn("autorelease-email-${{ inputs.run_id || github.event.workflow_run.id }}", digest["concurrency"]["group"])
-        download = next(step for step in digest["steps"] if step.get("name") == "Download the retained run state")
-        self.assertIn('if [[ "$CALLED_WORKFLOW" != publish ]]; then', download["run"])
-        # An unconfigured repository still skips quietly on both routes.
+        self.assertNotIn("workflow_run", json.dumps(email))
+        self.assertEqual("${{ inputs.run_id }}", digest["env"]["RUN_ID"])
+        self.assertEqual("${{ inputs.conclusion }}", digest["env"]["RUN_CONCLUSION"])
+        self.assertIn("autorelease-email-${{ inputs.run_id }}", digest["concurrency"]["group"])
+        # An unconfigured repository still skips quietly.
         gate = next(step for step in digest["steps"] if step.get("name") == "Decide whether delivery is configured")
         self.assertIn('-n "$RESEND_API_KEY"', gate["run"])
         # The secret is scoped to the two steps that read it, never to the whole job.
@@ -2525,11 +2599,48 @@ class AutoreleaseControlTests(unittest.TestCase):
             ["Decide whether delivery is configured", "Send the digest through Resend"],
             [step.get("name") for step in digest["steps"] if "RESEND_API_KEY" in (step.get("env") or {})],
         )
-        # Retries reuse one idempotency key per run attempt, so none can send twice.
+        # Retries reuse one idempotency key per workflow, run, and attempt, so none can send
+        # twice and a watcher digest never collides with a publish digest.
         send = next(step for step in digest["steps"] if step.get("name") == "Send the digest through Resend")
         self.assertIn("--retry 3", send["run"])
         self.assertIn('--header "Idempotency-Key: php-bin-$WORKFLOW-$RUN_ID-$RUN_ATTEMPT"', send["run"])
         self.assertEqual("${{ steps.state.outputs.workflow }}", send["env"]["WORKFLOW"])
+
+        # The download step names exactly the state each caller retains and refuses any
+        # other caller before downloading anything.
+        download = next(step for step in digest["steps"] if step.get("name") == "Download the retained run state")
+        with tempfile.TemporaryDirectory() as temporary:
+            work = pathlib.Path(temporary)
+            (work / "bin").mkdir()
+            (work / "bin/gh").write_text('#!/usr/bin/env bash\necho "$*" >> "$FAKE_LOG"\nexit 1\n')
+            (work / "bin/gh").chmod(0o755)
+
+            def run_download(workflow, attempt="2"):
+                output = work / "output.txt"
+                output.write_text("")
+                (work / "gh.log").write_text("")
+                result = subprocess.run(
+                    ["bash", "-eo", "pipefail", "-c", download["run"].replace("${{ github.repository }}", "o/r")],
+                    cwd=work, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    env={**os.environ, "PATH": f"{work / 'bin'}:{os.environ['PATH']}", "FAKE_LOG": str(work / "gh.log"),
+                         "GITHUB_OUTPUT": str(output), "CALLED_WORKFLOW": workflow, "RUN_ID": "77", "RUN_ATTEMPT": attempt},
+                )
+                names = re.findall(r"--name (\S+)", (work / "gh.log").read_text())
+                return result, output.read_text(), names
+
+            result, output, names = run_download("watcher")
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("workflow=watcher\n", output)
+            self.assertEqual(["autorelease-investigation-77"], names)
+            result, output, names = run_download("publish")
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("workflow=publish\n", output)
+            self.assertEqual(["release-transaction-state-77-2", "release-transaction-state-77-1"], names)
+            for unrouted in ("", "implement", "PHP autorelease watcher"):
+                result, output, names = run_download(unrouted)
+                self.assertNotEqual(0, result.returncode, unrouted)
+                self.assertIn("unrouted calling workflow", result.stderr)
+                self.assertEqual([], names)
 
         callers = {
             path.name: [
@@ -2538,23 +2649,242 @@ class AutoreleaseControlTests(unittest.TestCase):
             ]
             for path in workflows.glob("*.yml")
         }
-        self.assertEqual({"autorelease-publish.yml": ["email"]}, {name: jobs for name, jobs in callers.items() if jobs})
-        jobs = load_workflow(workflows / "autorelease-publish.yml")["jobs"]
-        caller = jobs["email"]
-        self.assertEqual("always()", caller["if"])
-        self.assertEqual(set(jobs) - {"email"}, set(caller["needs"]))
-        self.assertEqual({"actions": "read", "contents": "read"}, caller["permissions"])
-        self.assertEqual({"RESEND_API_KEY": "${{ secrets.RESEND_API_KEY }}"}, caller["secrets"])
         self.assertEqual(
-            {
-                "run_id": "${{ github.run_id }}",
-                "run_attempt": "${{ github.run_attempt }}",
-                "workflow": "publish",
-                "conclusion": "${{ contains(needs.*.result, 'failure') && 'failure' || "
-                "contains(needs.*.result, 'cancelled') && 'cancelled' || 'success' }}",
-            },
-            caller["with"],
+            {"autorelease-publish.yml": ["email"], "autorelease-watch.yml": ["email"]},
+            {name: jobs for name, jobs in callers.items() if jobs},
         )
+        conclusion = (
+            "${{ contains(needs.*.result, 'failure') && 'failure' || "
+            "contains(needs.*.result, 'cancelled') && 'cancelled' || 'success' }}"
+        )
+        for name, workflow, expected_needs in (
+            ("autorelease-publish.yml", "publish", None),
+            # The Pages deployment never turns a run red, so it must not turn the digest
+            # into a watcher failure either.
+            ("autorelease-watch.yml", "watcher", {"investigate", "coordinate", "notify-failure"}),
+        ):
+            with self.subTest(caller=name):
+                document = load_workflow(workflows / name)
+                jobs = document["jobs"]
+                caller = jobs["email"]
+                # Nothing about the trigger or the actor gates the digest, so a scheduled
+                # run, a person's dispatch, and a run another workflow dispatched with
+                # GITHUB_TOKEN each send exactly this one.
+                self.assertEqual("always()", caller["if"])
+                self.assertEqual(expected_needs or set(jobs) - {"email"}, set(caller["needs"]))
+                self.assertEqual({"actions": "read", "contents": "read"}, caller["permissions"])
+                self.assertEqual({"RESEND_API_KEY": "${{ secrets.RESEND_API_KEY }}"}, caller["secrets"])
+                self.assertEqual(
+                    {
+                        "run_id": "${{ github.run_id }}",
+                        "run_attempt": "${{ github.run_attempt }}",
+                        "workflow": workflow,
+                        "conclusion": conclusion,
+                    },
+                    caller["with"],
+                )
+                if name == "autorelease-watch.yml":
+                    on = document.get("on") or document["true"]
+                    self.assertEqual({"schedule", "workflow_dispatch"}, set(on))
+                    self.assertEqual({"autorelease-investigation-${{ github.run_id }}"}, {
+                        step["with"]["name"]
+                        for step in jobs["investigate"]["steps"]
+                        if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+                    })
+        # Every way a watcher run starts reaches the digest through the call alone.
+        for event, actor in (("schedule", "github-actions[bot]"), ("workflow_dispatch", "loadinglucian"),
+                             ("workflow_dispatch", "github-actions[bot]")):
+            with self.subTest(event=event, actor=actor):
+                routes = len(callers["autorelease-watch.yml"]) + (
+                    1 if "workflow_run" in triggers and actor != "github-actions[bot]" else 0
+                )
+                self.assertEqual(1, routes)
+
+    def test_only_a_recorded_release_starts_the_next_watcher_run(self):
+        from autorelease.verify import load_workflow
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        workflows = root / ".github/workflows"
+        jobs = load_workflow(workflows / "autorelease-publish.yml")["jobs"]
+        chain = jobs["next-watcher"]
+        # Only the dispatch scope, no repository code, and exactly one dispatch on main.
+        self.assertEqual({"actions": "write"}, chain["permissions"])
+        self.assertNotIn("environment", chain)
+        self.assertEqual(1, len(chain["steps"]))
+        self.assertNotIn("uses", chain["steps"][0])
+        self.assertEqual(
+            'gh workflow run autorelease-watch.yml --repo "$REPOSITORY" --ref main', chain["steps"][0]["run"]
+        )
+        self.assertEqual({"GH_TOKEN": "${{ github.token }}", "REPOSITORY": "${{ github.repository }}"},
+                         chain["steps"][0]["env"])
+        # No other job in any workflow starts the watcher.
+        starters = [
+            (path.name, name)
+            for path in workflows.glob("*.yml")
+            for name, job in (load_workflow(path).get("jobs") or {}).items()
+            for step in job.get("steps") or []
+            if "gh workflow run autorelease-watch.yml" in (step.get("run") or "")
+        ]
+        self.assertEqual([("autorelease-publish.yml", "next-watcher")], starters)
+
+        def needs_of(job):
+            needs = job.get("needs") or []
+            return [needs] if isinstance(needs, str) else list(needs)
+
+        def evaluate(condition, results, needs, cancelled):
+            # The subset of the expression language these job conditions use.
+            expression = condition.strip()
+            if expression.startswith("${{"):
+                expression = expression[3:-2]
+            expression = re.sub(
+                r"contains\(needs\.\*\.result, '(\w+)'\)",
+                lambda match: repr(match.group(1) in [results[name] for name in needs]),
+                expression,
+            )
+            expression = re.sub(
+                r"needs(?:\.([\w-]+)|\['([\w-]+)'\])\.result",
+                lambda match: repr(results[match.group(1) or match.group(2)]),
+                expression,
+            )
+            expression = expression.replace("!cancelled()", repr(not cancelled)).replace("always()", "True")
+            expression = expression.replace("&&", " and ").replace("||", " or ")
+            self.assertRegex(expression, r"^[\s\w'()=!]*$", condition)
+            return eval(expression, {"__builtins__": {}}, {})  # noqa: S307 - a fixed, checked subset
+
+        def outcome(failing=(), cancelled_at=None):
+            """Run the job graph: each job that runs fails if named, else succeeds."""
+            results = {}
+            cancelled = False
+            pending = list(jobs)
+            while pending:
+                name = next(job for job in pending if all(need in results for need in needs_of(jobs[job])))
+                pending.remove(name)
+                needs = needs_of(jobs[name])
+                condition = jobs[name].get("if")
+                if condition is None:
+                    runs = not cancelled and all(results[need] == "success" for need in needs)
+                else:
+                    runs = evaluate(condition, results, needs, cancelled)
+                if not runs:
+                    results[name] = "skipped"
+                elif name == cancelled_at:
+                    results[name] = "cancelled"
+                    cancelled = True
+                else:
+                    results[name] = "failure" if name in failing else "success"
+            return results
+
+        # A release that is live, verified, and recorded chains, including one reconciled
+        # from its existing assets while the fresh build it did not need failed.
+        for failing in ((), ("build",)):
+            with self.subTest(failing=failing):
+                results = outcome(failing)
+                self.assertEqual("success", results["finalize"])
+                self.assertEqual("success", results["next-watcher"])
+        # An early exit, an unpublished failure, a possibly-live warning after publication,
+        # a release whose record is pending, and a cancelled run start nothing: the daily
+        # schedule retries a failing rebuild, and its recovery files a pending record.
+        for case, failing, cancelled_at in (
+            ("rejected dispatch inputs", ("preflight",), None),
+            ("failed release staging", ("release",), None),
+            ("failed draft install", ("verify-draft",), None),
+            ("possibly live after a failed publication", ("publish",), None),
+            ("live but the public install failed", ("verify-public",), None),
+            ("live but the record did not merge", ("finalize",), None),
+            ("cancelled before the record", (), "verify-public"),
+            ("cancelled while recording", (), "finalize"),
+        ):
+            with self.subTest(case=case):
+                results = outcome(failing, cancelled_at)
+                self.assertNotEqual("success", results["finalize"])
+                self.assertEqual("skipped", results["next-watcher"])
+                # The run still emails its one digest.
+                self.assertIn(results["email"], {"success", "failure"})
+        self.assertEqual(["finalize"], needs_of(chain))
+
+    def test_watcher_runs_find_publish_runs_that_have_not_recorded_their_release(self):
+        from autorelease.verify import load_workflow
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        workflows = root / ".github/workflows"
+        watch = load_workflow(workflows / "autorelease-watch.yml")["jobs"]
+        publish = load_workflow(workflows / "autorelease-publish.yml")["jobs"]
+        investigate = watch["investigate"]
+        self.assertEqual({"actions": "read", "contents": "read"}, investigate["permissions"])
+        names = [step.get("name") for step in investigate["steps"]]
+        step = investigate["steps"][names.index("Find a publish run still in flight")]
+        # Read before the capture: no publish can start while this run lives, so the set
+        # only shrinks, and a publish that recorded between the two would otherwise be
+        # admitted again from a capture taken before its record.
+        self.assertLess(names.index("Find a publish run still in flight"), names.index("Capture fixed raw evidence"))
+        self.assertEqual("${{ steps.publishing.outputs.in_flight }}", investigate["outputs"]["publish_in_flight"])
+        # The job it waits on is the one that files the record and precedes the chain.
+        self.assertIn(f'"{publish["finalize"]["name"]}"', step["run"])
+        dispatch = next(
+            item for item in watch["coordinate"]["steps"] if item.get("name") == "Dispatch implementation or no-edit release"
+        )
+        self.assertEqual("${{ needs.investigate.outputs.publish_in_flight }}", dispatch["env"]["PUBLISH_IN_FLIGHT"])
+        self.assertIn('--publish-in-flight "$PUBLISH_IN_FLIGHT"', dispatch["run"])
+
+        recorded = {"jobs": [{"name": "Build exact patch", "status": "completed"},
+                             {"name": "Record the verified release", "status": "completed"},
+                             {"name": "Start the next watcher run", "status": "in_progress"}]}
+        recording = {"jobs": [{"name": "Build exact patch", "status": "completed"},
+                              {"name": "Record the verified release", "status": "in_progress"}]}
+        building = {"jobs": [{"name": "Build exact patch", "status": "in_progress"}]}
+        with tempfile.TemporaryDirectory() as temporary:
+            work = pathlib.Path(temporary)
+            (work / "bin").mkdir()
+            # gh applies its own --jq filter, so the fake feeds the fixture through jq.
+            (work / "bin/gh").write_text(
+                "#!/usr/bin/env bash\n"
+                'echo "$*" >> "$FAKE_LOG"\n'
+                'args=("$@"); filter=.\n'
+                'for ((i = 0; i < ${#args[@]}; i++)); do [[ "${args[i]}" == --jq ]] && filter="${args[i+1]}"; done\n'
+                'case "$1 $2" in\n'
+                '  "run list") [[ "$*" == *"--workflow autorelease-publish.yml"* ]] || exit 3; body="$FAKE_RUNS" ;;\n'
+                '  "api repos/o/r/actions/runs/"*) id="${2#repos/o/r/actions/runs/}"; var="FAKE_JOBS_${id%/jobs}"; body="${!var}" ;;\n'
+                "  *) exit 3 ;;\n"
+                "esac\n"
+                '[[ -n "$FAKE_FAIL" && "$*" == *"$FAKE_FAIL"* ]] && exit 4\n'
+                'jq -r "$filter" <<< "$body"\n'
+            )
+            (work / "bin/gh").chmod(0o755)
+
+            def in_flight(runs, fail="", **jobs):
+                output = work / "output.txt"
+                output.write_text("")
+                result = subprocess.run(
+                    ["bash", "-eo", "pipefail", "-c", step["run"]], cwd=work, text=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    env={**os.environ, "PATH": f"{work / 'bin'}:{os.environ['PATH']}", "FAKE_LOG": str(work / "gh.log"),
+                         "GITHUB_OUTPUT": str(output), "REPOSITORY": "o/r", "FAKE_FAIL": fail,
+                         "FAKE_RUNS": json.dumps(runs), **{f"FAKE_JOBS_{key[1:]}": json.dumps(value) for key, value in jobs.items()}},
+                )
+                return result, output.read_text()
+
+            for case, runs, jobs, expected in (
+                ("no publish run", [], {}, "false"),
+                ("only finished publish runs", [{"databaseId": 5, "status": "completed"}], {}, "false"),
+                # The run that started this one is still finishing its last jobs.
+                ("the recorded run that chained", [{"databaseId": 6, "status": "in_progress"}], {"r6": recorded}, "false"),
+                ("a run still recording", [{"databaseId": 7, "status": "in_progress"}], {"r7": recording}, "true"),
+                ("a run still building", [{"databaseId": 8, "status": "in_progress"}], {"r8": building}, "true"),
+                ("a run waiting for its group", [{"databaseId": 9, "status": "pending"}], {"r9": {"jobs": []}}, "true"),
+                ("one in flight beside a recorded one",
+                 [{"databaseId": 6, "status": "in_progress"}, {"databaseId": 8, "status": "queued"}],
+                 {"r6": recorded, "r8": building}, "true"),
+            ):
+                with self.subTest(case=case):
+                    result, output = in_flight(runs, **jobs)
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertEqual(f"in_flight={expected}\n", output)
+            # A listing GitHub could not answer fails the run rather than reading as none.
+            for fail in ("run list", "actions/runs/7/jobs"):
+                with self.subTest(fail=fail):
+                    result, output = in_flight([{"databaseId": 7, "status": "in_progress"}], fail, r7=recording)
+                    self.assertNotEqual(0, result.returncode)
+                    self.assertEqual("", output)
 
     def test_automation_pull_requests_are_filed_with_real_newlines_and_exact_leases(self):
         root = pathlib.Path(__file__).resolve().parents[1]

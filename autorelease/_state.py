@@ -308,6 +308,8 @@ def retained_notification_issue(prior: dict[str, Any] | None) -> dict[str, Any] 
 
 
 EMAIL_SUBJECT_PREFIX = "[php-bin autorelease]"
+# A publish run only succeeds once it has dispatched the next watcher run.
+EMAIL_NEXT_WATCHER_SENTENCE = "The next watcher run was started to take the next due release, if any."
 # Repository slugs reach the digest from `github.repository`, never from run state.
 EMAIL_REPOSITORY_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 # ACTION_KEY_RE fixes key syntax only, so each version-deriving action also pins
@@ -754,7 +756,7 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
                 f"The rebuild revision PHP {version} for macOS arm64 is live and fresh public "
                 f"installs of it were verified: https://github.com/{repository}/releases/tag/{version}. "
                 f"Earlier PHP {base} releases stay published unchanged, and installs of the plain "
-                f"version {base} now resolve to this revision.",
+                f"version {base} now resolve to this revision. {EMAIL_NEXT_WATCHER_SENTENCE}",
                 run_url=run_url,
             )
         if released and conclusion == "success":
@@ -762,19 +764,22 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
                 "release_published",
                 f"PHP {version} published",
                 f"The immutable PHP {version} release for macOS arm64 is live and fresh public "
-                f"installs of it were verified: https://github.com/{repository}/releases/tag/{version}.",
+                f"installs of it were verified: https://github.com/{repository}/releases/tag/{version}. "
+                f"{EMAIL_NEXT_WATCHER_SENTENCE}",
                 run_url=run_url,
             )
         if released and recorded:
             # The release job reconciles an existing release even when the fresh build
-            # fails, so a run can finish the release and its record and still fail.
+            # fails, and the next watcher run is dispatched after the record merged, so a
+            # run can finish the release and its record and still fail.
             return _email(
                 "release_complete_run_failed",
                 f"PHP {version} published and recorded; run failed",
                 f"The PHP {version} release is live and its durable event record was completed, "
                 f"but the publish run still finished with conclusion '{conclusion}'. That happens "
-                "when the release was reconciled from its existing assets while another job, such "
-                "as the fresh build that reconciliation did not need, failed. The release itself "
+                "when another job failed around the finished release: the fresh build that "
+                "reconciling an existing release did not need, or starting the next watcher run, "
+                "which leaves any further due release to the daily schedule. The release itself "
                 "needs nothing; check the run if the failure recurs.",
                 run_url=run_url,
             )
@@ -783,8 +788,9 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
                 "release_record_pending",
                 f"PHP {version} published; record recovery pending",
                 f"The PHP {version} release went live, but the publish run failed after publication, "
-                "so its durable event record is missing. Tomorrow's watcher recovers the record "
-                "automatically; nothing needs doing unless that recovery also fails.",
+                "so its durable event record is missing and no next watcher run was started. The next "
+                "scheduled watcher run recovers the record automatically; nothing needs doing unless "
+                "that recovery also fails.",
                 run_url=run_url,
             )
         return _email(
@@ -802,7 +808,7 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
         return _email(
             "watcher_failed",
             f"Watcher run failed ({conclusion})",
-            f"The daily autorelease watcher finished with conclusion '{conclusion}'. If the "
+            f"The autorelease watcher run finished with conclusion '{conclusion}'. If the "
             "failure was actionable, a critical GitHub issue has been filed and assigned. The "
             "watcher is idempotent, so re-dispatching it after the cause is fixed is safe.",
             status_paragraph,
@@ -1200,6 +1206,13 @@ WATCH_LIFECYCLE_NOTIFICATION_ACTIONS = frozenset({"new_branch", "branch_eol"})
 # owns that repair, so it is a route the plan never takes rather than an unrouted one.
 WATCH_RECOVERY_ACTION = "record_completed_event"
 WATCH_PUBLISH_ACTIONS = frozenset({"new_patch", "new_branch", "recipe_rebuild"})
+# The routes that move main or start work that does. A publish run still in flight
+# recaptures `php_bin_state` before publication, and a plan admitted meanwhile was
+# classified before that run's record existed, so each of these waits for the watcher
+# run the publish starts once its record is on main.
+WATCH_ROUTES_HELD_FOR_PUBLISH = frozenset(
+    {"no_change_evidence", "dispatch_implementation", "dispatch_publish", "complete_branch_eol"}
+)
 
 
 def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:
@@ -1222,6 +1235,13 @@ def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:
     overlay ignores every other field. A field added to the recovery decision would make
     the first call answer from an incomplete decision and silently disagree with the
     second, so it must be passed to both callers in the same change.
+
+    `publishInFlight` says a publish run had not yet recorded its release when this run
+    started. Each successful publish starts the next watcher run once its record is on
+    main, so every route that moves main or starts work waits for that run instead of
+    re-admitting the release in flight from evidence captured before its record; a
+    publish that fails starts nothing, which leaves the work to the daily schedule. The
+    deferral replaces only the route; validation and notification are unchanged.
     """
     action = str(decision.get("action") or "")
     action_key = str(decision.get("actionKey") or "")
@@ -1229,12 +1249,15 @@ def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:
     edits_required = bool(decision.get("editsRequired"))
     recovery_merged = bool(decision.get("recoveryMerged"))
     evidence_recorded = bool(decision.get("evidenceAlreadyRecorded"))
+    publish_in_flight = bool(decision.get("publishInFlight"))
 
     # The workflow passes the recovery key separately, but a caller handing this function
     # a raw `watch_decision` carries it as that decision's own key, so both are accepted.
     recovery_key = record_action_key or (action_key if action == WATCH_RECOVERY_ACTION else "")
 
     def routed(route: str, reason: str, notify: str = "none") -> dict[str, Any]:
+        if publish_in_flight and route in WATCH_ROUTES_HELD_FOR_PUBLISH:
+            route, reason = "none", "deferred_to_publish_in_flight"
         return {
             "schemaVersion": 1,
             "route": route,

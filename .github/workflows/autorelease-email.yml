@@ -5,17 +5,13 @@ name: Autorelease email digest
 # only, so a template is selected — never written — at runtime, and no
 # model-authored prose can reach the outbound channel.
 #
-# Each run reaches this workflow by exactly one route. The watcher is started by
-# its schedule or by a person, so its completion fires `workflow_run`. The publish
-# transaction is dispatched by the watcher with GITHUB_TOKEN, and GitHub starts no
-# `workflow_run` for runs that token started, so the publish workflow calls this
-# one from its own last job instead and passes the conclusion its jobs reached.
+# Both pipeline workflows call this one from their own last job, with the
+# conclusion their other jobs reached, and nothing else starts it. GitHub starts no
+# `workflow_run` for a run GITHUB_TOKEN started: the watcher dispatches every
+# publish run that way, and each successful publish run dispatches the next watcher
+# run that way. A `workflow_run` route would therefore leave those runs silent while
+# emailing the others through a second route, so it is not used at all.
 on:
-  workflow_run:
-    workflows:
-      - PHP autorelease watcher
-    types:
-      - completed
   workflow_call:
     inputs:
       run_id:
@@ -27,7 +23,7 @@ on:
         required: true
         type: string
       workflow:
-        description: Calling pipeline workflow; only publish calls this one
+        description: Calling pipeline workflow, watcher or publish
         required: true
         type: string
       conclusion:
@@ -51,20 +47,19 @@ jobs:
     name: Send run digest
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Inside a call, `github.event` is the caller's dispatch event, so each value
-    # comes from the inputs when called and from the completed run otherwise.
+    # Inside a call, `github.event` is the caller's own event, so every value about the
+    # run comes from the inputs.
     concurrency:
-      group: autorelease-email-${{ inputs.run_id || github.event.workflow_run.id }}
+      group: autorelease-email-${{ inputs.run_id }}
       cancel-in-progress: false
     env:
       EMAIL_FROM: ${{ vars.AUTORELEASE_EMAIL_FROM }}
       EMAIL_TO: ${{ vars.AUTORELEASE_EMAIL_TO }}
       CALLED_WORKFLOW: ${{ inputs.workflow }}
-      RUN_ID: ${{ inputs.run_id || github.event.workflow_run.id }}
-      RUN_ATTEMPT: ${{ inputs.run_attempt || github.event.workflow_run.run_attempt }}
-      RUN_URL: ${{ inputs.run_id && format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, inputs.run_id) || github.event.workflow_run.html_url }}
-      RUN_NAME: ${{ github.event.workflow_run.name }}
-      RUN_CONCLUSION: ${{ inputs.conclusion || github.event.workflow_run.conclusion }}
+      RUN_ID: ${{ inputs.run_id }}
+      RUN_ATTEMPT: ${{ inputs.run_attempt }}
+      RUN_URL: ${{ format('{0}/{1}/actions/runs/{2}', github.server_url, github.repository, inputs.run_id) }}
+      RUN_CONCLUSION: ${{ inputs.conclusion }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Decide whether delivery is configured
@@ -92,19 +87,7 @@ jobs:
           mkdir -p email-run/state
           [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
-          if [[ -n "$CALLED_WORKFLOW" ]]; then
-            if [[ "$CALLED_WORKFLOW" != publish ]]; then
-              echo "unrouted calling workflow: $CALLED_WORKFLOW" >&2
-              exit 1
-            fi
-            workflow=publish
-          elif [[ "$RUN_NAME" == "PHP autorelease watcher" ]]; then
-            workflow=watcher
-          else
-            echo "unrouted triggering workflow: $RUN_NAME" >&2
-            exit 1
-          fi
-          case "$workflow" in
+          case "$CALLED_WORKFLOW" in
             watcher)
               echo "workflow=watcher" >> "$GITHUB_OUTPUT"
               artifacts=("autorelease-investigation-$RUN_ID")
@@ -118,6 +101,10 @@ jobs:
               for ((attempt = RUN_ATTEMPT; attempt > 0; attempt--)); do
                 artifacts+=("release-transaction-state-$RUN_ID-$attempt")
               done
+              ;;
+            *)
+              echo "unrouted calling workflow: $CALLED_WORKFLOW" >&2
+              exit 1
               ;;
           esac
           # A run that crashed before retaining its state has no artifact; the

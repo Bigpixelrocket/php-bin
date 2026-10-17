@@ -694,6 +694,28 @@ class Verifier:
             and investigate_permissions.get("contents") == "read",
             "runtime classification does not have resolved read-only contents permission",
         )
+        assert_true(
+            isinstance(investigate_permissions, dict)
+            and set(investigate_permissions.values()) <= {"read", "none"},
+            "runtime classification holds a write scope",
+        )
+        # A recorded release starts the next watcher run from a job that holds only the
+        # dispatch scope, runs no repository code, and runs only once the record merged.
+        publish_jobs = load_workflow(PHP_ROOT / ".github/workflows/autorelease-publish.yml").get("jobs", {})
+        chain = publish_jobs.get("next-watcher", {})
+        chain_steps = chain.get("steps") or []
+        assert_true(
+            chain.get("permissions") == {"actions": "write"}
+            and chain.get("needs") == "finalize"
+            and chain.get("if") == "${{ !cancelled() && needs.finalize.result == 'success' }}",
+            "the next watcher run is not started by a dispatch-only job bound to the recorded release",
+        )
+        assert_true(
+            len(chain_steps) == 1
+            and "uses" not in chain_steps[0]
+            and chain_steps[0].get("run") == 'gh workflow run autorelease-watch.yml --repo "$REPOSITORY" --ref main',
+            "the next watcher job does more than dispatch the watcher on main",
+        )
         # The branch status reaches GitHub Pages from a job that holds only the
         # deployment scopes, runs no repository code, and deploys only from main.
         publish_status = watch_document.get("jobs", {}).get("publish-status", {})
@@ -764,6 +786,20 @@ class Verifier:
         recovery = notification_decision({**changed_event, "failureFingerprint": "recovered"}, {"fingerprint": comment["fingerprint"]})
         close = notification_decision({**changed_event, "state": "complete", "finalResult": "passed"}, {"fingerprint": recovery["fingerprint"]})
         assert_true([create["action"], same["action"], comment["action"], recovery["action"], close["action"]] == ["create", "none", "comment", "comment", "comment_and_close"], "notification transitions are not deduplicated")
+        # Each pipeline run reaches the digest through its own last job alone. A
+        # workflow_run route would miss every run GITHUB_TOKEN started and email the
+        # others a second time.
+        email_document = load_workflow(PHP_ROOT / ".github/workflows/autorelease-email.yml")
+        email_triggers = email_document.get("on") or email_document.get("true") or {}
+        assert_true(set(email_triggers) == {"workflow_call"}, "the email digest has a route other than its callers")
+        for name, workflow in (("autorelease-watch.yml", "watcher"), ("autorelease-publish.yml", "publish")):
+            caller = load_workflow(PHP_ROOT / ".github/workflows" / name).get("jobs", {}).get("email", {})
+            assert_true(
+                caller.get("uses") == "./.github/workflows/autorelease-email.yml"
+                and caller.get("if") == "always()"
+                and (caller.get("with") or {}).get("workflow") == workflow,
+                f"{name} does not email exactly one digest per run",
+            )
         (directory / "notifications.json").write_bytes(canonical_json({"create": create, "same": same, "comment": comment, "recovery": recovery, "close": close}))
         return ["notifications.json"]
 

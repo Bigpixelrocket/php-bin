@@ -358,7 +358,7 @@ def main(argv: list[str] | None = None) -> int:
     route_parser = subparsers.add_parser("route-watch-action")
     for name in ("--action", "--action-key", "--record-action-key"):
         route_parser.add_argument(name, default="")
-    for name in ("--edits-required", "--recovery-merged", "--evidence-already-recorded"):
+    for name in ("--edits-required", "--recovery-merged", "--evidence-already-recorded", "--publish-in-flight"):
         route_parser.add_argument(name, default="")
 
     operator_parser = subparsers.add_parser("operator-gate")
@@ -463,6 +463,7 @@ def main(argv: list[str] | None = None) -> int:
                             "evidenceAlreadyRecorded": cli_flag(
                                 args.evidence_already_recorded, "--evidence-already-recorded"
                             ),
+                            "publishInFlight": cli_flag(args.publish_in_flight, "--publish-in-flight"),
                         }
                     )
                 )
