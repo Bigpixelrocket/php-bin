@@ -824,7 +824,12 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
             if status
             else "Watcher: no upstream changes",
             "The watcher captured fresh upstream evidence and it matches the last reviewed "
-            "capture, so nothing needed classifying and nothing was changed.",
+            "capture, so nothing needed classifying and nothing was changed."
+            + (
+                " The php_bin_state change below is the commit that recorded that capture."
+                if status and status["changedCaptures"] == ["php_bin_state"]
+                else ""
+            ),
             status_paragraph,
             f"Evidence manifest: {digest}",
             run_url=run_url,
@@ -917,7 +922,9 @@ def email_fallback(report: dict[str, Any], reason: str) -> dict[str, Any]:
     The daily email must not go silent exactly when the pipeline does something
     novel, so rejection by `email_digest` still produces a message. Only values
     that revalidate here are interpolated; everything else is replaced with
-    'unknown', and the stated reason is this module's own rejection text.
+    'unknown', and the stated reason is this module's own rejection text. A
+    watcher fallback still carries the branch status table, or the fixed line
+    saying why it is absent, exactly as the templates do.
     """
     workflow = report.get("workflow")
     if workflow not in {"watcher", "publish"}:
@@ -936,6 +943,7 @@ def email_fallback(report: dict[str, Any], reason: str) -> dict[str, Any]:
         f"The digest was rejected because: {reason}",
         "Check the run and its retained artifacts directly. If this recurs for a legitimate "
         "outcome, the digest template table needs a new case.",
+        *([_email_status(report)[0]] if workflow == "watcher" else []),
         run_url=run_url,
     )
 

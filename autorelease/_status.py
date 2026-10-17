@@ -172,29 +172,41 @@ def _upstream(reader: _Reader, branch: str) -> dict[str, str] | None:
 
 
 def _published(reader: _Reader) -> list[dict[str, Any]] | None:
-    """Return the published, non-prerelease php-bin releases, or None when unknown."""
+    """Return the published, non-prerelease php-bin releases, or None when unknown.
+
+    A published release tag without GitHub's UTC publication time makes the whole
+    list unreadable: skipping that one entry would silently report an older
+    revision, or no release, as the newest.
+    """
     releases = reader.json_body("php_bin_releases")
     if releases is None:
         return None
     if not isinstance(releases, list):
         reader.unreadable.add("php_bin_releases")
         return None
-    return [item for item in releases if isinstance(item, dict) and not item.get("draft") and not item.get("prerelease")]
+    published = [
+        item for item in releases if isinstance(item, dict) and not item.get("draft") and not item.get("prerelease")
+    ]
+    for item in published:
+        published_at = item.get("published_at")
+        if PUBLISHED_RELEASE_TAG_RE.fullmatch(str(item.get("tag_name", ""))) and not (
+            isinstance(published_at, str) and STATUS_TIMESTAMP_RE.fullmatch(published_at)
+        ):
+            reader.unreadable.add("php_bin_releases")
+            return None
+    return published
 
 
 def _newest_release(releases: list[dict[str, Any]], branch: str) -> dict[str, Any] | None:
     """Return the newest published tag on a branch, ordering patch first, then revision.
 
-    A release whose publication time does not have GitHub's UTC form is skipped rather
-    than rendered.
+    `_published` has already required every release tag to carry its publication time.
     """
     newest: tuple[tuple[int, ...], dict[str, Any]] | None = None
     for release in releases:
         tag = PUBLISHED_RELEASE_TAG_RE.fullmatch(str(release.get("tag_name", "")))
-        published_at = release.get("published_at")
+        published_at = release["published_at"] if tag else None
         if tag is None or tag.group(2) != branch:
-            continue
-        if not (isinstance(published_at, str) and STATUS_TIMESTAMP_RE.fullmatch(published_at)):
             continue
         revision = int(tag.group(3) or 0)
         order = (*version_key(tag.group(1)), revision)
@@ -250,6 +262,7 @@ def status_document(
         in_progress.add(plan["actionKey"])
     releasing = {branch for branch in map(_released_branch, in_progress) if branch}
 
+    unhealthy = sorted(capture_id for capture_id, status in reader.status.items() if status != 200)
     support = None
     page = reader.body("php_supported_versions")
     if page is not None:
@@ -275,8 +288,10 @@ def status_document(
             state = "current"
         else:
             state = "behind"
+        # Like the watch decision, nothing is claimed about rebuilds from a capture
+        # with any unhealthy source.
         rebuild_due = None
-        if releases is not None and recipe_identities is not None and branch in recipe_identities:
+        if releases is not None and not unhealthy and recipe_identities is not None and branch in recipe_identities:
             rebuild_due = pending_recipe_rebuild(releases, {branch: recipe_identities[branch]}) is not None
         row = support.get(branch) if support is not None else None
         rows.append(
@@ -291,7 +306,6 @@ def status_document(
                 "securitySupportDaysLeft": (row.security_until - checked).days if row else None,
             }
         )
-    unhealthy = sorted(capture_id for capture_id, status in reader.status.items() if status != 200)
     unreadable = sorted(reader.unreadable)
     health = {
         "healthy": not unhealthy and not unreadable,

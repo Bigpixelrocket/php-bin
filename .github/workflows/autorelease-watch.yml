@@ -581,11 +581,14 @@ jobs:
   # changes the php_bin_state capture and wakes the classifier, main admits only
   # reviewed or record commits, and a daily capture time would be a daily commit. This
   # job holds only the Pages deployment scopes and runs no repository code; it deploys
-  # the artifact the read-only investigation staged, and only from main.
+  # the artifact the read-only investigation staged, and only from main. A failed
+  # deployment must not turn the run red, or the digest would report a watcher failure
+  # instead of the day's real outcome; a stale `checkedAt` is what reveals it.
   publish-status:
     name: Publish branch status
     needs: investigate
     if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.investigate.outputs.status_artifact != '' }}
+    continue-on-error: true
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

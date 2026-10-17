@@ -24,6 +24,7 @@ from autorelease.control import (
     ControlError,
     canonical_json,
     email_digest,
+    email_fallback,
     main as control_main,
     manifest_digest,
     recipe_identity_note,
@@ -225,7 +226,7 @@ class BranchStatusTests(unittest.TestCase):
         self.assertEqual(("new_patch", "new_patch:8.5.12"), (document["action"], document["actionKey"]))
         self.assertEqual(["new_patch:8.5.12", "recipe_rebuild:8.4.26:3"], document["inProgressActionKeys"])
         self.assertIn("In progress: new_patch:8.5.12, recipe_rebuild:8.4.26:3", status_block(document))
-        # A plan admission did not accept authorized nothing, so it names no action.
+        # A plan that failed admission authorized nothing, so it names no action.
         document = self.derive(feeds={**FEEDS, "8.5": ("8.5.12", "22 Oct 2026")}, plan=plan, admitted=False)
         self.assertEqual("behind", branch(document, "8.5")["status"])
         self.assertEqual((None, None, []), (document["action"], document["actionKey"], document["inProgressActionKeys"]))
@@ -251,9 +252,14 @@ class BranchStatusTests(unittest.TestCase):
         block = status_block(document)
         self.assertIn("8.5.11-3 (29 Sep)  current, rebuild due  31 Dec 2029", block)
         self.assertIn("Rebuilds due: recipe_rebuild:8.5.11:4", block)
-        # Without the watcher's recipe identities nothing is claimed either way.
+        # Without the watcher's recipe identities nothing is claimed either way, and
+        # neither is anything from a capture with an unhealthy source, exactly as the
+        # watch decision selects no rebuild from one.
         document = self.derive(identities={})
         self.assertEqual([None, None], [item["rebuildDue"] for item in document["branches"]])
+        document = self.derive(identities={"8.4": IDENTITY, "8.5": OTHER_IDENTITY}, statuses={"php_source_tags": 502})
+        self.assertEqual([None, None], [item["rebuildDue"] for item in document["branches"]])
+        self.assertNotIn("rebuild due", status_block(document))
 
     def test_unhealthy_or_unreadable_captures_are_unknown_never_guessed(self):
         document = self.derive(statuses={"php_release_feed_8.4": 503})
@@ -291,6 +297,22 @@ class BranchStatusTests(unittest.TestCase):
         self.assertEqual(["unknown", "unknown"], [item["status"] for item in document["branches"]])
         self.assertEqual([None, None], [item["securitySupportUntil"] for item in document["branches"]])
         self.assertIn("Unreadable captures: php_release_feed_8.4, php_release_feed_8.5, php_supported_versions", status_block(document))
+
+        # A published tag without its publication time could hide the newest revision,
+        # so the whole releases list is unreadable rather than partly skipped.
+        for broken in ({"published_at": None}, {"published_at": "29 Sep 2026"}):
+            document = self.derive(releases=[{**release("8.5.11-3"), **broken}, *RELEASES[1:]])
+            with self.subTest(broken=broken):
+                self.assertEqual(["php_bin_releases"], document["captureHealth"]["unreadableCaptures"])
+                self.assertEqual(["unknown", "unknown"], [item["status"] for item in document["branches"]])
+                self.assertEqual([None, None], [item["phpBin"] for item in document["branches"]])
+                self.assertEqual({"8.5": "unknown", "8.4": "unknown"}, document["badges"])
+        # A draft or a tag that is not a release version is not held to that rule.
+        document = self.derive(
+            releases=[*RELEASES, {"tag_name": "8.5.12", "draft": True, "published_at": None}, {"tag_name": "nightly"}]
+        )
+        self.assertEqual("8.5.11-3", branch(document, "8.5")["phpBin"]["tag"])
+        self.assertTrue(document["captureHealth"]["healthy"])
 
         # A body that no longer matches its recorded digest is not read either.
         with tempfile.TemporaryDirectory() as scratch:
@@ -459,6 +481,23 @@ class StatusEmailTests(unittest.TestCase):
         self.assertIn("In progress: none   Rebuilds due: none   Changed inputs: none", message["body"])
         self.assertTrue(message["body"].endswith(f"Run: {RUN_URL}"))
 
+    def test_quiet_day_names_its_own_evidence_commit(self):
+        status = {**self.status, "changedCaptures": ["php_bin_state"]}
+        message = email_digest({**self.BASE, "decision": self.quiet, "status": status})
+        self.assertIn("The php_bin_state change below is the commit that recorded that capture.", message["body"])
+        self.assertIn("Changed inputs: php_bin_state", message["body"])
+        message = email_digest({**self.BASE, "decision": self.quiet, "status": self.status})
+        self.assertNotIn("recorded that capture", message["body"])
+
+    def test_fallback_digest_keeps_the_watcher_table(self):
+        message = email_fallback({**self.BASE, "status": self.status}, "no email template exists for action: publish")
+        self.assertEqual("unexpected_state", message["template"])
+        self.assertIn(status_block(self.status), message["body"])
+        message = email_fallback(self.BASE, "no email template exists for action: publish")
+        self.assertIn("Branch status: unavailable; this run retained no status document.", message["body"])
+        message = email_fallback({**self.BASE, "workflow": "publish", "status": self.status}, "rejected")
+        self.assertNotIn("Branch status", message["body"])
+
     def test_every_watcher_template_carries_the_table_and_publish_does_not(self):
         plans = (
             {"action": "no_change", "actionKey": "no_change:" + "0" * 16},
@@ -536,11 +575,22 @@ class StatusEmailTests(unittest.TestCase):
             status, output = run_control(*digest_args, "--status", str(root / "site/status.json"))
             self.assertEqual(0, status)
             self.assertEqual("All 2 branches current (checked 2026-10-17 09:25 UTC)", json.loads(output)["subject"].split("] ", 1)[1])
-            (root / "site/status.json").write_text("{not json")
-            status, output = run_control(*digest_args, "--status", str(root / "site/status.json"))
+            # Run state that matches no template still sends the fallback, table included.
+            (root / "decision.json").write_bytes(b"\xff\xfe{")
+            status, output = run_control(
+                *digest_args[:-2], "--decision", str(root / "decision.json"), "--status", str(root / "site/status.json")
+            )
             self.assertEqual(0, status)
-            self.assertEqual("quiet_day", json.loads(output)["template"])
-            self.assertIn("is not valid JSON", json.loads(output)["body"])
+            self.assertEqual("unexpected_state", json.loads(output)["template"])
+            self.assertIn("Branch status at 2026-10-17 09:25 UTC:", json.loads(output)["body"])
+            # A status document that is not JSON, or not even UTF-8, only loses the table.
+            for corrupt in (b"{not json", b"\xff\xfe{"):
+                (root / "site/status.json").write_bytes(corrupt)
+                status, output = run_control(*digest_args, "--status", str(root / "site/status.json"))
+                with self.subTest(corrupt=corrupt):
+                    self.assertEqual(0, status)
+                    self.assertEqual("quiet_day", json.loads(output)["template"])
+                    self.assertIn("is not valid JSON", json.loads(output)["body"])
 
 
 class StatusWorkflowTests(unittest.TestCase):
@@ -564,6 +614,8 @@ class StatusWorkflowTests(unittest.TestCase):
 
         deploy = jobs["publish-status"]
         self.assertEqual("investigate", deploy["needs"])
+        # A Pages outage cannot turn the digest of a healthy run into a failure.
+        self.assertIs(True, deploy["continue-on-error"])
         self.assertEqual({"contents": "read", "pages": "write", "id-token": "write"}, deploy["permissions"])
         self.assertIn("github.ref == 'refs/heads/main'", deploy["if"])
         self.assertEqual("github-pages", deploy["environment"]["name"])

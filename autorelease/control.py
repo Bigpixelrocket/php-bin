@@ -510,9 +510,12 @@ def main(argv: list[str] | None = None) -> int:
                     status = load_json(args.status)
                 except ControlError:
                     status_unreadable = True
+            report["status"] = status
+            report["statusUnreadable"] = status_unreadable
             # A corrupt artifact or an unclassifiable outcome must still email a
             # summary rather than go silent, so rejection selects the fallback
-            # template instead of failing the digest run.
+            # template instead of failing the digest run. The fallback keeps the
+            # status table, which was loaded apart from the rejected run state.
             try:
                 message = email_digest(
                     {
@@ -522,8 +525,6 @@ def main(argv: list[str] | None = None) -> int:
                         "transaction": load_json(args.transaction)
                         if args.transaction and args.transaction.exists()
                         else None,
-                        "status": status,
-                        "statusUnreadable": status_unreadable,
                     }
                 )
             except ControlError as error:

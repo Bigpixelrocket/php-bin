@@ -303,8 +303,9 @@ and `id-token: write`, deploys it with `actions/deploy-pages`, runs no
 repository code, and runs only for `refs/heads/main`, which the `github-pages`
 environment enforces again. The derivation can never fail the investigation,
 so a status defect cannot hold back a release, and a run without a document
-still sends its digest. A failed deployment fails the run and leaves the
-previous run's document in place.
+still sends its digest. A failed deployment leaves the previous run's document
+in place without failing the run, so the digest still reports the day's real
+outcome; the stale `checkedAt` below is what reveals it.
 
 Dashboards should read `status.json` and alert when `checkedAt` is older than
 about 36 hours: the watcher runs daily and GitHub can delay a schedule by
@@ -312,10 +313,10 @@ hours, so anything older means the watcher or its deployment stopped. The
 README badges read the same document through shields.io dynamic JSON queries
 (`$.summary`, `$.badges['<branch>']`, `$.checkedAt`); shields.io cannot filter
 a list, which is why each branch's badge message is also keyed by branch, and
-like the summary it is recomputed whenever the document is validated. To
-reproduce a run's
-document offline from its retained artifact, give it the evidence snapshot
-and the commit that run checked out:
+like the summary it is recomputed whenever the document is validated.
+
+To reproduce a run's document offline from its retained artifact, give it the
+evidence snapshot and the commit that run checked out:
 
 ```bash
 git show <run-commit>:autorelease-state/last-evidence.json > last-evidence.json
