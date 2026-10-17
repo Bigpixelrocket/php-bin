@@ -1558,6 +1558,34 @@ class AutoreleaseControlTests(unittest.TestCase):
                 "release_published",
                 "releases/tag/8.5.9",
             ),
+            # A run that held its admitted work for a publish in flight says so rather than
+            # claiming the dispatch or record it withheld.
+            *(
+                (
+                    {**base, "decision": changed, "plan": {"action": action, "actionKey": key}, "publishInFlight": True},
+                    "held_for_publish",
+                    f"admitted {key} but changed nothing on main and dispatched nothing",
+                )
+                for action, key in (
+                    ("new_patch", "new_patch:8.5.9"),
+                    ("recipe_rebuild", "recipe_rebuild:8.5.9:2"),
+                    ("new_branch", "new_branch:8.6"),
+                    ("branch_eol", "branch_eol:8.1:2026-12-31"),
+                    ("no_change", "no_change:" + "0" * 16),
+                )
+            ),
+            (
+                {**base, "decision": changed, "plan": {"action": "needs_human", "actionKey": "policy_failure:" + "b" * 8},
+                 "publishInFlight": True},
+                "watcher_attention",
+                "needs_human",
+            ),
+            (
+                {**base, "decision": changed, "plan": {"action": "new_patch", "actionKey": "new_patch:8.5.9"},
+                 "publishInFlight": False},
+                "new_patch_started",
+                "PHP 8.5.9 release started",
+            ),
             # Only a successful publish run has started the next watcher run.
             (
                 {**base, "workflow": "publish", "transaction": {"released": True, "version": "8.5.9"}},
@@ -1748,6 +1776,42 @@ class AutoreleaseControlTests(unittest.TestCase):
             )
             self.assertEqual(0, status)
             self.assertEqual("unexpected_state", json.loads(output)["template"])
+
+    def test_email_digest_cli_reads_the_retained_publish_in_flight_state(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = pathlib.Path(scratch)
+            (root / "watch-decision.json").write_text(
+                json.dumps({"classify": True, "manifestDigest": "sha256:" + "a" * 64})
+            )
+            (root / "autorelease-plan.json").write_text(
+                json.dumps({"action": "recipe_rebuild", "actionKey": "recipe_rebuild:8.5.9:2"})
+            )
+            flag = root / "publish-in-flight.json"
+
+            def template():
+                status, output = run_control(
+                    "email-digest", "--workflow", "watcher", "--conclusion", "success",
+                    "--run-url", "https://github.com/bigpixelrocket/php-bin/actions/runs/1",
+                    "--repository", "bigpixelrocket/php-bin",
+                    "--decision", str(root / "watch-decision.json"),
+                    "--plan", str(root / "autorelease-plan.json"),
+                    "--publish-in-flight", str(flag),
+                )
+                self.assertEqual(0, status)
+                return json.loads(output)["template"]
+
+            # A run that retained no flag, like any run before it existed, is not held.
+            self.assertEqual("recipe_rebuild_started", template())
+            flag.write_text('{"schemaVersion":1,"publishInFlight":false}\n')
+            self.assertEqual("recipe_rebuild_started", template())
+            flag.write_text('{"schemaVersion":1,"publishInFlight":true}\n')
+            self.assertEqual("held_for_publish", template())
+            # A flag of any other shape is reported, never read as either answer.
+            for corrupt in ('{"schemaVersion":1,"publishInFlight":"true"}', '{"publishInFlight":true}',
+                            '{"schemaVersion":2,"publishInFlight":true}', "{not json"):
+                with self.subTest(corrupt=corrupt):
+                    flag.write_text(corrupt)
+                    self.assertEqual("unexpected_state", template())
 
     def test_notification_replay_is_deduplicated(self):
         event = {"actionKey": "new_patch:8.5.9", "state": "released"}
@@ -1989,12 +2053,18 @@ class AutoreleaseControlTests(unittest.TestCase):
                 decision = route(publishInFlight=True, **held)
                 self.assertEqual("none", decision["route"])
                 self.assertEqual("deferred_to_publish_in_flight", decision["reason"])
-                # A lifecycle action still announces itself, and recovery stays an overlay.
+                # A lifecycle action still announces itself.
                 self.assertEqual(route(**held)["notify"], decision["notify"])
-                self.assertEqual(
-                    "recover_record",
-                    route(publishInFlight=True, recordActionKey="new_patch:8.5.8", **held)["recoveryRoute"],
-                )
+        # The publish in flight files its own record, so a missing one is not recovered
+        # beside it: a recovered record merged first would move main under its record PR.
+        # The recover step supplies only these two fields, and they decide the overlay.
+        self.assertEqual("none", route(recordActionKey="new_patch:8.5.9", publishInFlight=True)["recoveryRoute"])
+        self.assertEqual("recover_record", route(recordActionKey="new_patch:8.5.9")["recoveryRoute"])
+        self.assertEqual(
+            "none",
+            route(action="new_patch", actionKey="new_patch:8.5.10", recordActionKey="new_patch:8.5.9",
+                  publishInFlight=True)["recoveryRoute"],
+        )
         # Routes that move nothing, and the reasons that already route nowhere, are unchanged.
         self.assertEqual("notify_blocked", route(action="blocked", publishInFlight=True)["route"])
         self.assertEqual("no_admitted_plan", route(action="none", publishInFlight=True)["reason"])
@@ -2823,8 +2893,19 @@ class AutoreleaseControlTests(unittest.TestCase):
         dispatch = next(
             item for item in watch["coordinate"]["steps"] if item.get("name") == "Dispatch implementation or no-edit release"
         )
-        self.assertEqual("${{ needs.investigate.outputs.publish_in_flight }}", dispatch["env"]["PUBLISH_IN_FLIGHT"])
-        self.assertIn('--publish-in-flight "$PUBLISH_IN_FLIGHT"', dispatch["run"])
+        # Both route-watch-action calls read the flag, so the recovery overlay and the
+        # plan route answer from the same decision.
+        recover = next(item for item in watch["coordinate"]["steps"] if item.get("id") == "recover")
+        for routed in (dispatch, recover):
+            self.assertEqual("${{ needs.investigate.outputs.publish_in_flight }}", routed["env"]["PUBLISH_IN_FLIGHT"])
+            self.assertIn('--publish-in-flight "$PUBLISH_IN_FLIGHT"', routed["run"])
+        # The flag is retained before the artifact upload and reaches the digest.
+        self.assertLess(names.index("Find a publish run still in flight"), names.index("Retain evidence and admitted plan"))
+        render = next(
+            item for item in load_workflow(workflows / "autorelease-email.yml")["jobs"]["digest"]["steps"]
+            if item.get("name") == "Render the deterministic digest"
+        )
+        self.assertIn("--publish-in-flight email-run/state/publish-in-flight.json", render["run"])
 
         recorded = {"jobs": [{"name": "Build exact patch", "status": "completed"},
                              {"name": "Record the verified release", "status": "completed"},
@@ -2879,6 +2960,11 @@ class AutoreleaseControlTests(unittest.TestCase):
                     result, output = in_flight(runs, **jobs)
                     self.assertEqual(0, result.returncode, result.stderr)
                     self.assertEqual(f"in_flight={expected}\n", output)
+                    # The same answer is retained for the digest.
+                    self.assertEqual(
+                        {"schemaVersion": 1, "publishInFlight": expected == "true"},
+                        json.loads((work / "autorelease-run/publish-in-flight.json").read_text()),
+                    )
             # A listing GitHub could not answer fails the run rather than reading as none.
             for fail in ("run list", "actions/runs/7/jobs"):
                 with self.subTest(fail=fail):

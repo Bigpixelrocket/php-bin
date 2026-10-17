@@ -392,6 +392,8 @@ def main(argv: list[str] | None = None) -> int:
     email_parser.add_argument("--plan", type=pathlib.Path)
     email_parser.add_argument("--transaction", type=pathlib.Path)
     email_parser.add_argument("--status", type=pathlib.Path)
+    # Retained by the watcher's investigation; absent for publish runs and older runs.
+    email_parser.add_argument("--publish-in-flight", type=pathlib.Path)
 
     # The branch status document and its page are derived from one retained run
     # directory; --recipe-commit is the commit the watch decision computed recipe
@@ -518,9 +520,20 @@ def main(argv: list[str] | None = None) -> int:
             # template instead of failing the digest run. The fallback keeps the
             # status table, which was loaded apart from the rejected run state.
             try:
+                publish_in_flight = False
+                if args.publish_in_flight and args.publish_in_flight.exists():
+                    retained = load_json(args.publish_in_flight)
+                    require(
+                        isinstance(retained, dict)
+                        and set(retained) == {"schemaVersion", "publishInFlight"}
+                        and retained["schemaVersion"] == 1,
+                        "retained publish in flight state has an unknown shape",
+                    )
+                    publish_in_flight = retained["publishInFlight"]
                 message = email_digest(
                     {
                         **report,
+                        "publishInFlight": publish_in_flight,
                         "decision": load_json(args.decision) if args.decision and args.decision.exists() else None,
                         "plan": load_json(args.plan) if args.plan and args.plan.exists() else None,
                         "transaction": load_json(args.transaction)

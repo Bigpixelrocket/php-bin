@@ -128,6 +128,7 @@ jobs:
             --plan email-run/state/autorelease-plan.json \
             --transaction email-run/state/transaction-state.json \
             --status email-run/state/status/status.json \
+            --publish-in-flight email-run/state/publish-in-flight.json \
             > email-run/digest.json
           # The rendered digest is logged so the template that was sent can be read
           # back from the run; it carries no secret and no value that was not validated.

@@ -66,6 +66,10 @@ jobs:
             fi
           done
           echo "in_flight=$in_flight" >> "$GITHUB_OUTPUT"
+          # Retained beside the plan, so the digest says the run held its work back.
+          mkdir -p autorelease-run
+          jq -n --argjson inFlight "$in_flight" '{schemaVersion:1,publishInFlight:$inFlight}' \
+            > autorelease-run/publish-in-flight.json
       - name: Capture fixed raw evidence
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -220,14 +224,20 @@ jobs:
         continue-on-error: true
         env:
           ACTION_KEY: ${{ needs.investigate.outputs.record_action_key }}
+          PUBLISH_IN_FLIGHT: ${{ needs.investigate.outputs.publish_in_flight }}
           GH_TOKEN: ${{ github.token }}
         run: |
           # The same table that routes the dispatch decides whether a repair is due; this
           # step owns the recovery overlay, which runs beside any admitted plan route.
-          route="$(./autorelease/control.py route-watch-action --record-action-key "$ACTION_KEY" | jq -r .recoveryRoute)"
+          route="$(./autorelease/control.py route-watch-action --record-action-key "$ACTION_KEY" \
+            --publish-in-flight "$PUBLISH_IN_FLIGHT" | jq -r .recoveryRoute)"
           case "$route" in
             none)
-              echo "No published release is missing its event record."
+              if [[ -n "$ACTION_KEY" ]]; then
+                echo "The record for $ACTION_KEY is left to the publish run still in flight."
+              else
+                echo "No published release is missing its event record."
+              fi
               exit 0
               ;;
             recover_record) ;;

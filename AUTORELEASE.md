@@ -304,19 +304,25 @@ cascade drains.
   keeps one pending run per group and cancels the older pending one when
   another arrives. Watcher runs take no inputs and capture everything afresh,
   so the run that remains does exactly what the replaced one would have done.
-  A replaced run never started a job, so it sends no digest; the run that
-  replaced it sends one.
+  A replaced run never started a job, so it captured nothing and sends no
+  digest; the run that replaced it reports that work. Only `workflow_run` could
+  reach a run that never started, and it would miss a replaced chained run
+  while emailing every other run a second time beside the calls.
 - A watcher run that starts while a publish run has not yet completed its
   `Record the verified release` job moves nothing on main and dispatches
   nothing: `route-watch-action` returns `deferred_to_publish_in_flight` for
-  every route that would. Its capture predates that record, so it would admit
-  the release in flight a second time, and the duplicate would fail its
-  recapture once the first one landed; any change to main would also stop the
-  publish at its own recapture. The publish starts the run that takes the work
-  once it succeeds, and a failed one leaves the work to the daily schedule.
-  Only watcher runs dispatch publish runs, and they never overlap, so the
-  investigation reads this before it captures. Classification, admission,
-  notifications, and record recovery still run as usual.
+  every plan route that would, and no record recovery for the overlay. Its
+  capture predates that record, so it would admit the release in flight a
+  second time, and the duplicate would fail its recapture once the first one
+  landed. Any change to main would also stop the publish at its own recapture,
+  and a recovered record merged ahead of the publish's own record would stop
+  its record pull request. The publish starts the run that takes the work once
+  it succeeds, and a failed one leaves the work and any missing record to the
+  daily schedule. Only watcher runs dispatch publish runs, and they never
+  overlap, so the investigation reads this before it captures and retains the
+  answer in `publish-in-flight.json`. Classification, admission, and
+  notifications still run as usual, and the digest of such a run says it held
+  the admitted action back.
 - `autorelease-implement.yml` does not chain. After its edit, a new branch or
   a retirement waits for `mise-php` readiness, which that repository's own
   daily consumer records, so a watcher run started then would only find the
