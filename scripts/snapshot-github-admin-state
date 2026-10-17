@@ -103,6 +103,10 @@ try:
         "immutableReleases": single_document(
             gh_api(f"repos/{args.repo}/immutable-releases"), "immutable releases"
         ),
+        # The branch status site; absent until Pages is enabled.
+        "pages": single_document(
+            gh_api(f"repos/{args.repo}/pages", allow_missing=True), "Pages", allow_missing=True
+        ),
         "authenticatedUserSubscription": single_document(
             gh_api(f"repos/{args.repo}/subscription"), "subscription"
         ),

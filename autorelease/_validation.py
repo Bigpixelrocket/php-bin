@@ -68,9 +68,11 @@ def sha256_file(path: pathlib.Path) -> str:
 
 
 def load_json(path: pathlib.Path) -> Any:
+    # Bytes that are not UTF-8 are as unreadable as malformed JSON, and must reach
+    # callers as the same fail-closed rejection rather than an uncaught decode error.
     try:
         return json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as error:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ControlError(f"cannot load JSON {path}: {error}") from error
 
 

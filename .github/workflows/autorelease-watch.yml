@@ -30,6 +30,7 @@ jobs:
       # Recovery is decided deterministically and runs beside the admitted plan, so it
       # carries its own key rather than competing for the plan's.
       record_action_key: ${{ steps.decision.outputs.action_key }}
+      status_artifact: ${{ steps.pages.outcome == 'success' && format('github-pages-{0}', github.run_attempt) || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -107,6 +108,31 @@ jobs:
             echo "base_sha=$(jq -r .preconditions.phpBinHead autorelease-run/autorelease-plan.json)"
             echo "action=$(jq -r .action autorelease-run/autorelease-plan.json)"
           } >> "$GITHUB_OUTPUT"
+      - name: Derive the branch status
+        id: status
+        # Reads only the retained capture, decision, and plan, and decides nothing, so it
+        # also runs after a failed classification or admission. A defect here must never
+        # hold back the release path, so it cannot fail the job: a run without a status
+        # document still emails its digest, saying the table is unavailable.
+        if: ${{ !cancelled() && hashFiles('autorelease-run/evidence/evidence-manifest.json') != '' }}
+        continue-on-error: true
+        run: |
+          ./autorelease/control.py status \
+            --run-dir autorelease-run \
+            --previous autorelease-state/last-evidence.json \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --recipe-commit "$(git rev-parse HEAD)" \
+            --output autorelease-run/status
+      - name: Stage the branch status for GitHub Pages
+        id: pages
+        # Only main publishes; a dispatch on any other ref keeps its status in the
+        # retained artifact alone.
+        if: ${{ !cancelled() && steps.status.outcome == 'success' && github.ref == 'refs/heads/main' }}
+        continue-on-error: true
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          name: github-pages-${{ github.run_attempt }}
+          path: autorelease-run/status/
       - name: Retain evidence and admitted plan
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -550,6 +576,34 @@ jobs:
         run: |
           echo "Recovering the event record for ${{ needs.investigate.outputs.record_action_key }} failed." >&2
           exit 1
+
+  # The status is published to GitHub Pages rather than committed: every commit to main
+  # changes the php_bin_state capture and wakes the classifier, main admits only
+  # reviewed or record commits, and a daily capture time would be a daily commit. This
+  # job holds only the Pages deployment scopes and runs no repository code; it deploys
+  # the artifact the read-only investigation staged, and only from main. A failed
+  # deployment must not turn the run red, or the digest would report a watcher failure
+  # instead of the day's real outcome; a stale `checkedAt` is what reveals it.
+  publish-status:
+    name: Publish branch status
+    needs: investigate
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.investigate.outputs.status_artifact != '' }}
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy the branch status
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+        with:
+          artifact_name: ${{ needs.investigate.outputs.status_artifact }}
 
   notify-failure:
     name: Notify actionable watcher failure

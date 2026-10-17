@@ -140,7 +140,11 @@ jobs:
             --decision email-run/state/watch-decision.json \
             --plan email-run/state/autorelease-plan.json \
             --transaction email-run/state/transaction-state.json \
+            --status email-run/state/status/status.json \
             > email-run/digest.json
+          # The rendered digest is logged so the template that was sent can be read
+          # back from the run; it carries no secret and no value that was not validated.
+          jq -r '"Subject: " + .subject, "", .body' email-run/digest.json
           echo "template=$(jq -r .template email-run/digest.json)"
       - name: Send the digest through Resend
         if: steps.gate.outputs.configured == 'true'

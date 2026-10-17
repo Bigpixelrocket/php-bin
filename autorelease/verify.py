@@ -694,6 +694,25 @@ class Verifier:
             and investigate_permissions.get("contents") == "read",
             "runtime classification does not have resolved read-only contents permission",
         )
+        # The branch status reaches GitHub Pages from a job that holds only the
+        # deployment scopes, runs no repository code, and deploys only from main.
+        publish_status = watch_document.get("jobs", {}).get("publish-status", {})
+        assert_true(
+            publish_status.get("permissions") == {"contents": "read", "pages": "write", "id-token": "write"},
+            "the status deployment holds more than the Pages deployment scopes",
+        )
+        assert_true(
+            "github.ref == 'refs/heads/main'" in str(publish_status.get("if", ""))
+            and (publish_status.get("environment") or {}).get("name") == "github-pages",
+            "the status deployment is not bound to main and the github-pages environment",
+        )
+        status_steps = publish_status.get("steps") or []
+        assert_true(
+            len(status_steps) == 1
+            and str(status_steps[0].get("uses", "")).startswith("actions/deploy-pages@")
+            and "run" not in status_steps[0],
+            "the status deployment runs more than the Pages deployment",
+        )
         admin = PHP_ROOT / "docs/autorelease-admin-evidence.json"
         assert_true(admin.is_file(), "redacted administrator evidence is missing")
         evidence = json.loads(admin.read_text())

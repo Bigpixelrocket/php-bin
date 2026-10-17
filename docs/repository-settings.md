@@ -50,6 +50,12 @@ Required repository state:
   Action reference to use a full commit SHA.
 - Create the protected `php-autorelease-publish` environment, limited to
   protected branches, and disable administrator bypass.
+- Enable GitHub Pages with the GitHub Actions source (`build_type: workflow`),
+  never a branch. The watcher's `Publish branch status` job deploys
+  `status.json` and `index.html` to
+  `https://bigpixelrocket.github.io/php-bin/`. Pages creates the
+  `github-pages` environment; pin it like the publish environment (protected
+  branches only, no administrator bypass) by passing it as an `--environment`.
 - Enable Dependabot security updates, provider-pattern secret scanning, and
   secret-scanning push protection. Request validity checks and non-provider
   patterns as well; GitHub may retain those two as disabled until the
@@ -82,5 +88,6 @@ The normal verification commands are:
   --repo bigpixelrocket/php-bin \
   --owner loadinglucian \
   --required-check "Script checks" \
-  --environment php-autorelease-publish
+  --environment php-autorelease-publish \
+  --environment github-pages
 ```
