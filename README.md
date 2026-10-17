@@ -9,6 +9,21 @@ server, DNS, databases, or a desktop UI.
 
 ## Status
 
+[![php-bin status](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fbigpixelrocket.github.io%2Fphp-bin%2Fstatus.json&query=%24.summary&label=php-bin)](https://bigpixelrocket.github.io/php-bin/)
+[![PHP 8.5](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fbigpixelrocket.github.io%2Fphp-bin%2Fstatus.json&query=%24.badges%5B%278.5%27%5D&label=PHP%208.5)](https://bigpixelrocket.github.io/php-bin/)
+[![PHP 8.4](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fbigpixelrocket.github.io%2Fphp-bin%2Fstatus.json&query=%24.badges%5B%278.4%27%5D&label=PHP%208.4)](https://bigpixelrocket.github.io/php-bin/)
+[![PHP 8.3](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fbigpixelrocket.github.io%2Fphp-bin%2Fstatus.json&query=%24.badges%5B%278.3%27%5D&label=PHP%208.3)](https://bigpixelrocket.github.io/php-bin/)
+[![PHP 8.2](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fbigpixelrocket.github.io%2Fphp-bin%2Fstatus.json&query=%24.badges%5B%278.2%27%5D&label=PHP%208.2)](https://bigpixelrocket.github.io/php-bin/)
+[![Last checked](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fbigpixelrocket.github.io%2Fphp-bin%2Fstatus.json&query=%24.checkedAt&label=last%20checked)](https://bigpixelrocket.github.io/php-bin/)
+
+The badges read the status document the daily watcher publishes to
+[`status.json`](https://bigpixelrocket.github.io/php-bin/status.json), with a readable copy at [https://bigpixelrocket.github.io/php-bin/](https://bigpixelrocket.github.io/php-bin/). For each
+maintained branch it gives php.net's newest release, the newest php-bin
+release, and whether php-bin is current; its shape is
+[`schemas/autorelease-status.schema.json`](schemas/autorelease-status.schema.json).
+A dashboard should read that document and alert when its `checkedAt` is older
+than about 36 hours. A newly maintained branch needs its badge added here.
+
 Public macOS arm64 releases are available for every maintained PHP branch. See
 [the releases page](https://github.com/bigpixelrocket/php-bin/releases) for the
 current set; it is published automatically, so any list repeated here would go

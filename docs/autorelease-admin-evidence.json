@@ -10,7 +10,7 @@
       },
       "afterSnapshot": {
         "path": "docs/admin-state/php-bin-after.json",
-        "digest": "sha256:98cac908af2f21155f19452a3e8e47eb81f784853b19a25e3ecc59a571df5b33"
+        "digest": "sha256:8c196a47dfd827a484d1604ec24d74984e3f42c1f72c528bc5b444f8d6bca9fb"
       },
       "settingsPullRequests": [
         "https://github.com/Bigpixelrocket/php-bin/pull/8",

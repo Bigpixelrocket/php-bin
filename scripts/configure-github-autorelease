@@ -129,6 +129,25 @@ try:
         },
     )
     gh("api", f"repos/{args.repo}/immutable-releases", "--method", "PUT")
+    # The watcher publishes the branch status document through an Actions Pages
+    # deployment, never from a branch, so the site may only be built by a workflow.
+    # Its `github-pages` environment is then pinned like any other: pass it as an
+    # --environment so only protected branches can deploy.
+    pages = subprocess.run(
+        ["gh", "api", f"repos/{args.repo}/pages"],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if pages.returncode == 0:
+        gh("api", f"repos/{args.repo}/pages", "--method", "PUT", input_value={"build_type": "workflow"})
+    elif "Not Found" in pages.stderr:
+        gh("api", f"repos/{args.repo}/pages", "--method", "POST", input_value={"build_type": "workflow"})
+    else:
+        raise RuntimeError(f"GitHub Pages state is unreadable: {pages.stderr.strip()}")
+    if json.loads(gh("api", f"repos/{args.repo}/pages")).get("build_type") != "workflow":
+        raise RuntimeError("GitHub did not set the Pages site to build from workflows")
     gh("variable", "set", "AUTORELEASE_OWNER", "--repo", args.repo, "--body", args.owner)
     ensure_label(args.repo, "autorelease", "1d76db", "Autorelease event")
     ensure_label(args.repo, "attention-required", "d73a4a", "Owner action is required")

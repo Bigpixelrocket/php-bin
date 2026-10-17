@@ -3,15 +3,21 @@
 Every legal transition, the one name an action key may occupy, and the single
 routing table the watcher follows live here. These functions decide what happens
 next from recorded state alone; they never fetch evidence or admit a plan.
+
+The fixed email templates live here too, with the validator and plain-text
+rendering of the branch status document they carry, since both read retained run
+state as untrusted input.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import pathlib
 import re
 from typing import Any, Iterable, Mapping
 
+from ._evidence import BRANCH_FEED_CAPTURE_RE, EVIDENCE_CAPTURE_IDS
 from ._validation import (
     ACTION_KEY_RE,
     COMMIT_SHA_RE,
@@ -316,6 +322,373 @@ EMAIL_ACTION_KEY_PREFIXES = {
 }
 
 
+# The branch status document (`schemas/autorelease-status.schema.json`). `_status`
+# derives it from one retained watcher capture; it is read back here because the
+# email digest and the published page render it, and a retained copy is untrusted
+# input like any other run state. Rejection messages name fields, never values, so a
+# rejection reason is safe to interpolate into an email.
+STATUS_SCHEMA_VERSION = 1
+STATUS_FIELDS = frozenset(
+    {
+        "schemaVersion",
+        "checkedAt",
+        "runUrl",
+        "summary",
+        "badges",
+        "trigger",
+        "action",
+        "actionKey",
+        "inProgressActionKeys",
+        "rebuildDueActionKey",
+        "changedCaptures",
+        "captureHealth",
+        "branches",
+    }
+)
+STATUS_BRANCH_FIELDS = frozenset(
+    {
+        "branch",
+        "status",
+        "upstream",
+        "phpBin",
+        "rebuildDue",
+        "supportState",
+        "securitySupportUntil",
+        "securitySupportDaysLeft",
+    }
+)
+# Every trigger `watch_decision` can report, and every action a plan can carry.
+STATUS_TRIGGERS = frozenset(
+    {
+        "quiet",
+        "evidence_changed",
+        "event_incomplete",
+        "source_unhealthy",
+        "health_failed",
+        "rebuild_due",
+        "record_missing",
+    }
+)
+STATUS_ACTIONS = frozenset(
+    {"no_change", "new_patch", "new_branch", "branch_eol", "recipe_rebuild", "blocked", "needs_human"}
+)
+# Ordered as the summary lists them. `releasing` means an admitted or incomplete
+# release action names the branch; `unknown` means a capture it needs was unhealthy
+# or unreadable, so no version comparison is claimed.
+STATUS_BRANCH_STATES = ("current", "behind", "releasing", "unknown")
+# The row classes the reviewed supported-versions reader accepts.
+STATUS_SUPPORT_STATES = frozenset({"stable", "security", "eol", "future"})
+STATUS_RUN_URL_RE = re.compile(r"^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/actions/runs/[1-9]\d*$")
+STATUS_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+STATUS_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+STATUS_BRANCH_RE = re.compile(r"^\d+\.\d+$")
+# A security support end at most this many days away also shows its countdown.
+STATUS_EOL_COUNTDOWN_DAYS = 180
+# Month names are fixed here rather than taken from the locale, so a runner's
+# locale cannot change a rendered byte.
+STATUS_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _status_timestamp(value: Any, label: str) -> dt.datetime:
+    require(isinstance(value, str) and bool(STATUS_TIMESTAMP_RE.fullmatch(value)), f"{label} is not a UTC timestamp")
+    try:
+        return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as error:
+        raise ControlError(f"{label} is not a UTC timestamp") from error
+
+
+def _status_date(value: Any, label: str) -> dt.date:
+    require(isinstance(value, str) and bool(STATUS_DATE_RE.fullmatch(value)), f"{label} is not a date")
+    try:
+        return dt.date.fromisoformat(value)
+    except ValueError as error:
+        raise ControlError(f"{label} is not a date") from error
+
+
+def _status_member(value: Any, allowed: Iterable[str]) -> bool:
+    """Test membership without hashing, so an unhashable value is rejected, not raised."""
+    return isinstance(value, str) and value in allowed
+
+
+def _status_capture_ids(value: Any, label: str) -> list[str]:
+    require(isinstance(value, list), f"{label} is not a list")
+    require(
+        all(
+            isinstance(item, str) and (item in EVIDENCE_CAPTURE_IDS or bool(BRANCH_FEED_CAPTURE_RE.fullmatch(item)))
+            for item in value
+        ),
+        f"{label} names an unknown capture",
+    )
+    require(value == sorted(set(value)), f"{label} is not sorted and unique")
+    return value
+
+
+def _patch_order(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
+
+
+def status_summary(branches: list[dict[str, Any]]) -> str:
+    """Return the one-line summary of branch states, such as `All 4 branches current`.
+
+    The summary is computed, never stored free-form: the validator recomputes it, so a
+    retained document cannot carry text of its own into a subject line or a badge.
+    """
+    total = len(branches)
+    noun = "branch" if total == 1 else "branches"
+    counts = {state: sum(1 for item in branches if item.get("status") == state) for state in STATUS_BRANCH_STATES}
+    if counts["current"] == total:
+        text = f"All {total} {noun} current" if total > 1 else "1 branch current"
+    else:
+        text = f"{counts['current']} of {total} {noun} current" + "".join(
+            f", {counts[state]} {state}" for state in STATUS_BRANCH_STATES[1:] if counts[state]
+        )
+    rebuilds = sum(1 for item in branches if item.get("rebuildDue") is True)
+    if rebuilds:
+        text += f", {rebuilds} {'rebuild' if rebuilds == 1 else 'rebuilds'} due"
+    return text
+
+
+def _status_php_bin_cell(item: dict[str, Any], health: dict[str, Any]) -> str:
+    """Return the php-bin cell of one branch: its tag, `none`, or `unknown`."""
+    if item["phpBin"]:
+        return item["phpBin"]["tag"]
+    missing = set(health["unhealthyCaptures"]) | set(health["unreadableCaptures"])
+    return "unknown" if "php_bin_releases" in missing else "none"
+
+
+def status_badges(branches: list[dict[str, Any]], health: dict[str, Any]) -> dict[str, str]:
+    """Return one badge message per branch, such as `8.5.11-3, current`.
+
+    shields.io dynamic badges cannot filter a list, so the published document keys
+    these by branch (`$.badges['8.5']`). Like the summary, they are recomputed by the
+    validator rather than trusted.
+    """
+    badges = {}
+    for item in branches:
+        php_bin = _status_php_bin_cell(item, health)
+        badges[item["branch"]] = "unknown" if php_bin == item["status"] == "unknown" else f"{php_bin}, {item['status']}"
+    return badges
+
+
+def _validate_status_branch(item: Any, checked: dt.date) -> None:
+    require(isinstance(item, dict) and set(item) == STATUS_BRANCH_FIELDS, "status branch fields changed")
+    branch = item["branch"]
+    require(isinstance(branch, str) and bool(STATUS_BRANCH_RE.fullmatch(branch)), "status branch is invalid")
+    status = item["status"]
+    require(_status_member(status, STATUS_BRANCH_STATES), "status branch state is unknown")
+    upstream = item["upstream"]
+    if upstream is not None:
+        require(
+            isinstance(upstream, dict) and set(upstream) == {"version", "releaseDate"},
+            "status upstream fields changed",
+        )
+        require(
+            isinstance(upstream["version"], str)
+            and bool(re.fullmatch(rf"{re.escape(branch)}\.\d+", upstream["version"])),
+            "status upstream version is not a patch of its branch",
+        )
+        _status_date(upstream["releaseDate"], "status upstream release date")
+    php_bin = item["phpBin"]
+    if php_bin is not None:
+        require(
+            isinstance(php_bin, dict) and set(php_bin) == {"tag", "version", "revision", "publishedAt"},
+            "status php-bin fields changed",
+        )
+        tag = PUBLISHED_RELEASE_TAG_RE.fullmatch(php_bin["tag"]) if isinstance(php_bin["tag"], str) else None
+        require(tag is not None and tag.group(2) == branch, "status php-bin tag is not a release of its branch")
+        require(php_bin["version"] == tag.group(1), "status php-bin version does not match its tag")
+        revision = php_bin["revision"]
+        require(
+            isinstance(revision, int) and not isinstance(revision, bool) and revision == int(tag.group(3) or 0),
+            "status php-bin revision does not match its tag",
+        )
+        _status_timestamp(php_bin["publishedAt"], "status php-bin publication time")
+    # The two comparison states are claims about the versions, so they must hold.
+    if status == "current":
+        require(
+            upstream is not None
+            and php_bin is not None
+            and _patch_order(php_bin["version"]) >= _patch_order(upstream["version"]),
+            "a current branch does not ship its upstream release",
+        )
+    if status == "behind":
+        require(
+            upstream is not None
+            and (php_bin is None or _patch_order(php_bin["version"]) < _patch_order(upstream["version"])),
+            "a behind branch already ships its upstream release",
+        )
+    require(item["rebuildDue"] is None or isinstance(item["rebuildDue"], bool), "status rebuild flag is invalid")
+    until = item["securitySupportUntil"]
+    days_left = item["securitySupportDaysLeft"]
+    if until is None:
+        require(
+            item["supportState"] is None and days_left is None,
+            "status support fields are only partly known",
+        )
+    else:
+        require(_status_member(item["supportState"], STATUS_SUPPORT_STATES), "status support state is unknown")
+        require(
+            isinstance(days_left, int)
+            and not isinstance(days_left, bool)
+            and days_left == (_status_date(until, "status security support end") - checked).days,
+            "status security support countdown does not match its date",
+        )
+
+
+def validate_status_document(document: Any) -> dict[str, Any]:
+    """Validate a branch status document against its exact reviewed shape, or raise.
+
+    Every value the email digest, the published page, or a badge renders is checked
+    here: versions and tags by the release grammar, dates and times by format, keys by
+    the action-key grammar, capture IDs by the fixed source set, and the summary by
+    recomputation. Cross-field claims are checked too, so `current` always means the
+    branch ships its upstream release and a countdown always matches its date.
+    """
+    require(isinstance(document, dict) and set(document) == STATUS_FIELDS, "status document fields changed")
+    require(type(document["schemaVersion"]) is int and document["schemaVersion"] == STATUS_SCHEMA_VERSION, "status document version is unsupported")
+    checked = _status_timestamp(document["checkedAt"], "status capture time").date()
+    require(
+        isinstance(document["runUrl"], str) and bool(STATUS_RUN_URL_RE.fullmatch(document["runUrl"])),
+        "status run url is invalid",
+    )
+    require(document["trigger"] is None or _status_member(document["trigger"], STATUS_TRIGGERS), "status trigger is unknown")
+    action = document["action"]
+    action_key = document["actionKey"]
+    require((action is None) == (action_key is None), "status action and action key disagree")
+    if action is not None:
+        require(_status_member(action, STATUS_ACTIONS), "status action is unknown")
+        require(
+            isinstance(action_key, str) and bool(ACTION_KEY_RE.fullmatch(action_key)),
+            "status action key is invalid",
+        )
+        allowed_prefixes = EMAIL_ACTION_KEY_PREFIXES.get(action)
+        require(
+            allowed_prefixes is None or action_key.split(":")[0] in allowed_prefixes,
+            "status action key does not match its action",
+        )
+    in_progress = document["inProgressActionKeys"]
+    require(
+        isinstance(in_progress, list)
+        and all(isinstance(key, str) and bool(ACTION_KEY_RE.fullmatch(key)) for key in in_progress)
+        and in_progress == sorted(set(in_progress)),
+        "status in-progress action keys are invalid",
+    )
+    rebuild = document["rebuildDueActionKey"]
+    require(
+        rebuild is None
+        or (isinstance(rebuild, str) and rebuild.startswith("recipe_rebuild:") and bool(ACTION_KEY_RE.fullmatch(rebuild))),
+        "status rebuild action key is invalid",
+    )
+    if document["changedCaptures"] is not None:
+        _status_capture_ids(document["changedCaptures"], "status changed captures")
+    health = document["captureHealth"]
+    require(
+        isinstance(health, dict) and set(health) == {"healthy", "unhealthyCaptures", "unreadableCaptures"},
+        "status capture health fields changed",
+    )
+    unhealthy = _status_capture_ids(health["unhealthyCaptures"], "status unhealthy captures")
+    unreadable = _status_capture_ids(health["unreadableCaptures"], "status unreadable captures")
+    require(health["healthy"] is (not unhealthy and not unreadable), "status capture health disagrees with its lists")
+    branches = document["branches"]
+    require(isinstance(branches, list) and bool(branches), "status lists no branch")
+    for item in branches:
+        _validate_status_branch(item, checked)
+    names = [item["branch"] for item in branches]
+    require(
+        names == sorted(set(names), key=_patch_order, reverse=True),
+        "status branches are not unique and newest first",
+    )
+    require(document["summary"] == status_summary(branches), "status summary does not match its branches")
+    require(document["badges"] == status_badges(branches, health), "status badges do not match its branches")
+    return document
+
+
+def _status_day(value: dt.date, *, year: bool = True) -> str:
+    return f"{value.day:02d} {STATUS_MONTHS[value.month - 1]}" + (f" {value.year}" if year else "")
+
+
+def status_checked_label(document: dict[str, Any]) -> str:
+    """Return the capture time of a validated status document as `2026-10-17 09:25 UTC`."""
+    return _status_timestamp(document["checkedAt"], "status capture time").strftime("%Y-%m-%d %H:%M UTC")
+
+
+def status_block(document: dict[str, Any]) -> str:
+    """Render a validated status document as the fixed-format plain-text table.
+
+    The email digest and the published page show exactly this block: one row per
+    maintained branch, then one line naming in-progress work, the selected rebuild,
+    and the captures whose digest changed, then capture health when it failed. A
+    value the capture could not establish reads `unknown`; a branch with no php-bin
+    release yet reads `none`.
+    """
+    checked = _status_timestamp(document["checkedAt"], "status capture time")
+    health = document["captureHealth"]
+    rows = [("Branch", "php.net", "php-bin", "Status", "Security EOL")]
+    for item in document["branches"]:
+        upstream = item["upstream"]
+        upstream_cell = (
+            f"{upstream['version']} ({_status_day(dt.date.fromisoformat(upstream['releaseDate']))})"
+            if upstream
+            else "unknown"
+        )
+        php_bin = item["phpBin"]
+        php_bin_cell = _status_php_bin_cell(item, health)
+        if php_bin:
+            published = _status_timestamp(php_bin["publishedAt"], "status php-bin publication time").date()
+            php_bin_cell += f" ({_status_day(published, year=published.year != checked.year)})"
+        status_cell = item["status"] + (", rebuild due" if item["rebuildDue"] else "")
+        until = item["securitySupportUntil"]
+        if until is None:
+            eol_cell = "unknown"
+        else:
+            days = item["securitySupportDaysLeft"]
+            eol_cell = _status_day(dt.date.fromisoformat(until))
+            if days < 0:
+                eol_cell += " (ended)"
+            elif days <= STATUS_EOL_COUNTDOWN_DAYS:
+                eol_cell += f" ({days} {'day' if days == 1 else 'days'})"
+        rows.append((item["branch"], upstream_cell, php_bin_cell, status_cell, eol_cell))
+    widths = [max(len(row[column]) for row in rows) for column in range(len(rows[0]) - 1)]
+    table = [
+        "  ".join(cell.ljust(width) for cell, width in zip(row, widths)) + "  " + row[-1]
+        for row in rows
+    ]
+    changed = document["changedCaptures"]
+    lines = [
+        f"Branch status at {checked:%Y-%m-%d %H:%M} UTC:",
+        "",
+        *table,
+        "",
+        f"In progress: {', '.join(document['inProgressActionKeys']) or 'none'}   "
+        f"Rebuilds due: {document['rebuildDueActionKey'] or 'none'}   "
+        f"Changed inputs: {'unknown' if changed is None else ', '.join(changed) or 'none'}",
+    ]
+    if health["unhealthyCaptures"]:
+        lines.append(f"Unhealthy captures: {', '.join(health['unhealthyCaptures'])}")
+    if health["unreadableCaptures"]:
+        lines.append(f"Unreadable captures: {', '.join(health['unreadableCaptures'])}")
+    return "\n".join(lines)
+
+
+def _email_status(report: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+    """Return the status paragraph for a watcher digest, and the document if it validated.
+
+    A missing or rejected document never stops the digest: the template is still sent
+    with a fixed line saying why the table is absent, since the run outcome the
+    template reports does not depend on it.
+    """
+    if report.get("statusUnreadable"):
+        return "Branch status: unavailable; the retained status document is not valid JSON.", None
+    document = report.get("status")
+    if document is None:
+        return "Branch status: unavailable; this run retained no status document.", None
+    try:
+        validate_status_document(document)
+    except ControlError as error:
+        return f"Branch status: unavailable; the retained status document was rejected ({error}).", None
+    return status_block(document), document
+
+
 def _email(template: str, subject: str, *paragraphs: str, run_url: str) -> dict[str, Any]:
     return {
         "template": template,
@@ -331,6 +704,13 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
     same shape rules admission enforces, so free-form plan prose never reaches
     the outbound channel — a plan only ever picks which fixed sentence is sent.
     An outcome with no template is rejected instead of guessed at.
+
+    Every watcher template also carries the branch status table from the run's
+    retained status document (`report["status"]`), or a fixed line saying why it
+    is absent. A quiet day's subject is that document's summary and capture time.
+    Publish digests carry no table: the only status document a publish run can
+    reach is the one its dispatching watcher captured before the release, so the
+    next watcher digest reports the published state instead.
     """
     workflow = report.get("workflow")
     require(workflow in {"watcher", "publish"}, "email digest workflow is unknown")
@@ -417,6 +797,7 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
             run_url=run_url,
         )
 
+    status_paragraph, status = _email_status(report)
     if conclusion != "success":
         return _email(
             "watcher_failed",
@@ -424,6 +805,7 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
             f"The daily autorelease watcher finished with conclusion '{conclusion}'. If the "
             "failure was actionable, a critical GitHub issue has been filed and assigned. The "
             "watcher is idempotent, so re-dispatching it after the cause is fixed is safe.",
+            status_paragraph,
             run_url=run_url,
         )
     decision = report.get("decision")
@@ -438,9 +820,12 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
     if not classified:
         return _email(
             "quiet_day",
-            "Watcher: no upstream changes",
+            f"{status['summary']} (checked {status_checked_label(status)})"
+            if status
+            else "Watcher: no upstream changes",
             "The watcher captured fresh upstream evidence and it matches the last reviewed "
             "capture, so nothing needed classifying and nothing was changed.",
+            status_paragraph,
             f"Evidence manifest: {digest}",
             run_url=run_url,
         )
@@ -467,15 +852,19 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
             f"admitted rebuild revision {revision} ({action_key}). The publish phase was "
             "dispatched; a separate email confirms publication or reports the failure. Every "
             f"existing PHP {version} release stays published and unchanged.",
+            status_paragraph,
             run_url=run_url,
         )
     if action == "no_change":
         return _email(
             "no_change_reviewed",
-            "Watcher: evidence changed, no release needed",
+            "Watcher: evidence changed, no release needed"
+            + (f" ({status['summary'][0].lower()}{status['summary'][1:]})" if status else ""),
             f"Upstream evidence changed and the classifier found it requires no "
             f"release work ({action_key}). The reviewed evidence snapshot was recorded on main, "
-            "so tomorrow's run compares against today's state.",
+            "so tomorrow's run compares against today's state. The changed inputs are listed "
+            "below the table.",
+            status_paragraph,
             f"Evidence manifest: {digest}",
             run_url=run_url,
         )
@@ -486,6 +875,7 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
             f"Upstream published PHP {version} and the watcher admitted a release plan for it "
             f"({action_key}). The implementation and publish phases were dispatched; a separate "
             "email confirms publication or reports the failure.",
+            status_paragraph,
             run_url=run_url,
         )
     if action == "new_branch":
@@ -495,6 +885,7 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
             f"A new PHP branch was detected and admitted as {action_key}. Its first publication "
             "proceeds automatically once mise-php records matching exact-commit readiness; until "
             "then the watcher re-checks daily and mutates nothing.",
+            status_paragraph,
             run_url=run_url,
         )
     if action == "branch_eol":
@@ -504,6 +895,7 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
             f"The support policy retired PHP {version} ({action_key}). Support cleanup completes "
             "automatically once mise-php records matching EOL readiness; published releases for "
             "the branch stay immutable and installable.",
+            status_paragraph,
             run_url=run_url,
         )
     if action in {"blocked", "needs_human"}:
@@ -513,6 +905,7 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
             f"The classifier stopped at '{action}' for {action_key} and mutated nothing. A "
             "GitHub issue has been filed or updated with the exact evidence and the required "
             "next step.",
+            status_paragraph,
             run_url=run_url,
         )
     raise ControlError(f"no email template exists for action: {action}")

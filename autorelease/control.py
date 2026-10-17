@@ -13,13 +13,16 @@ workflows, scripts, verifier, and tests already use stays importable from here:
 - `_evidence`: the opaque capture client and the readers that re-derive a
   cited capture's identity.
 - `_state`: the event, release, and watcher state machines, including the one
-  routing table the watcher follows.
+  routing table the watcher follows, and the fixed email templates with the
+  branch status table they render.
 - `_classifier`: the priority rules that turn one capture into exactly one
   plan, and the reviewed reader of the supported-versions page.
 - `_admission`: the three independent gates a plan and its repository change
   pass: the plan, the sealed patch, and the merge.
 - `_implementation`: the deterministic repository edits of an admitted
   lifecycle plan.
+- `_status`: the branch status document derived from one retained watcher
+  capture, which the watcher publishes and the email digest renders.
 """
 
 from __future__ import annotations
@@ -74,6 +77,7 @@ from autorelease._implementation import (  # noqa: E402
     apply_lifecycle_plan,
     render_support_policy,
 )
+from autorelease._status import status_document, status_page  # noqa: E402
 from autorelease._evidence import (  # noqa: E402
     BRANCH_FEED_CAPTURE_RE,
     EDGE_CACHE_BYPASS_PARAMETER,
@@ -116,10 +120,13 @@ from autorelease._state import (  # noqa: E402
     release_transition,
     retained_notification_issue,
     route_watch_action,
+    status_block,
+    status_summary,
     transition_event,
     unrecorded_published_release,
     validate_completed_event_record,
     validate_readiness_event_record,
+    validate_status_document,
     watch_decision,
 )
 from autorelease._validation import (  # noqa: E402
@@ -384,6 +391,17 @@ def main(argv: list[str] | None = None) -> int:
     email_parser.add_argument("--decision", type=pathlib.Path)
     email_parser.add_argument("--plan", type=pathlib.Path)
     email_parser.add_argument("--transaction", type=pathlib.Path)
+    email_parser.add_argument("--status", type=pathlib.Path)
+
+    # The branch status document and its page are derived from one retained run
+    # directory; --recipe-commit is the commit the watch decision computed recipe
+    # identities at, without which every rebuild flag reads as unknown.
+    status_parser = subparsers.add_parser("status")
+    status_parser.add_argument("--run-dir", required=True, type=pathlib.Path)
+    status_parser.add_argument("--previous", required=True, type=pathlib.Path)
+    status_parser.add_argument("--run-url", required=True)
+    status_parser.add_argument("--recipe-commit")
+    status_parser.add_argument("--output", required=True, type=pathlib.Path)
 
     subparsers.add_parser("validate-policy")
 
@@ -483,6 +501,15 @@ def main(argv: list[str] | None = None) -> int:
                 "runUrl": args.run_url,
                 "repository": args.repository,
             }
+            # The status table is supplementary: an unreadable document only replaces
+            # the table with a fixed line, so it is loaded apart from the run state.
+            status = None
+            status_unreadable = False
+            if args.status and args.status.exists():
+                try:
+                    status = load_json(args.status)
+                except ControlError:
+                    status_unreadable = True
             # A corrupt artifact or an unclassifiable outcome must still email a
             # summary rather than go silent, so rejection selects the fallback
             # template instead of failing the digest run.
@@ -495,11 +522,29 @@ def main(argv: list[str] | None = None) -> int:
                         "transaction": load_json(args.transaction)
                         if args.transaction and args.transaction.exists()
                         else None,
+                        "status": status,
+                        "statusUnreadable": status_unreadable,
                     }
                 )
             except ControlError as error:
                 message = email_fallback(report, str(error))
             print(json.dumps(message))
+        elif args.command == "status":
+            require(
+                args.recipe_commit is None or bool(COMMIT_SHA_RE.fullmatch(args.recipe_commit)),
+                "--recipe-commit must be an exact commit",
+            )
+            document = status_document(
+                args.run_dir,
+                args.previous,
+                args.run_url,
+                recipe_identities(ROOT, args.recipe_commit) if args.recipe_commit else None,
+            )
+            args.output.mkdir(parents=True, exist_ok=True)
+            # Published for people as well as parsers, so it is indented, unlike records.
+            (args.output / "status.json").write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+            (args.output / "index.html").write_text(status_page(document))
+            print(status_block(document))
         elif args.command == "validate-policy":
             print(json.dumps(validate_support_policy(ROOT)))
         return 0

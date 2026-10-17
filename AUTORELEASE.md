@@ -236,6 +236,17 @@ under one idempotency key per run attempt; a delivery that still fails fails
 the digest job, and with it a publish run, because a red run is the only
 report left when the channel is down. Rerunning that run's failed jobs sends
 the digest again without repeating any job that passed.
+Every watcher digest also carries the fixed-format branch table from that
+run's status document (see [Branch status](#branch-status)), followed by one
+line naming in-progress work, the selected rebuild, and the captures whose
+digest changed, so an "evidence changed" email says what changed. A quiet
+day's subject is the document's summary and capture time, such as `All 4
+branches current (checked 2026-10-17 09:25 UTC)`. A missing or rejected
+document replaces the table with a fixed line saying why, and the template is
+still sent. Publish digests carry no table: the only status document a publish
+run can reach is the one its watcher captured before the release, so the next
+watcher digest reports the published state. The digest job logs the rendered
+subject and body.
 
 There is no repair phase. A failed classification input, admission, sealing,
 validation, build, or merge stops that run and raises the deduplicated owner
@@ -250,6 +261,70 @@ flowchart TD
   stop --> issue["Create or update one assigned issue"]
   issue --> email["GitHub inbox and email"]
   issue --> actions["Actions failure email fallback"]
+```
+
+## Branch status
+
+Each watcher run derives one status document
+(`./autorelease/control.py status`, `autorelease/_status.py`, shape in
+`schemas/autorelease-status.schema.json`) from what it already captured: each
+maintained branch's own release feed, the `php_bin_releases` list, the
+supported-versions page, the watch decision, the admitted plan, and the
+reviewed snapshot in `autorelease-state/last-evidence.json`. It fetches
+nothing and decides nothing, and neither the classifier nor admission reads
+it. Per maintained branch it reports php.net's newest release and its date,
+php-bin's newest published tag with its revision and publication time, a
+status, whether a rebuild is due for the watcher's checked-out recipe, and the
+security support end with the days left. A branch is `current` when php-bin
+ships the version its feed names, `behind` when it does not, `releasing` when
+an admitted plan or an incomplete event record publishes on it, and `unknown`
+when a capture it needs was unhealthy or lacked its reviewed shape. Such a
+capture is named under `captureHealth`, and the values it would have supplied
+stay null rather than guessed. The document also names the run, its trigger,
+the admitted action, every in-progress action key, the selected rebuild, and
+the captures whose digest differs from the reviewed snapshot. It is validated
+against its exact shape when written and again whenever it is read back, so
+every rendered value passed the same rules as the email templates.
+
+The watcher publishes the document to GitHub Pages, at
+`https://bigpixelrocket.github.io/php-bin/status.json` beside a human-readable
+`index.html`, instead of committing it to main:
+
+- Every commit to main changes the `php_bin_state` capture, which wakes the
+  classifier and files another evidence record PR.
+- Main admits only reviewed pull requests and the automation records
+  `Protected controls` admits; a status file is neither.
+- The capture time changes on every run, so a committed status would be a
+  commit every day.
+
+The read-only investigation job derives and stages the site. A separate
+`Publish branch status` job, holding only `contents: read`, `pages: write`,
+and `id-token: write`, deploys it with `actions/deploy-pages`, runs no
+repository code, and runs only for `refs/heads/main`, which the `github-pages`
+environment enforces again. The derivation can never fail the investigation,
+so a status defect cannot hold back a release, and a run without a document
+still sends its digest. A failed deployment fails the run and leaves the
+previous run's document in place.
+
+Dashboards should read `status.json` and alert when `checkedAt` is older than
+about 36 hours: the watcher runs daily and GitHub can delay a schedule by
+hours, so anything older means the watcher or its deployment stopped. The
+README badges read the same document through shields.io dynamic JSON queries
+(`$.summary`, `$.badges['<branch>']`, `$.checkedAt`); shields.io cannot filter
+a list, which is why each branch's badge message is also keyed by branch, and
+like the summary it is recomputed whenever the document is validated. To
+reproduce a run's
+document offline from its retained artifact, give it the evidence snapshot
+and the commit that run checked out:
+
+```bash
+git show <run-commit>:autorelease-state/last-evidence.json > last-evidence.json
+./autorelease/control.py status \
+  --run-dir <artifact> \
+  --previous last-evidence.json \
+  --run-url https://github.com/bigpixelrocket/php-bin/actions/runs/<run-id> \
+  --recipe-commit <run-commit> \
+  --output status-site
 ```
 
 ## Recipe rebuilds
