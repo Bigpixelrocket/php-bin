@@ -304,7 +304,7 @@ class BuildScriptTests(unittest.TestCase):
                 self.assertFalse(self.calls.exists())
 
 
-# `spc dev:extensions pdo_sqlsrv,redis` as StaticPHP 2.8.5 prints it, colors included.
+# `spc dev:extensions pdo_sqlsrv,redis,curl` as StaticPHP 2.8.5 prints it, colors included.
 DEPENDENCY_TABLE = (
     " ┌────────────┬──────────────┬──────────────┬─────────────┬────────────────┬───────────┐\n"
     " │\x1b[2m name       \x1b[22m│\x1b[2m lib-depends  \x1b[22m│\x1b[2m lib-suggests \x1b[22m│\x1b[2m ext-depends \x1b[22m"
@@ -312,21 +312,23 @@ DEPENDENCY_TABLE = (
     " ├────────────┼──────────────┼──────────────┼─────────────┼────────────────┼───────────┤\n"
     " │ pdo_sqlsrv │ php          │              │ pdo,sqlsrv  │                │ false     │\n"
     " │ redis      │ php          │ zstd, liblz4 │             │ session, igbinary │ false  │\n"
+    " │ curl       │ curl         │              │             │                │ false     │\n"
     " └────────────┴──────────────┴──────────────┴─────────────┴────────────────┴───────────┘\n"
 )
 
 
 class AttributionTests(unittest.TestCase):
-    def attribute(self, lines, extensions="imap,igbinary,xhprof,zip,xdebug,redis", extra=()):
+    def attribute(self, lines, extensions="imap,igbinary,xhprof,zip,xdebug,redis", extra=(), table=True):
         with tempfile.TemporaryDirectory() as scratch:
             build = pathlib.Path(scratch).resolve() / "build"
             (build / "log").mkdir(parents=True)
             text = "\n".join(line.replace("BUILD", str(build)) for line in lines) + "\n"
             (build / "log/spc.shell.log").write_text(text)
             (build / "dependencies.txt").write_text(DEPENDENCY_TABLE)
+            dependencies = ("--dependencies", str(build / "dependencies.txt")) if table else ()
             result = subprocess.run(
                 [str(ROOT / "scripts/attribute-build-failure"), "--log-dir", str(build / "log"), "--extensions", extensions,
-                 "--dependencies", str(build / "dependencies.txt"), *extra],
+                 *dependencies, *extra],
                 capture_output=True, text=True, check=False,
             )
         self.assertEqual(0, result.returncode, result.stderr)
@@ -387,6 +389,18 @@ class AttributionTests(unittest.TestCase):
             "> Executing command: ./configure --enable-redis=shared --enable-xhprof=shared --enable-cli",
             "configure: error: something in core",
         ]))
+
+    def test_an_error_in_a_library_named_like_an_extension_names_nothing(self):
+        # StaticPHP extracts libzstd and libcurl to source/zstd and source/curl, beside
+        # extension sources such as source/xdebug; its table says which are libraries.
+        self.assertEqual([], self.attribute([
+            "BUILD/source/zstd/lib/compress/zstd_compress.c:1:1: error: library",
+            "BUILD/source/curl/lib/url.c:1:1: error: library",
+        ], extensions="zstd,curl,redis"))
+        # Without the table no directory outside php-src is known to be an extension's.
+        self.assertEqual([], self.attribute(
+            ["BUILD/source/xdebug/src/base/base.c:9: error: x"], table=False,
+        ))
 
     def test_errors_outside_an_extension_name_nothing(self):
         self.assertEqual([], self.attribute([

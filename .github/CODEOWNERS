@@ -33,5 +33,6 @@
 /scripts/lib.sh @loadinglucian
 /scripts/install-spc.sh @loadinglucian
 /scripts/install-build-deps.sh @loadinglucian
+/scripts/attribute-build-failure @loadinglucian
 /.spc-version @loadinglucian
 /.spc-sha256 @loadinglucian
