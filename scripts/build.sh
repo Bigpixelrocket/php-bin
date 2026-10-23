@@ -272,7 +272,16 @@ reset_php_build() {
   rm -f "$BUILD_DIR"/buildroot/bin/php* "$BUILD_DIR"/buildroot/lib/libphp*
 }
 
+# Print the libraries StaticPHP resolved for the last attempt, as it logged them.
+attempt_libraries() {
+  sed -n 's/^.*\[I\] Libraries ([0-9]*):[[:space:]]*//p' "$BUILD_DIR/log/spc.output.log" 2> /dev/null | head -n 1
+}
+
 attempt=1
+# The library set the installed libraries were built for. Leaving an extension out
+# can shrink it, and a library built while another was present may still link
+# against it, as libcurl does against libssh2.
+built_libraries=""
 while true; do
   select_build_sets
   craft_file true false > "$BUILD_DIR/craft-download.yml"
@@ -284,8 +293,11 @@ while true; do
   if [[ -z "$DISCOVER_MODULE_LIST" ]]; then
     exit 1
   fi
-  # Every retry leaves out at least one more extension the build tried, so the
-  # loop ends: with a build that passes, or with an error that names none.
+  libraries="$(attempt_libraries)"
+  built_libraries="${built_libraries:-$libraries}"
+  # Every retry leaves out at least one more extension the build tried, or
+  # rebuilds the libraries for a set they were not built for, which happens once
+  # per set; so the loop ends with a build that passes or an error naming nothing.
   tried="$EXTENSIONS${SHARED_EXTENSIONS:+,$SHARED_EXTENSIONS}"
   # StaticPHP builds what a tried extension depends on even when it was left out;
   # its own table says which tried extensions pulled such a dependency back in.
@@ -295,6 +307,16 @@ while true; do
     --extensions "$tried" \
     --unbuilt "${UNBUILT//$'\n'/,}" \
     --dependencies "$BUILD_DIR/extension-dependencies.txt")"
+  if [[ -z "$culprits" && "$libraries" != "$built_libraries" ]]; then
+    # Nothing to leave out, but the libraries were built for a larger set: rebuild
+    # them for this one and retry the same extensions.
+    echo "Attempt $attempt: no extension to leave out, and the libraries were built for another library set. Rebuilding them."
+    rm -rf "$BUILD_DIR/buildroot"
+    reset_php_build
+    built_libraries="$libraries"
+    attempt=$((attempt + 1))
+    continue
+  fi
   if [[ -z "$culprits" ]]; then
     echo "The build failed and no compiler error names an extension it could leave out." >&2
     exit 1

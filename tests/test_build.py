@@ -36,8 +36,15 @@ FAKE_SPC = textwrap.dedent(
       echo "micro: ${SPC_MICRO_PATCHES-unset}" >> "$SPC_CALLS"
       echo "static: $(sed -n 's/^extensions: //p' craft-build.yml)" >> "$SPC_CALLS"
       echo "shared: $(sed -n 's/^shared-extensions: //p' craft-build.yml)" >> "$SPC_CALLS"
-      mkdir -p log
+      mkdir -p log buildroot/lib
       : > log/spc.shell.log
+      # Like StaticPHP, resolve one library per shared extension tried, and keep
+      # libraries already installed.
+      echo "[00:00:00] [I] Libraries (1):         $(sed -n 's/^shared-extensions: //p' craft-build.yml)" > log/spc.output.log
+      if [[ ! -f buildroot/lib/built-for ]]; then
+        sed -n 's/^shared-extensions: //p' craft-build.yml > buildroot/lib/built-for
+      fi
+      echo "libraries built for: $(cat buildroot/lib/built-for)" >> "$SPC_CALLS"
       for name in ${FAKE_BREAK:-}; do
         if grep -Eq "^(shared-)?extensions: (.*,)?$name(,|$)" craft-build.yml; then
           echo "$PWD/source/php-src/ext/$name/$name.c:1:1: error: broken" >> log/spc.shell.log
@@ -186,7 +193,9 @@ class BuildScriptTests(unittest.TestCase):
         )
         self.assertNotEqual(0, result.returncode)
         static, shared = self.calls_with("static: "), self.calls_with("shared: ")
-        self.assertEqual(2, len(static))
+        # The third attempt retries the same set after rebuilding the libraries.
+        self.assertEqual(3, len(static))
+        self.assertEqual((static[1], shared[1]), (static[2], shared[2]))
         self.assertIn("intl", static[0].split(","))
         self.assertIn("imap", static[0].split(","))
         self.assertNotIn("imap", static[1].split(","))
@@ -195,9 +204,26 @@ class BuildScriptTests(unittest.TestCase):
         self.assertNotIn("memcached", shared[1].split(","))
         self.assertIn("imagick", shared[1].split(","))
         self.assertIn("Attempt 1: leaving out igbinary,imap: it does not compile on PHP 8.6.0RC4. Retrying.", result.stdout)
-        # The second attempt names nothing, so discovery stops instead of guessing.
+        # The retries name nothing, so discovery stops instead of guessing.
         self.assertIn("no compiler error names an extension it could leave out", result.stderr)
         self.assertFalse((self.scratch / "discovered.txt").exists())
+
+    def test_discovery_rebuilds_libraries_once_when_their_set_changed(self):
+        # Attempt 1 leaves out igbinary; attempt 2 fails with nothing to blame while the
+        # installed libraries were built for the larger set, so they are rebuilt once.
+        result = self.build(
+            "8.6.0", PHP_SOURCE="tag", FAKE_BREAK="igbinary",
+            DISCOVER_MODULE_LIST=str(self.scratch / "discovered.txt"),
+        )
+        self.assertNotEqual(0, result.returncode)
+        built_for = self.calls_with("libraries built for: ")
+        self.assertEqual(3, len(built_for))
+        self.assertIn("igbinary", built_for[0])
+        self.assertEqual(built_for[0], built_for[1])
+        self.assertNotIn("igbinary", built_for[2])
+        self.assertIn("Attempt 2: no extension to leave out, and the libraries were built for another library set.",
+                      result.stdout)
+        self.assertIn("no compiler error names an extension it could leave out", result.stderr)
 
     def test_the_module_comparison_ignores_left_out_lines(self):
         modules = self.scratch / "modules.txt"
