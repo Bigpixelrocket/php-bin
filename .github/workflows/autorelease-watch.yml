@@ -2,7 +2,7 @@ name: PHP autorelease watcher
 
 on:
   schedule:
-    - cron: "17 5 * * *"
+    - cron: "17 5,17 * * *"
   workflow_dispatch:
 
 permissions:

@@ -16,13 +16,13 @@ server, DNS, databases, or a desktop UI.
 [![PHP 8.2](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fbigpixelrocket.github.io%2Fphp-bin%2Fstatus.json&query=%24.badges%5B%278.2%27%5D&label=PHP%208.2)](https://bigpixelrocket.github.io/php-bin/)
 [![Last checked](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fbigpixelrocket.github.io%2Fphp-bin%2Fstatus.json&query=%24.checkedAt&label=last%20checked)](https://bigpixelrocket.github.io/php-bin/)
 
-The badges read the status document the daily watcher publishes to
+The badges read the status document the watcher publishes every 12 hours to
 [`status.json`](https://bigpixelrocket.github.io/php-bin/status.json), with a readable copy at [https://bigpixelrocket.github.io/php-bin/](https://bigpixelrocket.github.io/php-bin/). For each
 maintained branch it gives php.net's newest release, the newest php-bin
 release, and whether php-bin is current; its shape is
 [`schemas/autorelease-status.schema.json`](schemas/autorelease-status.schema.json).
 A dashboard should read that document and alert when its `checkedAt` is older
-than about 36 hours. A newly maintained branch needs its badge added here.
+than about 24 hours. A newly maintained branch needs its badge added here.
 
 Public macOS arm64 releases are available for every maintained PHP branch. See
 [the releases page](https://github.com/bigpixelrocket/php-bin/releases) for the
@@ -33,7 +33,7 @@ pass.
 
 ## Autorelease
 
-Releases are produced automatically. A daily watcher detects upstream PHP
+Releases are produced automatically. A watcher running every 12 hours detects upstream PHP
 release and lifecycle changes, fixed rules classify them into one plan, an
 independent admission check accepts or rejects that plan, and deterministic
 workflows build, verify, and publish the binaries. No model takes part in any
