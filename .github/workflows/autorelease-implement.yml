@@ -91,59 +91,51 @@ jobs:
             echo "action_key=$action_key"
           } >> "$GITHUB_OUTPUT"
 
-  # Read-only like every build: StaticPHP and the built binary never see a write token.
-  # The job always runs, as a no-op on Linux when nothing needs discovery: a skipped
-  # job would skip every job after it, even through the ones that ran.
-  discover:
-    name: Discover what the new branch builds
+  # Discovery runs in up to three passes (autorelease-discover.yml), each resuming
+  # from what the one before left out, so it can outlast one job's time limit. Every
+  # pass always runs, as a no-op when it has nothing to do.
+  discover-1:
+    name: Discover the new branch's modules, pass 1
     needs: [preflight, discovery-scope]
-    runs-on: ${{ needs.discovery-scope.outputs.discover == 'true' && 'macos-26' || 'ubuntu-latest' }}
-    # The first build plus a retry for each extension left out; libraries are reused.
-    timeout-minutes: 360
     permissions:
       contents: read
-    env:
-      VERSION: ${{ needs.discovery-scope.outputs.version }}
-    steps:
-      - name: Nothing to discover
-        if: needs.discovery-scope.outputs.discover != 'true'
-        run: echo "This lifecycle edit writes no new module list."
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        if: needs.discovery-scope.outputs.discover == 'true'
-        with:
-          ref: ${{ needs.preflight.outputs.base_sha }}
-          persist-credentials: false
-      - name: Verify runner and version
-        if: needs.discovery-scope.outputs.discover == 'true'
-        run: |
-          test "$(uname -s)" = Darwin && test "$(uname -m)" = arm64
-          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-      - name: Install build dependencies
-        if: needs.discovery-scope.outputs.discover == 'true'
-        run: ./scripts/install-build-deps.sh
-      - name: Install pinned StaticPHP
-        if: needs.discovery-scope.outputs.discover == 'true'
-        run: ./scripts/install-spc.sh
-      - name: Build, leaving out extensions that do not compile
-        if: needs.discovery-scope.outputs.discover == 'true'
-        env:
-          # StaticPHP authenticates GitHub API calls only through this variable.
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p discovered
-          DISCOVER_MODULE_LIST="$PWD/discovered/modules.txt" ./scripts/build.sh "$VERSION" s4
-      - name: Retain the discovered module list
-        if: needs.discovery-scope.outputs.discover == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: discovered-modules-${{ github.run_id }}
-          path: discovered/
-          if-no-files-found: error
-          retention-days: 90
+    uses: ./.github/workflows/autorelease-discover.yml
+    with:
+      needed: ${{ needs.discovery-scope.outputs.discover == 'true' }}
+      base_sha: ${{ needs.preflight.outputs.base_sha }}
+      version: ${{ needs.discovery-scope.outputs.version }}
+      pass: "1"
+      final: false
+
+  discover-2:
+    name: Discover the new branch's modules, pass 2
+    needs: [preflight, discovery-scope, discover-1]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/autorelease-discover.yml
+    with:
+      needed: ${{ needs.discover-1.outputs.pending == 'true' }}
+      base_sha: ${{ needs.preflight.outputs.base_sha }}
+      version: ${{ needs.discovery-scope.outputs.version }}
+      pass: "2"
+      final: false
+
+  discover-3:
+    name: Discover the new branch's modules, pass 3
+    needs: [preflight, discovery-scope, discover-2]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/autorelease-discover.yml
+    with:
+      needed: ${{ needs.discover-2.outputs.pending == 'true' }}
+      base_sha: ${{ needs.preflight.outputs.base_sha }}
+      version: ${{ needs.discovery-scope.outputs.version }}
+      pass: "3"
+      final: true
 
   implement:
     name: Deterministic lifecycle edit and sealing
-    needs: [preflight, discovery-scope, discover]
+    needs: [preflight, discovery-scope, discover-1, discover-2, discover-3]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -628,8 +620,8 @@ jobs:
   # diff, so the owner can correct expected-modules/<branch>.txt by pull request.
   notify-failure:
     name: Notify actionable implementation failure
-    needs: [preflight, discovery-scope, discover, implement, validate, build-new-branch, merge]
-    if: always() && needs.preflight.result == 'success' && (needs['discovery-scope'].result == 'failure' || needs.discover.result == 'failure' || needs.implement.result == 'failure' || needs.validate.result == 'failure' || needs['build-new-branch'].result == 'failure' || needs.merge.result == 'failure')
+    needs: [preflight, discovery-scope, discover-1, discover-2, discover-3, implement, validate, build-new-branch, merge]
+    if: always() && needs.preflight.result == 'success' && (needs['discovery-scope'].result == 'failure' || needs['discover-1'].result == 'failure' || needs['discover-2'].result == 'failure' || needs['discover-3'].result == 'failure' || needs.implement.result == 'failure' || needs.validate.result == 'failure' || needs['build-new-branch'].result == 'failure' || needs.merge.result == 'failure')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

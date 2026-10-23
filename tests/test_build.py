@@ -225,6 +225,36 @@ class BuildScriptTests(unittest.TestCase):
                       result.stdout)
         self.assertIn("no compiler error names an extension it could leave out", result.stderr)
 
+    def test_a_discovery_pass_stops_at_its_deadline_and_the_next_resumes(self):
+        listed = self.scratch / "discovered.txt"
+        result = self.build(
+            "8.6.0", PHP_SOURCE="tag", FAKE_BREAK="imap igbinary",
+            DISCOVER_MODULE_LIST=str(listed), DISCOVER_DEADLINE="1",
+        )
+        self.assertEqual(75, result.returncode, result.stderr)
+        self.assertEqual(1, len(self.calls_with("static: ")))
+        pending = pathlib.Path(f"{listed}.pending")
+        self.assertEqual("igbinary\nimap\nmemcached\nredis\n", pending.read_text())
+        self.calls.unlink()
+        self.build("8.6.0", PHP_SOURCE="tag", DISCOVER_MODULE_LIST=str(listed), DISCOVER_RESUME=str(pending))
+        static, shared = self.calls_with("static: ")[0].split(","), self.calls_with("shared: ")[0].split(",")
+        self.assertNotIn("imap", static)
+        for name in ("igbinary", "redis", "memcached"):
+            self.assertNotIn(name, shared)
+
+    def test_resume_and_deadline_only_apply_to_a_discovery_and_must_be_valid(self):
+        bad = self.scratch / "bad.txt"
+        bad.write_text("imap\nNot-An-Extension\n")
+        for env, message in (
+            ({"DISCOVER_DEADLINE": "1"}, "only apply with DISCOVER_MODULE_LIST"),
+            ({"DISCOVER_MODULE_LIST": str(self.scratch / "x"), "DISCOVER_DEADLINE": "soon"}, "must be epoch seconds"),
+            ({"DISCOVER_MODULE_LIST": str(self.scratch / "x"), "DISCOVER_RESUME": str(bad)}, "names an invalid extension"),
+        ):
+            with self.subTest(env=env):
+                result = self.build("8.6.0", PHP_SOURCE="tag", **env)
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn(message, result.stderr)
+
     def test_the_module_comparison_ignores_left_out_lines(self):
         modules = self.scratch / "modules.txt"
         modules.write_text("Core\nZend OPcache\n")
@@ -442,31 +472,51 @@ class NewBranchDiscoveryWorkflowTests(unittest.TestCase):
         from autorelease.verify import load_workflow
 
         self.jobs = load_workflow(ROOT / ".github/workflows/autorelease-implement.yml")["jobs"]
+        self.discover = load_workflow(ROOT / ".github/workflows/autorelease-discover.yml")["jobs"]["discover"]
 
     def step(self, job, name):
-        return next(item for item in self.jobs[job]["steps"] if item.get("name") == name)
+        return next(item for item in job["steps"] if item.get("name") == name)
 
-    def test_discovery_always_runs_and_only_builds_when_a_new_list_is_owed(self):
-        discover = self.jobs["discover"]
-        # A skipped job would skip every later job, even through the ones that ran.
-        self.assertNotIn("if", discover)
-        self.assertEqual({"contents": "read"}, discover["permissions"])
-        self.assertIn("'macos-26' || 'ubuntu-latest'", discover["runs-on"])
-        build = self.step("discover", "Build, leaving out extensions that do not compile")
-        self.assertEqual("needs.discovery-scope.outputs.discover == 'true'", build["if"])
-        self.assertIn('DISCOVER_MODULE_LIST="$PWD/discovered/modules.txt" ./scripts/build.sh "$VERSION" s4', build["run"])
-        decide = self.step("discovery-scope", "Decide")["run"]
+    def test_discovery_runs_in_three_resumable_passes_that_always_run(self):
+        passes = [self.jobs[f"discover-{number}"] for number in (1, 2, 3)]
+        for number, job in enumerate(passes, start=1):
+            # A skipped job would skip every later job, even through the ones that ran.
+            self.assertNotIn("if", job)
+            self.assertEqual("./.github/workflows/autorelease-discover.yml", job["uses"])
+            self.assertEqual({"contents": "read"}, job["permissions"])
+            self.assertEqual(str(number), job["with"]["pass"])
+            self.assertIs(number == 3, job["with"]["final"])
+        self.assertEqual("${{ needs.discovery-scope.outputs.discover == 'true' }}", passes[0]["with"]["needed"])
+        self.assertEqual("${{ needs.discover-1.outputs.pending == 'true' }}", passes[1]["with"]["needed"])
+        self.assertEqual("${{ needs.discover-2.outputs.pending == 'true' }}", passes[2]["with"]["needed"])
+        decide = self.step(self.jobs["discovery-scope"], "Decide")["run"]
         self.assertIn('if [[ ! -e "expected-modules/${version%.*}.txt" ]]; then', decide)
-        self.assertEqual(["preflight", "discovery-scope", "discover"], self.jobs["implement"]["needs"])
         self.assertNotIn("if", self.jobs["implement"])
 
-    def test_only_a_discovered_list_reaches_the_edit_and_a_failed_discovery_is_reported(self):
-        apply = self.step("implement", "Apply the admitted lifecycle edit")
+    def test_a_pass_builds_read_only_and_hands_over_what_it_left_out(self):
+        self.assertNotIn("if", self.discover)
+        self.assertEqual({"contents": "read"}, self.discover["permissions"])
+        self.assertIn("'macos-26' || 'ubuntu-latest'", self.discover["runs-on"])
+        build = self.step(self.discover, "Build, leaving out extensions that do not compile")
+        self.assertEqual("inputs.needed", build["if"])
+        self.assertIn('DISCOVER_MODULE_LIST="$PWD/discovered/modules.txt"', build["run"])
+        self.assertIn('DISCOVER_DEADLINE="$(( $(date +%s) + 290 * 60 ))"', build["run"])
+        self.assertIn('if [[ "$status" == "75" && "$FINAL" != "true" ]]; then', build["run"])
+        handover = self.step(self.discover, "Hand what this pass left out to the next pass")
+        resume = self.step(self.discover, "Download what the previous pass left out")
+        self.assertEqual(
+            "discovery-pending-${{ github.run_id }}-${{ inputs.pass == '1' && '2' || '3' }}", handover["with"]["name"]
+        )
+        self.assertEqual("discovery-pending-${{ github.run_id }}-${{ inputs.pass }}", resume["with"]["name"])
+
+    def test_only_a_discovered_list_reaches_the_edit_and_a_failed_pass_is_reported(self):
+        apply = self.step(self.jobs["implement"], "Apply the admitted lifecycle edit")
         self.assertEqual("${{ needs.discovery-scope.outputs.discover }}", apply["env"]["DISCOVERED"])
         self.assertIn('module_list=(--module-list "$RUNNER_TEMP/discovered/modules.txt")', apply["run"])
         notify = self.jobs["notify-failure"]
-        self.assertIn("discover", notify["needs"])
-        self.assertIn("needs.discover.result == 'failure'", notify["if"])
+        for number in (1, 2, 3):
+            self.assertIn(f"discover-{number}", notify["needs"])
+            self.assertIn(f"needs['discover-{number}'].result == 'failure'", notify["if"])
 
 
 class UpstreamCanaryWorkflowTests(unittest.TestCase):
@@ -484,7 +534,7 @@ class UpstreamCanaryWorkflowTests(unittest.TestCase):
         build = next(step for step in canary["steps"] if step.get("name") == "Build and verify")["run"]
         # Only a release-mode build is strict; discover and recheck find what compiles.
         self.assertIn('if [[ "$MODE" == "release" ]]; then\n  scripts/build.sh "$VERSION" s4\n', build)
-        self.assertIn('DISCOVER_MODULE_LIST="$PWD/canary/modules.txt" scripts/build.sh "$VERSION" s4', build)
+        self.assertIn('DISCOVER_MODULE_LIST="$PWD/canary/modules.txt" \\\n  DISCOVER_DEADLINE=', build)
         uploads = [step["with"]["path"] for step in canary["steps"] if "upload-artifact" in str(step.get("uses", ""))]
         self.assertEqual(["canary/compiles-again-*.txt"], uploads)
         report = self.jobs["report"]

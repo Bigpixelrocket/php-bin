@@ -499,7 +499,15 @@ failed (for example one that refuses an unsupported PHP version), and an
 error in an extension already left out means StaticPHP built it again as a
 dependency, so the tried extensions that depend on it (its own
 `spc dev:extensions` table) are left out instead. An error that names no
-extension, in PHP itself or a library, fails the run instead of guessing. The
+extension, in PHP itself or a library, fails the run instead of guessing.
+StaticPHP stops at the first extension that fails, so a branch most PECL
+extensions do not support yet takes one attempt per extension: PHP 8.6.0RC4
+needed about two dozen. Discovery therefore runs as up to three passes of
+`.github/workflows/autorelease-discover.yml`, each stopping itself before
+GitHub's six-hour job limit (`DISCOVER_DEADLINE`) and handing what it left out
+to the next (`DISCOVER_RESUME`). When a retry fails with nothing to blame on
+libraries built for a larger library set, they are rebuilt once, since a
+library such as libcurl can still link against one that is no longer built. The
 list is what then built and passed the gate, plus a `!<extension>` line for
 each extension left out. New core modules a branch adds are simply part of
 what built.

@@ -1,0 +1,128 @@
+name: Autorelease module discovery pass
+
+# One pass of a new branch's module discovery (DISCOVER_MODULE_LIST in
+# scripts/build.sh): every stage extension is tried, and one that does not compile is
+# left out and named with a `!` line. autorelease-implement.yml calls this up to three
+# times, so a discovery longer than one job's time limit resumes from what the last
+# pass left out. Read-only like every build: StaticPHP and the built binary never see
+# a write token. A pass with nothing to do runs as a no-op on Linux, because a
+# skipped job would skip every job after it, even through the ones that ran.
+on:
+  workflow_call:
+    inputs:
+      needed:
+        description: Whether this pass has discovery to do
+        required: true
+        type: boolean
+      base_sha:
+        description: Exact admitted php-bin base commit
+        required: true
+        type: string
+      version:
+        description: Exact PHP version of the new branch's first release
+        required: true
+        type: string
+      pass:
+        description: Pass number, 1 for the first
+        required: true
+        type: string
+      final:
+        description: Whether no later pass can resume this one
+        required: true
+        type: boolean
+    outputs:
+      pending:
+        description: "'true' when the pass reached its deadline and the next one resumes it"
+        value: ${{ jobs.discover.outputs.pending }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  discover:
+    name: Discover what the new branch builds (pass ${{ inputs.pass }})
+    runs-on: ${{ inputs.needed && 'macos-26' || 'ubuntu-latest' }}
+    # GitHub stops a hosted job at six hours; the pass stops itself well before.
+    timeout-minutes: 350
+    permissions:
+      contents: read
+    outputs:
+      pending: ${{ steps.build.outputs.pending }}
+    env:
+      VERSION: ${{ inputs.version }}
+      PASS: ${{ inputs.pass }}
+      FINAL: ${{ inputs.final }}
+    steps:
+      - name: Nothing to discover
+        if: ${{ !inputs.needed }}
+        run: echo "This pass has no discovery to do."
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        if: inputs.needed
+        with:
+          ref: ${{ inputs.base_sha }}
+          persist-credentials: false
+      - name: Verify runner and inputs
+        if: inputs.needed
+        run: |
+          test "$(uname -s)" = Darwin && test "$(uname -m)" = arm64
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$PASS" =~ ^[1-9]$ ]]
+      - name: Download what the previous pass left out
+        if: inputs.needed && inputs.pass != '1'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: discovery-pending-${{ github.run_id }}-${{ inputs.pass }}
+          path: ${{ runner.temp }}/resume
+      - name: Install build dependencies
+        if: inputs.needed
+        run: ./scripts/install-build-deps.sh
+      - name: Install pinned StaticPHP
+        if: inputs.needed
+        run: ./scripts/install-spc.sh
+      - name: Build, leaving out extensions that do not compile
+        id: build
+        if: inputs.needed
+        env:
+          # StaticPHP authenticates GitHub API calls only through this variable.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p discovered pending
+          if [[ "$PASS" != "1" ]]; then
+            export DISCOVER_RESUME="$RUNNER_TEMP/resume/pending.txt"
+          fi
+          # Leaves time for the last attempt and the upload inside the job limit.
+          set +e
+          DISCOVER_MODULE_LIST="$PWD/discovered/modules.txt" \
+            DISCOVER_DEADLINE="$(( $(date +%s) + 290 * 60 ))" \
+            ./scripts/build.sh "$VERSION" s4
+          status=$?
+          set -e
+          if [[ "$status" == "75" && "$FINAL" != "true" ]]; then
+            cp discovered/modules.txt.pending pending/pending.txt
+            echo "pending=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "$status" == "75" ]]; then
+            echo "Discovery is still leaving extensions out after its last pass." >&2
+          fi
+          exit "$status"
+      - name: Hand what this pass left out to the next pass
+        if: steps.build.outputs.pending == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: discovery-pending-${{ github.run_id }}-${{ inputs.pass == '1' && '2' || '3' }}
+          path: pending/pending.txt
+          if-no-files-found: error
+          retention-days: 7
+      - name: Retain the discovered module list
+        if: inputs.needed && steps.build.outputs.pending != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: discovered-modules-${{ github.run_id }}
+          path: discovered/modules.txt
+          if-no-files-found: error
+          retention-days: 90

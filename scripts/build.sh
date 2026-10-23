@@ -70,6 +70,29 @@ UNBUILT=""
 if [[ -z "$DISCOVER_MODULE_LIST" && -f "$MODULE_LIST" ]]; then
   UNBUILT="$(module_list_unbuilt "$MODULE_LIST")"
 fi
+
+# A discovery can outlast one CI job, so it can run as several passes.
+# DISCOVER_RESUME=<path> starts one from the extensions an earlier pass left out,
+# one per line. DISCOVER_DEADLINE=<epoch seconds> ends a pass before a retry that
+# would start after it: what was left out so far goes to
+# <DISCOVER_MODULE_LIST>.pending and the build exits with status 75.
+DISCOVER_RESUME="${DISCOVER_RESUME:-}"
+DISCOVER_DEADLINE="${DISCOVER_DEADLINE:-}"
+if [[ -n "$DISCOVER_RESUME$DISCOVER_DEADLINE" && -z "$DISCOVER_MODULE_LIST" ]]; then
+  echo "DISCOVER_RESUME and DISCOVER_DEADLINE only apply with DISCOVER_MODULE_LIST." >&2
+  exit 1
+fi
+if [[ -n "$DISCOVER_DEADLINE" && ! "$DISCOVER_DEADLINE" =~ ^[0-9]+$ ]]; then
+  echo "DISCOVER_DEADLINE must be epoch seconds, got: $DISCOVER_DEADLINE" >&2
+  exit 1
+fi
+if [[ -n "$DISCOVER_RESUME" ]]; then
+  UNBUILT="$(awk 'NF' "$DISCOVER_RESUME" | LC_ALL=C sort -u)"
+  if [[ -n "$UNBUILT" ]] && grep -Evxq '[a-z][a-z0-9_]*' <<< "$UNBUILT"; then
+    echo "$DISCOVER_RESUME names an invalid extension." >&2
+    exit 1
+  fi
+fi
 FULL_SHARED_ROWS=""
 if [[ -f "$SHARED_FILE" ]]; then
   FULL_SHARED_ROWS="$(read_shared_extensions "$SHARED_FILE")"
@@ -283,6 +306,11 @@ attempt=1
 # against it, as libcurl does against libssh2.
 built_libraries=""
 while true; do
+  if (( attempt > 1 )) && [[ -n "$DISCOVER_DEADLINE" ]] && (( $(date +%s) >= DISCOVER_DEADLINE )); then
+    awk 'NF' <<< "$UNBUILT" > "$DISCOVER_MODULE_LIST.pending"
+    echo "Discovery reached its deadline before attempt $attempt; the next pass resumes from what it left out."
+    exit 75
+  fi
   select_build_sets
   craft_file true false > "$BUILD_DIR/craft-download.yml"
   craft_file false true > "$BUILD_DIR/craft-build.yml"

@@ -65,7 +65,8 @@ jobs:
     needs: select
     if: needs.select.outputs.builds != '[]'
     runs-on: macos-26
-    timeout-minutes: 120
+    # A discovery can take hours; it stops itself before GitHub's six-hour limit.
+    timeout-minutes: 350
     strategy:
       fail-fast: false
       matrix:
@@ -91,11 +92,23 @@ jobs:
           mkdir -p canary
           if [[ "$MODE" == "release" ]]; then
             scripts/build.sh "$VERSION" s4
-          else
-            DISCOVER_MODULE_LIST="$PWD/canary/modules.txt" scripts/build.sh "$VERSION" s4
+            exit 0
           fi
+          set +e
+          DISCOVER_MODULE_LIST="$PWD/canary/modules.txt" \
+            DISCOVER_DEADLINE="$(( $(date +%s) + 290 * 60 ))" \
+            scripts/build.sh "$VERSION" s4
+          status=$?
+          set -e
+          if [[ "$status" == "75" ]]; then
+            # Everything it reached either built or was left out with a named
+            # cause; the next canary run checks the rest again.
+            echo "Discovery for PHP $VERSION needs more than one job; this run found no failure it could not name."
+            exit 0
+          fi
+          exit "$status"
       - name: Find left-out extensions that compile again
-        if: matrix.build.mode == 'recheck'
+        if: matrix.build.mode == 'recheck' && hashFiles('canary/modules.txt') != ''
         run: |
           # shellcheck disable=SC1091
           source scripts/lib.sh
