@@ -13,9 +13,10 @@ full contract.
    classifies it with fixed rules into one evidence-bound plan that an
    independent admission check accepts or rejects. Every recorded release
    starts the watcher again, so the next due release starts as soon as the
-   previous one is recorded instead of the next day. A twice-daily upstream
-   canary builds every unpublished php-src tag, including the next branch's
-   pre-releases, so a recipe break shows up before the release is announced.
+   previous one is recorded instead of at the next scheduled run. A
+   twice-daily upstream canary builds every unpublished php-src tag, including
+   the next branch's pre-releases, so a recipe break shows up before the
+   release is announced.
 2. For an ordinary stable patch or a rebuild the plan requires no edit and goes
    straight to the publish transaction. A new or retired PHP branch is first
    written deterministically (`support-policy.json`, plus the new branch's

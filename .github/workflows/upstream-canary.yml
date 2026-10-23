@@ -7,7 +7,8 @@ name: Upstream canary
 # its tag and a branch months after its first pre-release, so an upstream change that
 # breaks the recipe fails here while there is still time to fix it, instead of in the
 # release the watcher admits. Nothing is published. A failure files or updates one
-# owner issue, which the next passing canary closes.
+# owner issue, which the next passing canary, or the first one with nothing left to
+# build, closes.
 on:
   schedule:
     - cron: "41 3,15 * * *"

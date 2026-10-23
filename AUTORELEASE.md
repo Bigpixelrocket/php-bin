@@ -466,10 +466,10 @@ watcher decides which one is due:
   patches take priority in the classifier.
 - Selection has no skip: a version whose rebuild keeps failing is selected
   again on every run and holds back the rebuilds ordered after it until the
-  recipe is fixed. A failed rebuild starts no next run, so it is retried once
-  a day by the schedule rather than in a loop. The `php_bin_releases` capture reads every page of the
-  releases list, up to 20 pages of 100, and fails as unhealthy rather than
-  truncate a longer list.
+  recipe is fixed. A failed rebuild starts no next run, so it is retried by
+  the next scheduled run rather than in a loop. The `php_bin_releases`
+  capture reads every page of the releases list, up to 20 pages of 100, and
+  fails as unhealthy rather than truncate a longer list.
 
 ## Unattended lifecycle
 
