@@ -340,6 +340,7 @@ def main(argv: list[str] | None = None) -> int:
     apply_parser.add_argument("--plan", required=True, type=pathlib.Path)
     apply_parser.add_argument("--manifest", required=True, type=pathlib.Path)
     apply_parser.add_argument("--repo", required=True, type=pathlib.Path)
+    apply_parser.add_argument("--module-list", type=pathlib.Path)
 
     capture_parser = subparsers.add_parser("capture-evidence")
     capture_parser.add_argument("--output", required=True, type=pathlib.Path)
@@ -425,7 +426,8 @@ def main(argv: list[str] | None = None) -> int:
             plan = load_json(args.plan)
             manifest = load_json(args.manifest)
             require(isinstance(plan, dict) and isinstance(manifest, dict), "plan and manifest must be objects")
-            print(json.dumps({"changed": apply_lifecycle_plan(args.repo, plan, manifest)}))
+            module_list = args.module_list.read_text() if args.module_list else None
+            print(json.dumps({"changed": apply_lifecycle_plan(args.repo, plan, manifest, module_list)}))
         elif args.command == "capture-evidence":
             print(
                 json.dumps(

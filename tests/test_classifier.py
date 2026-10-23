@@ -697,6 +697,42 @@ class LifecycleEditTests(unittest.TestCase):
         self.assertEqual(["support-policy.json"], apply_lifecycle_plan(self.repo, plan, json.loads(manifest.read_text())))
         self.assertEqual("reviewed\n", (self.repo / f"expected-modules/{branch}.txt").read_text())
 
+    def test_new_branch_writes_its_discovered_module_list_in_canonical_form(self):
+        newest = self.maintained[-1]
+        major, minor = newest.split(".")
+        branch = f"{major}.{int(minor) + 1}"
+        rows = {item: ("stable", "31 Dec 2029") for item in self.maintained}
+        rows[branch] = ("stable", "31 Dec 2031")
+        plan, manifest = self.lifecycle_plan(rows, f"{branch}.0")
+        evidence = json.loads(manifest.read_text())
+        for text, reason in (
+            ("core\nImap\n", "invalid line"),
+            ("core\ncore\n", "repeats a line"),
+            ("!imap\n", "names no module"),
+            ("core\nimap\n!imap\n", "both builds and leaves out"),
+        ):
+            with self.subTest(text=text), self.assertRaisesRegex(ControlError, reason):
+                apply_lifecycle_plan(self.repo, plan, evidence, text)
+        subprocess.run(["git", "checkout", "-q", "--", "."], cwd=self.repo, check=True)
+        changed = apply_lifecycle_plan(self.repo, plan, evidence, "uri\n!xdebug\ncore\n!imap\ndate\n")
+        self.assertEqual([f"expected-modules/{branch}.txt", "support-policy.json"], changed)
+        self.assertEqual("core\ndate\nuri\n!imap\n!xdebug\n", (self.repo / f"expected-modules/{branch}.txt").read_text())
+        sealed = seal_patch(self.repo, self.base, plan, self.tmp / "sealed")
+        self.assertEqual(changed, [item["path"] for item in sealed["files"]])
+        # A list already on the base, such as one a human corrected, is never replaced.
+        subprocess.run(["git", "checkout", "-q", "--", "support-policy.json"], cwd=self.repo, check=True)
+        with self.assertRaisesRegex(ControlError, "never replaces"):
+            apply_lifecycle_plan(self.repo, plan, evidence, "core\n")
+
+    def test_only_a_new_branch_takes_a_discovered_module_list(self):
+        oldest = self.maintained[0]
+        rows = {item: ("stable", "31 Dec 2029") for item in self.maintained}
+        rows[oldest] = ("eol", "31 Dec 2025")
+        plan, manifest = self.lifecycle_plan(rows, f"{self.maintained[-1]}.1")
+        self.assertEqual("branch_eol", plan["action"])
+        with self.assertRaisesRegex(ControlError, "only a new branch"):
+            apply_lifecycle_plan(self.repo, plan, json.loads(manifest.read_text()), "core\n")
+
     def git(self, *argv):
         return subprocess.run(["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@invalid", *argv],
                               cwd=self.repo, check=True, text=True, stdout=subprocess.PIPE).stdout.strip()

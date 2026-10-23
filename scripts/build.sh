@@ -48,15 +48,78 @@ if [[ ! -x "$SPC_BIN" ]]; then
   exit 1
 fi
 
-EXTENSIONS="$(grep -Ev '^[[:space:]]*(#|$)' "$STAGE_FILE" | paste -sd, -)"
 mkdir -p "$BUILD_DIR"
 
-SHARED_ROWS=""
-SHARED_EXTENSIONS=""
-if [[ -f "$SHARED_FILE" ]]; then
-  SHARED_ROWS="$(read_shared_extensions "$SHARED_FILE")"
-  SHARED_EXTENSIONS="$(cut -f1 <<< "$SHARED_ROWS" | paste -sd, -)"
+# The branch's module list says what the build must produce and which stage
+# extensions the branch does not build. A branch-only target such as 8.4 reads
+# the 8.4 list, and a pre-release such as 8.6.0RC4 the 8.6 list.
+PHP_MINOR="${PHP_VERSION%.*}"
+if [[ "$PHP_VERSION" =~ ^[0-9]+\.[0-9]+$ ]]; then
+  PHP_MINOR="$PHP_VERSION"
 fi
+MODULE_LIST="$PROJECT_ROOT/expected-modules/$PHP_MINOR.txt"
+
+# DISCOVER_MODULE_LIST=<path> is how a new branch learns its module list. Every
+# stage extension is tried, whatever any list says; an extension a compiler error
+# names is left out, with every shared extension that requires it, and the build
+# is retried. The list of what then built and passed the gate, plus a
+# `!<extension>` line for each one left out, is written to <path>. Only the
+# new-branch discovery and the canary set it; a release build never does.
+DISCOVER_MODULE_LIST="${DISCOVER_MODULE_LIST:-}"
+UNBUILT=""
+if [[ -z "$DISCOVER_MODULE_LIST" && -f "$MODULE_LIST" ]]; then
+  UNBUILT="$(module_list_unbuilt "$MODULE_LIST")"
+fi
+FULL_SHARED_ROWS=""
+if [[ -f "$SHARED_FILE" ]]; then
+  FULL_SHARED_ROWS="$(read_shared_extensions "$SHARED_FILE")"
+fi
+
+# Print the lines of a stage list whose extension is not unbuilt; comments stay.
+without_unbuilt() {
+  awk -v unbuilt="${UNBUILT//$'\n'/,}" '
+    BEGIN { split(unbuilt, names, ","); for (i in names) skip[names[i]] = 1 }
+    { line = $0; sub(/#.*/, "", line); split(line, words, " ") }
+    !((1 in words) && (words[1] in skip))
+  ' "$1"
+}
+
+# Set the static and shared extensions to build: the stage lists minus every
+# unbuilt extension. The filtered shared list is the one the gate verifies and
+# package.sh ships; a kept extension that requires an unbuilt one fails it.
+select_build_sets() {
+  EXTENSIONS="$(without_unbuilt "$STAGE_FILE" | grep -Ev '^[[:space:]]*(#|$)' | paste -sd, -)"
+  SHARED_ROWS=""
+  SHARED_EXTENSIONS=""
+  if [[ -f "$SHARED_FILE" ]]; then
+    without_unbuilt "$SHARED_FILE" > "$BUILD_DIR/shared-extensions.txt"
+    SHARED_ROWS="$(read_shared_extensions "$BUILD_DIR/shared-extensions.txt")"
+    SHARED_EXTENSIONS="$(cut -f1 <<< "$SHARED_ROWS" | paste -sd, -)"
+  fi
+}
+
+# Add extensions to the unbuilt set, with every shared extension that requires
+# one of them, directly or through another.
+add_unbuilt() {
+  local name requires dependency changed=1
+
+  UNBUILT="$(printf '%s\n' "$UNBUILT" "$@" | awk 'NF' | LC_ALL=C sort -u)"
+  while (( changed )); do
+    changed=0
+    while IFS=$'\t' read -r name _ _ requires _; do
+      if [[ -z "$name" || "$requires" == "-" ]] || grep -Fqx "$name" <<< "$UNBUILT"; then
+        continue
+      fi
+      for dependency in ${requires//,/ }; do
+        if grep -Fqx "$dependency" <<< "$UNBUILT"; then
+          UNBUILT="$(printf '%s\n' "$UNBUILT" "$name" | awk 'NF' | LC_ALL=C sort -u)"
+          changed=1
+          break
+        fi
+      done
+    done <<< "$FULL_SHARED_ROWS"
+  done
+}
 
 print_failure_logs() {
   local log_file
@@ -124,8 +187,6 @@ craft-options:
   build: $2
 EOF
 }
-craft_file true false > "$BUILD_DIR/craft-download.yml"
-craft_file false true > "$BUILD_DIR/craft-build.yml"
 
 # Remove every php-src/ext directory that holds no config*.m4. Such a directory
 # is not an extension PHP's build can configure: upstream leaves test folders
@@ -202,10 +263,49 @@ run_staticphp() {
     && SPC_MICRO_PATCHES="$micro_patches" "$SPC_BIN" craft craft-build.yml
 }
 
-if ! (run_staticphp); then
+# Put the build back to before php-src was extracted, keeping every library
+# already built: StaticPHP skips a library installed in buildroot, so a retry
+# only rebuilds PHP and its extensions.
+reset_php_build() {
+  rm -rf "$BUILD_DIR/source" "$BUILD_DIR/buildroot/modules" \
+    "$BUILD_DIR/buildroot/include/php" "$BUILD_DIR/buildroot/lib/php"
+  rm -f "$BUILD_DIR"/buildroot/bin/php* "$BUILD_DIR"/buildroot/lib/libphp*
+}
+
+attempt=1
+while true; do
+  select_build_sets
+  craft_file true false > "$BUILD_DIR/craft-download.yml"
+  craft_file false true > "$BUILD_DIR/craft-build.yml"
+  if (run_staticphp); then
+    break
+  fi
   print_failure_logs
-  exit 1
-fi
+  if [[ -z "$DISCOVER_MODULE_LIST" ]]; then
+    exit 1
+  fi
+  # Every retry leaves out at least one more extension the build tried, so the
+  # loop ends: with a build that passes, or with an error that names none.
+  tried="$EXTENSIONS${SHARED_EXTENSIONS:+,$SHARED_EXTENSIONS}"
+  # StaticPHP builds what a tried extension depends on even when it was left out;
+  # its own table says which tried extensions pulled such a dependency back in.
+  "$SPC_BIN" dev:extensions "$tried" > "$BUILD_DIR/extension-dependencies.txt"
+  culprits="$("$SCRIPT_DIR/attribute-build-failure" \
+    --log-dir "$BUILD_DIR/log" \
+    --extensions "$tried" \
+    --unbuilt "${UNBUILT//$'\n'/,}" \
+    --dependencies "$BUILD_DIR/extension-dependencies.txt")"
+  if [[ -z "$culprits" ]]; then
+    echo "The build failed and no compiler error names an extension it could leave out." >&2
+    exit 1
+  fi
+  echo "Attempt $attempt: leaving out $(paste -sd, - <<< "$culprits"): it does not compile on PHP $PHP_VERSION. Retrying."
+  # The names are validated extension identifiers, one per line.
+  # shellcheck disable=SC2086
+  add_unbuilt $culprits
+  reset_php_build
+  attempt=$((attempt + 1))
+done
 
 PHP_BIN="$BUILD_DIR/buildroot/bin/php"
 if [[ ! -x "$PHP_BIN" ]]; then
@@ -223,6 +323,26 @@ if [[ "$MINIMUM_MACOS_VERSION" != "26.0" ]]; then
   exit 1
 fi
 echo "Verified macOS minimum: $MINIMUM_MACOS_VERSION"
+
+# A discovered list is exactly what built: the static modules plus every
+# default-on shared extension, and a `!` line for each extension left out. The
+# gate below then verifies the build against it like any other list.
+if [[ -n "$DISCOVER_MODULE_LIST" ]]; then
+  default_on=()
+  while IFS=$'\t' read -r name state loader _ _; do
+    if [[ "$state" == "on" ]]; then
+      default_on+=(-d "$loader=$name")
+    fi
+  done <<< "$SHARED_ROWS"
+  {
+    "$PHP_BIN" -n -d "extension_dir=$BUILD_DIR/buildroot/modules" ${default_on[@]+"${default_on[@]}"} -m \
+      | normalize_modules
+    awk 'NF { print "!" $0 }' <<< "$UNBUILT"
+  } > "$DISCOVER_MODULE_LIST"
+  MODULE_LIST="$DISCOVER_MODULE_LIST"
+  echo "Discovered module list for PHP $PHP_MINOR:"
+  cat "$MODULE_LIST"
+fi
 
 # Run PHP with no php.ini and the given extension loader flags, failing unless
 # it exits cleanly with no output at all, so startup warnings cannot pass.
@@ -286,7 +406,7 @@ verify_shared_extensions() {
   fi
 
   awk -F '\t' '$2 == "on" { print $1 }' <<< "$SHARED_ROWS" > "$gate_dir/default-on.txt"
-  grep -Ev '^[[:space:]]*(#|$)' "$expected_file" \
+  module_list_modules "$expected_file" \
     | grep -Fvx -f "$gate_dir/default-on.txt" > "$gate_dir/static-expected.txt"
   "$PHP_BIN" -n -m > "$gate_dir/static-actual.txt"
   echo "Checking the static module set:"
@@ -367,20 +487,12 @@ verify_shared_extensions() {
   echo "Shared extension gate passed."
 }
 
-PHP_MINOR="${PHP_VERSION%.*}"
-if [[ "$PHP_VERSION" =~ ^[0-9]+\.[0-9]+$ ]]; then
-  PHP_MINOR="$PHP_VERSION"
-fi
-
 if [[ -n "$SHARED_ROWS" ]]; then
-  verify_shared_extensions "$PROJECT_ROOT/expected-modules/$PHP_MINOR.txt"
-  # package.sh reads the list the gate just verified, not the working tree's.
-  cp "$SHARED_FILE" "$BUILD_DIR/shared-extensions.txt"
+  # package.sh reads $BUILD_DIR/shared-extensions.txt, the filtered list this
+  # gate verifies, not the working tree's stage list.
+  verify_shared_extensions "$MODULE_LIST"
 elif [[ "$STAGE" == "s4" ]]; then
-  "$SCRIPT_DIR/compare-modules.sh" \
-    "$PHP_BIN" \
-    "$PROJECT_ROOT/expected-modules/$PHP_MINOR.txt" \
-    exact
+  "$SCRIPT_DIR/compare-modules.sh" "$PHP_BIN" "$MODULE_LIST" exact
 else
   "$SCRIPT_DIR/compare-modules.sh" "$PHP_BIN" "$STAGE_FILE" subset
 fi

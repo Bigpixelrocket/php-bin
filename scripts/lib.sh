@@ -33,6 +33,48 @@ php_source_version() {
   printf '%s\n' "${1%%-*}"
 }
 
+# A branch's module list, expected-modules/<branch>.txt, holds one module name per
+# line as `php -m` reports it once normalized (see normalize_modules), for the
+# static binary plus every default-on shared extension. A `!<extension>` line
+# names a stage extension that branch does not build because it does not compile
+# there; the build leaves it out and the module comparison ignores the line.
+
+# Print the modules a module list expects, one per line.
+module_list_modules() {
+  grep -Ev '^[[:space:]]*(#|!|$)' "$1" || true
+}
+
+# Print the extensions a module list says its branch does not build, one per line.
+module_list_unbuilt() {
+  awk '
+    /^[[:space:]]*!/ {
+      name = $0
+      sub(/^[[:space:]]*![[:space:]]*/, "", name)
+      sub(/[[:space:]]+$/, "", name)
+      if (name !~ /^[a-z][a-z0-9_]*$/) {
+        printf "%s:%d: invalid unbuilt extension: %s\n", FILENAME, FNR, name > "/dev/stderr"
+        failed = 1
+        exit 1
+      }
+      print name
+    }
+    END { if (failed) exit 1 }
+  ' "$1"
+}
+
+# Normalize `php -m` output or a module list on stdin: lowercase names, one per
+# line, sorted and unique, with section headers dropped.
+normalize_modules() {
+  awk '
+    NF && $0 !~ /^\[/ {
+      value = tolower($0)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      if (value == "zend opcache") value = "opcache"
+      if (value != "") print value
+    }
+  ' | LC_ALL=C sort -u
+}
+
 # Print a shared-extension list (see stages/s4-shared.txt) as tab-separated
 # rows: name, default (on|off), loader (extension|zend_extension), requires
 # (comma list or -), and pin (<source>:<url> or -). Any malformed line, unknown

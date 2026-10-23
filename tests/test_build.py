@@ -13,7 +13,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 # Records every call, lays php-src out on extract like an upstream tarball would
 # (FAKE_EXT_DIRS lists `<dir>:<file>` entries), and stops at the build step after
-# recording which ext directories were left. FAKE_FAIL names a call that fails.
+# recording which ext directories were left. FAKE_FAIL names a call that fails, and
+# FAKE_BREAK an extension whose source the failed build logs a compiler error in
+# while the build still tries it.
 FAKE_SPC = textwrap.dedent(
     """\
     #!/usr/bin/env bash
@@ -32,6 +34,15 @@ FAKE_SPC = textwrap.dedent(
     if [[ "$1 ${2:-}" == "craft craft-build.yml" ]]; then
       echo "left: $(cd source/php-src/ext && echo *)" >> "$SPC_CALLS"
       echo "micro: ${SPC_MICRO_PATCHES-unset}" >> "$SPC_CALLS"
+      echo "static: $(sed -n 's/^extensions: //p' craft-build.yml)" >> "$SPC_CALLS"
+      echo "shared: $(sed -n 's/^shared-extensions: //p' craft-build.yml)" >> "$SPC_CALLS"
+      mkdir -p log
+      : > log/spc.shell.log
+      for name in ${FAKE_BREAK:-}; do
+        if grep -Eq "^(shared-)?extensions: (.*,)?$name(,|$)" craft-build.yml; then
+          echo "$PWD/source/php-src/ext/$name/$name.c:1:1: error: broken" >> log/spc.shell.log
+        fi
+      done
       exit 1
     fi
     """
@@ -87,7 +98,7 @@ class BuildScriptTests(unittest.TestCase):
                 "doctor", "craft craft-download.yml", "extract php-src,micro", "craft craft-build.yml",
                 "left: date standard", "micro: ",
             ],
-            self.calls.read_text().splitlines(),
+            self.calls.read_text().splitlines()[:6],
         )
         self.assertIn("Removing source/php-src/ext/imap: it holds no config*.m4.", result.stdout)
 
@@ -125,14 +136,83 @@ class BuildScriptTests(unittest.TestCase):
             with self.subTest(version=version):
                 self.calls.unlink(missing_ok=True)
                 result = self.build(version, **env)
-                self.assertEqual(f"micro: {expected}", self.calls.read_text().splitlines()[-1])
+                self.assertEqual([expected], self.calls_with("micro: "))
                 self.assertIn("Skipping micro patch cli_checks: no version of it applies", result.stderr)
         self.calls.unlink()
         self.build("8.2.35", **env)
-        self.assertEqual("micro: ", self.calls.read_text().splitlines()[-1])
+        self.assertEqual([""], self.calls_with("micro: "))
         self.calls.unlink()
         self.build("8.5.12", SPC_MICRO_PATCHES="cli_checks_80", **env)
-        self.assertEqual("micro: ", self.calls.read_text().splitlines()[-1])
+        self.assertEqual([""], self.calls_with("micro: "))
+
+    def calls_with(self, prefix):
+        return [line[len(prefix):] for line in self.calls.read_text().splitlines() if line.startswith(prefix)]
+
+    def write_list(self, branch, text):
+        (self.root / f"expected-modules/{branch}.txt").write_text(text)
+
+    def test_a_branch_builds_nothing_its_module_list_leaves_out(self):
+        self.write_list("8.6", "core\n!imap\n!igbinary\n!memcached\n!redis\n!xdebug\n")
+        self.build("8.6.0", PHP_SOURCE="tag")
+        static, shared = self.calls_with("static: ")[0].split(","), self.calls_with("shared: ")[0].split(",")
+        self.assertNotIn("imap", static)
+        self.assertIn("intl", static)
+        for name in ("igbinary", "redis", "xdebug"):
+            self.assertNotIn(name, shared)
+        self.assertIn("imagick", shared)
+        listed = (self.root / ".build/8.6.0/s4/shared-extensions.txt").read_text()
+        self.assertNotIn("xdebug", listed)
+        self.assertIn("imagick", listed)
+
+    def test_leaving_out_a_requirement_without_its_dependent_fails_the_build(self):
+        self.write_list("8.6", "core\n!igbinary\n")
+        result = self.build("8.6.0", PHP_SOURCE="tag")
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("redis requires unlisted extension igbinary", result.stderr)
+        self.assertFalse(self.calls.exists())
+
+    def test_a_release_build_never_leaves_out_what_fails(self):
+        result = self.build("8.4.27", FAKE_BREAK="imap")
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual(1, len(self.calls_with("static: ")))
+        self.assertNotIn("Leaving out", result.stdout)
+
+    def test_discovery_leaves_out_what_does_not_compile_and_everything_that_needs_it(self):
+        # The list's own exclusions are ignored: discovery tries every stage extension.
+        self.write_list("8.6", "core\n!intl\n")
+        result = self.build(
+            "8.6.0RC4", PHP_SOURCE="tag", FAKE_BREAK="imap igbinary",
+            DISCOVER_MODULE_LIST=str(self.scratch / "discovered.txt"),
+        )
+        self.assertNotEqual(0, result.returncode)
+        static, shared = self.calls_with("static: "), self.calls_with("shared: ")
+        self.assertEqual(2, len(static))
+        self.assertIn("intl", static[0].split(","))
+        self.assertIn("imap", static[0].split(","))
+        self.assertNotIn("imap", static[1].split(","))
+        self.assertNotIn("igbinary", shared[1].split(","))
+        self.assertNotIn("redis", shared[1].split(","))
+        self.assertNotIn("memcached", shared[1].split(","))
+        self.assertIn("imagick", shared[1].split(","))
+        self.assertIn("Attempt 1: leaving out igbinary,imap: it does not compile on PHP 8.6.0RC4. Retrying.", result.stdout)
+        # The second attempt names nothing, so discovery stops instead of guessing.
+        self.assertIn("no compiler error names an extension it could leave out", result.stderr)
+        self.assertFalse((self.scratch / "discovered.txt").exists())
+
+    def test_the_module_comparison_ignores_left_out_lines(self):
+        modules = self.scratch / "modules.txt"
+        modules.write_text("Core\nZend OPcache\n")
+        expected = self.scratch / "expected.txt"
+        expected.write_text("core\nopcache\n!imap\n# comment\n")
+        result = subprocess.run(
+            [str(ROOT / "scripts/compare-modules.sh"), str(modules), str(expected), "exact"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        expected.write_text("core\nopcache\n!bad name\n")
+        self.assertEqual(0, subprocess.run(
+            [str(ROOT / "scripts/compare-modules.sh"), str(modules), str(expected), "exact"],
+            capture_output=True, check=False).returncode)
 
     def test_only_the_download_craft_downloads_and_only_the_build_craft_builds(self):
         self.build("8.4.27")
@@ -168,8 +248,104 @@ class BuildScriptTests(unittest.TestCase):
                 self.assertFalse(self.calls.exists())
 
 
+# `spc dev:extensions pdo_sqlsrv,redis` as StaticPHP 2.8.5 prints it, colors included.
+DEPENDENCY_TABLE = (
+    " ┌────────────┬──────────────┬──────────────┬─────────────┬────────────────┬───────────┐\n"
+    " │\x1b[2m name       \x1b[22m│\x1b[2m lib-depends  \x1b[22m│\x1b[2m lib-suggests \x1b[22m│\x1b[2m ext-depends \x1b[22m"
+    "│\x1b[2m ext-suggests   \x1b[22m│\x1b[2m unix-only \x1b[22m│\n"
+    " ├────────────┼──────────────┼──────────────┼─────────────┼────────────────┼───────────┤\n"
+    " │ pdo_sqlsrv │ php          │              │ pdo,sqlsrv  │                │ false     │\n"
+    " │ redis      │ php          │ zstd, liblz4 │             │ session, igbinary │ false  │\n"
+    " └────────────┴──────────────┴──────────────┴─────────────┴────────────────┴───────────┘\n"
+)
+
+
+class AttributionTests(unittest.TestCase):
+    def attribute(self, lines, extensions="imap,igbinary,xhprof,zip,xdebug,redis", extra=()):
+        with tempfile.TemporaryDirectory() as scratch:
+            build = pathlib.Path(scratch).resolve() / "build"
+            (build / "log").mkdir(parents=True)
+            text = "\n".join(line.replace("BUILD", str(build)) for line in lines) + "\n"
+            (build / "log/spc.shell.log").write_text(text)
+            (build / "dependencies.txt").write_text(DEPENDENCY_TABLE)
+            result = subprocess.run(
+                [str(ROOT / "scripts/attribute-build-failure"), "--log-dir", str(build / "log"), "--extensions", extensions,
+                 "--dependencies", str(build / "dependencies.txt"), *extra],
+                capture_output=True, text=True, check=False,
+            )
+        self.assertEqual(0, result.returncode, result.stderr)
+        return result.stdout.split()
+
+    def test_compiler_errors_and_failed_targets_name_their_extension(self):
+        # Lines as StaticPHP 2.8.5 logged the PHP 8.6.0RC4 imap failure.
+        self.assertEqual(["imap"], self.attribute([
+            "clang: error: unsupported option '-print-multi-os-directory'",
+            "BUILD/source/php-src/ext/imap/php_imap.c:463:32: error: use of undeclared identifier 'XtOffsetOf'",
+            "make: *** [ext/imap/php_imap.lo] Error 1",
+        ]))
+        self.assertEqual(["igbinary", "xdebug", "xhprof", "zip"], self.attribute([
+            "BUILD/source/xdebug/src/base/base.c:9: error: x",
+            "BUILD/source/php-src/ext/xhprof-src/extension/xhprof.c:1:2: fatal error: 'x.h' file not found",
+            "BUILD/source/ext-zip/php_zip.c:3:4: error: x",
+            "make: *** [ext/igbinary/igbinary.lo] Error 1",
+        ]))
+
+    def test_an_error_in_a_shared_header_belongs_to_the_extension_that_included_it(self):
+        # Lines as StaticPHP 2.8.5 logged the PHP 8.6.0RC4 mongodb failure.
+        self.assertEqual(["mongodb"], self.attribute([
+            "In file included from BUILD/source/php-src/ext/mongodb/src/phongo_bson.c:20:",
+            "BUILD/buildroot/include/php/Zend/zend_enum.h:39:9: error: unknown type name 'typeof'",
+            "BUILD/buildroot/include/php/Zend/zend_portability.h:409:9: note: expanded from macro",
+            "make: *** [src/phongo_bson.lo] Error 1",
+        ], extensions="mongodb,redis"))
+        # A chain applies only to the diagnostic right after it.
+        self.assertEqual([], self.attribute([
+            "In file included from BUILD/source/php-src/ext/mongodb/src/phongo_bson.c:20:",
+            "BUILD/buildroot/include/php/Zend/zend_enum.h:39:9: warning: harmless",
+            "BUILD/source/php-src/Zend/zend.c:1:1: error: core",
+        ], extensions="mongodb"))
+
+    def test_a_left_out_extension_built_again_as_a_dependency_leaves_out_what_needs_it(self):
+        # pdo_sqlsrv depends on sqlsrv in StaticPHP's own table, which php-bin never repeats.
+        self.assertEqual(["pdo_sqlsrv"], self.attribute(
+            ["BUILD/source/php-src/ext/sqlsrv/shared/core_stream.cpp:280:9: error: no matching function"],
+            extensions="pdo_sqlsrv,redis,xdebug", extra=("--unbuilt", "sqlsrv,imap"),
+        ))
+        # Without the table nothing is guessed.
+        self.assertEqual([], self.attribute(
+            ["BUILD/source/php-src/ext/sqlsrv/init.cpp:1:1: error: x"],
+            extensions="redis", extra=("--unbuilt", "sqlsrv"),
+        ))
+
+    def test_a_failed_configure_belongs_to_the_one_extension_it_builds(self):
+        # Lines as StaticPHP 2.8.5 logged xdebug refusing PHP 8.6.0RC4.
+        self.assertEqual(["xdebug"], self.attribute([
+            "> Executing command: BUILD/buildroot/bin/phpize",
+            "> Executing command: ./configure --enable-xdebug=shared --with-php-config=BUILD/buildroot/bin/php-config"
+            " --enable-shared --disable-static",
+            "checking for supported PHP version... configure: error: not supported. Need a PHP version >= 8.0.0"
+            " and < 8.6.0 (found 8.6.0RC4)",
+        ]))
+        # PHP's own configure builds many extensions, so its errors name none.
+        self.assertEqual([], self.attribute([
+            "> Executing command: ./configure --enable-redis=shared --enable-xhprof=shared --enable-cli",
+            "configure: error: something in core",
+        ]))
+
+    def test_errors_outside_an_extension_name_nothing(self):
+        self.assertEqual([], self.attribute([
+            "BUILD/source/php-src/Zend/zend.c:1:1: error: core",
+            "BUILD/source/php-src/main/main.c:1:1: error: core",
+            "BUILD/source/libheif/heif.c:1:1: error: library",
+            "/elsewhere/source/php-src/ext/imap/php_imap.c:1:1: error: another tree",
+            "BUILD/source/php-src/ext/sodium/x.c:1:1: error: not tried",
+            "make: *** [all] Error 2",
+        ]))
+
+
 class CanarySelectionTests(unittest.TestCase):
     def select(self, maintained, tags, releases, lists):
+        """`lists` maps each branch with a module list to that list's text."""
         with tempfile.TemporaryDirectory() as scratch:
             scratch = pathlib.Path(scratch)
             (scratch / "policy.json").write_text(json.dumps({"maintainedBranches": maintained}))
@@ -177,8 +353,8 @@ class CanarySelectionTests(unittest.TestCase):
             (scratch / "releases.txt").write_text("\n".join(releases))
             modules = scratch / "expected-modules"
             modules.mkdir()
-            for branch in lists:
-                (modules / f"{branch}.txt").write_text("core\n")
+            for branch, text in lists.items():
+                (modules / f"{branch}.txt").write_text(text)
             result = subprocess.run(
                 [
                     str(ROOT / "scripts/select-canary-builds"),
@@ -193,37 +369,78 @@ class CanarySelectionTests(unittest.TestCase):
             )
         if result.returncode:
             return result.stderr
-        return [(item["version"], item["branch"], item["modules"]) for item in json.loads(result.stdout)]
+        return [(item["version"], item["branch"], item["mode"]) for item in json.loads(result.stdout)]
 
-    def test_unpublished_patches_and_the_next_branch_are_built(self):
+    def test_unpublished_patches_are_built_as_released_and_the_next_branch_is_discovered(self):
         self.assertEqual(
-            [("8.4.27", "8.4", "8.4"), ("8.5.12", "8.5", "8.5"), ("8.6.0RC4", "8.6", "8.5")],
+            [("8.4.27", "8.4", "release"), ("8.5.12", "8.5", "release"), ("8.6.0RC4", "8.6", "discover")],
             self.select(
                 ["8.4", "8.5"],
                 ["8.4.26", "8.4.27", "8.5.11", "8.5.12", "8.6.0alpha1", "8.6.0beta3", "8.6.0RC4", "8.6.0RC10x",
                  "8.3.99", "7.4.33", "php_8_6_0RC4"],
                 ["8.4.26-2", "8.4.26", "8.5.11-3"],
-                ["8.4", "8.5"],
+                {"8.4": "core\n", "8.5": "core\n"},
             ),
         )
 
     def test_published_branches_build_nothing_and_a_stable_tag_outranks_its_candidates(self):
-        self.assertEqual([], self.select(["8.5"], ["8.5.12", "8.5.12RC1"], ["8.5.12"], ["8.5"]))
+        self.assertEqual([], self.select(["8.5"], ["8.5.12", "8.5.12RC1"], ["8.5.12"], {"8.5": "core\n"}))
         self.assertEqual(
-            [("9.0.0", "9.0", "8.6")],
-            self.select(["8.6"], ["8.6.3", "9.0.0RC2", "9.0.0", "9.0.0RC9"], ["8.6.3"], ["8.6"]),
+            [("9.0.0", "9.0", "discover")],
+            self.select(["8.6"], ["8.6.3", "9.0.0RC2", "9.0.0", "9.0.0RC9"], ["8.6.3"], {"8.6": "core\n"}),
         )
 
-    def test_a_maintained_branch_with_no_release_builds_its_newest_tag(self):
+    def test_a_branch_that_leaves_extensions_out_is_rechecked_at_its_newest_stable_tag(self):
         self.assertEqual(
-            [("8.6.0", "8.6", "8.6")],
-            self.select(["8.5", "8.6"], ["8.5.12", "8.6.0RC4", "8.6.0"], ["8.5.12"], ["8.5", "8.6"]),
+            [("8.6.2", "8.6", "release"), ("8.6.2", "8.6", "recheck")],
+            self.select(["8.6"], ["8.6.1", "8.6.2"], ["8.6.1"], {"8.6": "core\n!imap\n"}),
+        )
+        self.assertEqual(
+            [("8.6.1", "8.6", "recheck")],
+            self.select(["8.6"], ["8.6.1"], ["8.6.1-2"], {"8.6": "core\n!imap\n"}),
+        )
+
+    def test_a_maintained_branch_with_its_first_release_in_flight_builds_its_newest_stable_tag(self):
+        self.assertEqual(
+            [("8.6.0", "8.6", "release")],
+            self.select(["8.5", "8.6"], ["8.5.12", "8.6.0RC4", "8.6.0"], ["8.5.12"], {"8.5": "core\n", "8.6": "core\n"}),
         )
 
     def test_selection_rejects_inputs_it_cannot_trust(self):
-        self.assertIn("maintains no branch", self.select([], ["8.5.1"], [], ["8.5"]))
-        self.assertIn("no module list", self.select(["8.5"], ["8.5.1"], [], []))
-        self.assertIn("not a major.minor branch", self.select(["8"], ["8.5.1"], [], ["8.5"]))
+        self.assertIn("maintains no branch", self.select([], ["8.5.1"], [], {"8.5": "core\n"}))
+        self.assertIn("not a major.minor branch", self.select(["8"], ["8.5.1"], [], {"8.5": "core\n"}))
+
+
+class NewBranchDiscoveryWorkflowTests(unittest.TestCase):
+    def setUp(self):
+        from autorelease.verify import load_workflow
+
+        self.jobs = load_workflow(ROOT / ".github/workflows/autorelease-implement.yml")["jobs"]
+
+    def step(self, job, name):
+        return next(item for item in self.jobs[job]["steps"] if item.get("name") == name)
+
+    def test_discovery_always_runs_and_only_builds_when_a_new_list_is_owed(self):
+        discover = self.jobs["discover"]
+        # A skipped job would skip every later job, even through the ones that ran.
+        self.assertNotIn("if", discover)
+        self.assertEqual({"contents": "read"}, discover["permissions"])
+        self.assertIn("'macos-26' || 'ubuntu-latest'", discover["runs-on"])
+        build = self.step("discover", "Build, leaving out extensions that do not compile")
+        self.assertEqual("needs.discovery-scope.outputs.discover == 'true'", build["if"])
+        self.assertIn('DISCOVER_MODULE_LIST="$PWD/discovered/modules.txt" ./scripts/build.sh "$VERSION" s4', build["run"])
+        decide = self.step("discovery-scope", "Decide")["run"]
+        self.assertIn('if [[ ! -e "expected-modules/${version%.*}.txt" ]]; then', decide)
+        self.assertEqual(["preflight", "discovery-scope", "discover"], self.jobs["implement"]["needs"])
+        self.assertNotIn("if", self.jobs["implement"])
+
+    def test_only_a_discovered_list_reaches_the_edit_and_a_failed_discovery_is_reported(self):
+        apply = self.step("implement", "Apply the admitted lifecycle edit")
+        self.assertEqual("${{ needs.discovery-scope.outputs.discover }}", apply["env"]["DISCOVERED"])
+        self.assertIn('module_list=(--module-list "$RUNNER_TEMP/discovered/modules.txt")', apply["run"])
+        notify = self.jobs["notify-failure"]
+        self.assertIn("discover", notify["needs"])
+        self.assertIn("needs.discover.result == 'failure'", notify["if"])
 
 
 class UpstreamCanaryWorkflowTests(unittest.TestCase):
@@ -238,11 +455,16 @@ class UpstreamCanaryWorkflowTests(unittest.TestCase):
         canary = self.jobs["canary"]
         self.assertNotIn("permissions", canary)
         self.assertEqual("tag", canary["env"]["PHP_SOURCE"])
-        self.assertEqual('scripts/build.sh "$VERSION" s4', canary["steps"][-1]["run"])
-        self.assertFalse(any("upload" in str(step.get("uses", "")) for step in canary["steps"]))
+        build = next(step for step in canary["steps"] if step.get("name") == "Build and verify")["run"]
+        # Only a release-mode build is strict; discover and recheck find what compiles.
+        self.assertIn('if [[ "$MODE" == "release" ]]; then\n  scripts/build.sh "$VERSION" s4\n', build)
+        self.assertIn('DISCOVER_MODULE_LIST="$PWD/canary/modules.txt" scripts/build.sh "$VERSION" s4', build)
+        uploads = [step["with"]["path"] for step in canary["steps"] if "upload-artifact" in str(step.get("uses", ""))]
+        self.assertEqual(["canary/compiles-again-*.txt"], uploads)
         report = self.jobs["report"]
         self.assertEqual({"issues": "write"}, report["permissions"])
-        self.assertFalse(any("uses" in step for step in report["steps"]))
+        used = [step["uses"].split("@")[0] for step in report["steps"] if "uses" in step]
+        self.assertEqual(["actions/download-artifact"], used)
 
     def test_nothing_in_the_canary_starts_or_publishes_a_release(self):
         text = (ROOT / ".github/workflows/upstream-canary.yml").read_text()
