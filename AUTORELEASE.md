@@ -335,8 +335,7 @@ cascade drains.
 
 `Upstream canary` (`.github/workflows/upstream-canary.yml`, twice a day)
 builds what php-src has tagged but php-bin has not published, straight from
-each tag, with the release recipe and its exact module gate, in a read-only
-job. `scripts/select-canary-builds` picks the newest unpublished stable tag of
+each tag, with the release recipe and its module gate, in a read-only job. `scripts/select-canary-builds` picks the newest unpublished stable tag of
 every maintained branch, built exactly as its release would be, and the newest
 tag of any stability for a branch with no module list yet, which covers the
 next PHP branch from its first alpha. That one is built the way its
