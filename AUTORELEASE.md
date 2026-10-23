@@ -346,9 +346,16 @@ come from the accepted policy, the module lists, and the tags themselves.
 A maintained branch whose module list leaves extensions out is also rebuilt at
 its newest stable tag with every extension tried. An extension that compiles
 there again is reported in one owner issue titled
-`Upstream canary: a left-out PHP extension compiles again`; removing its `!`
-line from `expected-modules/<branch>.txt` by pull request changes that
-branch's recipe identity, so the watcher rebuilds the branch with it.
+`Upstream canary: a left-out PHP extension compiles again`, with the exact
+edit to `expected-modules/<branch>.txt`: its `!` line removed and, for a
+static or default-on extension, the modules it adds to `php -m`. That pull
+request changes the branch's recipe identity, so the watcher rebuilds the
+branch with it.
+
+A discovery or recheck that does not finish within one job stops itself, as
+`new_branch` discovery passes do, and the next canary run resumes it from what
+it left out (an Actions cache per mode and tag). Until one finishes, that
+build proves nothing, so the canary issue below stays as it is.
 
 php.net announces a patch days after its tag and a branch months after its
 first pre-release, so an upstream change that breaks the recipe fails here

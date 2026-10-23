@@ -550,11 +550,49 @@ class UpstreamCanaryWorkflowTests(unittest.TestCase):
         self.assertIn('if [[ "$MODE" == "release" ]]; then\n  scripts/build.sh "$VERSION" s4\n', build)
         self.assertIn('DISCOVER_MODULE_LIST="$PWD/canary/modules.txt" \\\n  DISCOVER_DEADLINE=', build)
         uploads = [step["with"]["path"] for step in canary["steps"] if "upload-artifact" in str(step.get("uses", ""))]
-        self.assertEqual(["canary/compiles-again-*.txt"], uploads)
+        self.assertEqual(["canary/incomplete-*.txt", "canary/compiles-again-*.txt"], uploads)
         report = self.jobs["report"]
         self.assertEqual({"issues": "write"}, report["permissions"])
         used = [step["uses"].split("@")[0] for step in report["steps"] if "uses" in step]
-        self.assertEqual(["actions/download-artifact"], used)
+        self.assertEqual(["actions/download-artifact", "actions/download-artifact"], used)
+
+    def test_an_unfinished_discovery_resumes_and_never_closes_the_canary_issue(self):
+        steps = {step.get("name"): step for step in self.jobs["canary"]["steps"]}
+        restore = steps["Restore an unfinished discovery"]
+        save = steps["Save the discovery state for the next run"]
+        # One cache per mode and exact tag; the newest saved state is the one resumed.
+        self.assertEqual(restore["with"]["path"], save["with"]["path"])
+        self.assertEqual(restore["with"]["key"], save["with"]["key"])
+        self.assertTrue(restore["with"]["key"].startswith(restore["with"]["restore-keys"]))
+        self.assertIn("${{ matrix.build.version }}", restore["with"]["restore-keys"])
+        build = steps["Build and verify"]["run"]
+        self.assertIn('export DISCOVER_RESUME="$PWD/canary/resume/pending.txt"', build)
+        self.assertIn("cp canary/modules.txt.pending canary/resume/pending.txt", build)
+        # A finished discovery saves an empty state, so the next run tries everything again.
+        self.assertIn(": > canary/resume/pending.txt", build)
+        report = next(step for step in self.jobs["report"]["steps"]
+                      if step.get("name") == "File, update, or close the canary issue")["run"]
+        self.assertLess(report.index('if [[ -n "$unfinished" ]]'), report.index("gh issue close"))
+
+    def test_a_recheck_names_the_exact_list_edit_for_extensions_that_compile_again(self):
+        step = next(step for step in self.jobs["canary"]["steps"]
+                    if step.get("name") == "Find left-out extensions that compile again")
+        with tempfile.TemporaryDirectory() as scratch:
+            scratch = pathlib.Path(scratch)
+            (scratch / "scripts").mkdir()
+            shutil.copy(ROOT / "scripts/lib.sh", scratch / "scripts/lib.sh")
+            (scratch / "expected-modules").mkdir()
+            (scratch / "expected-modules/8.6.txt").write_text("core\nphar\n!imap\n!igbinary\n!redis\n!xdebug\n")
+            (scratch / "canary").mkdir()
+            # imap is static and xdebug off by default; igbinary and redis still fail.
+            (scratch / "canary/modules.txt").write_text("core\nimap\nphar\n!igbinary\n!redis\n")
+            result = subprocess.run(["bash", "-eo", "pipefail", "-c", step["run"]], cwd=scratch,
+                                    env={**os.environ, "BRANCH": "8.6"}, capture_output=True, text=True, check=False)
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(
+                "expected-modules/8.6.txt: remove !imap, !xdebug; add imap\n",
+                (scratch / "canary/compiles-again-8.6.txt").read_text(),
+            )
 
     def test_nothing_in_the_canary_starts_or_publishes_a_release(self):
         text = (ROOT / ".github/workflows/upstream-canary.yml").read_text()

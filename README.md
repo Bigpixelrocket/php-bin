@@ -156,8 +156,8 @@ not compile there yet and was left out. `mise-php` regenerates its support
 snapshot from the new policy. The branch merges only after its first release
 builds and passes the exact module comparison against that list, and every
 later release of the branch is held to the same list. The upstream canary
-reports when a left-out extension compiles again, so its `!` line can be
-removed by pull request. Publication waits for readiness
+reports when a left-out extension compiles again, with the list edit that
+adds it back by pull request. Publication waits for readiness
 records tied to the same action key, evidence digests, php-bin policy commit,
 and exact repository commits.
 
