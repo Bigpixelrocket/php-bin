@@ -347,8 +347,9 @@ php.net announces a patch days after its tag and a branch months after its
 first pre-release, so an upstream change that breaks the recipe fails here
 first, while there is still time to fix it. A failure files or comments on one
 owner issue titled `Upstream canary: a tagged PHP version does not build`, and
-the next passing canary closes it. Nothing is published, and releases never
-build from a tag: `PHP_SOURCE=tag` exists only for the canary.
+the next passing canary, or the first one with nothing left to build, closes
+it. Nothing is published, and releases never build from a tag:
+`PHP_SOURCE=tag` exists only for the canary.
 
 The recipe itself avoids assumptions about the upstream tree.
 `scripts/build.sh` downloads, extracts php-src, and only then builds. Between
@@ -392,7 +393,7 @@ The watcher publishes the document to GitHub Pages, at
 - Main admits only reviewed pull requests and the automation records
   `Protected controls` admits; a status file is neither.
 - The capture time changes on every run, so a committed status would be a
-  commit every day.
+  commit on every run.
 
 The read-only investigation job derives and stages the site. A separate
 `Publish branch status` job, holding only `contents: read`, `pages: write`,

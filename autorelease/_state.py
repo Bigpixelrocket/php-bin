@@ -941,7 +941,7 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
 def email_fallback(report: dict[str, Any], reason: str) -> dict[str, Any]:
     """Render the last-resort digest for run state no template accepts.
 
-    The daily email must not go silent exactly when the pipeline does something
+    The digest email must not go silent exactly when the pipeline does something
     novel, so rejection by `email_digest` still produces a message. Only values
     that revalidate here are interpolated; everything else is replaced with
     'unknown', and the stated reason is this module's own rejection text. A
@@ -1258,7 +1258,7 @@ def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:
     started. Each successful publish starts the next watcher run once its record is on
     main, so every route that moves main or starts work waits for that run instead of
     re-admitting the release in flight from evidence captured before its record; a
-    publish that fails starts nothing, which leaves the work to the daily schedule. The
+    publish that fails starts nothing, which leaves the work to the next scheduled run. The
     record recovery waits too: that publish files the record itself, and a recovered
     record merged first would move main under its record pull request. The deferral
     replaces only the routes; validation and notification are unchanged.

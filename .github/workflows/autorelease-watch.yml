@@ -621,9 +621,10 @@ jobs:
 
   # The status is published to GitHub Pages rather than committed: every commit to main
   # changes the php_bin_state capture and wakes the classifier, main admits only
-  # reviewed or record commits, and a daily capture time would be a daily commit. This
-  # job holds only the Pages deployment scopes and runs no repository code; it deploys
-  # the artifact the read-only investigation staged, and only from main. A failed
+  # reviewed or record commits, and a capture time that changes on every run would be a
+  # commit on every run. This job holds only the Pages deployment scopes and runs no
+  # repository code; it deploys the artifact the read-only investigation staged, and
+  # only from main. A failed
   # deployment must not turn the run red, or the digest would report a watcher failure
   # instead of the day's real outcome; a stale `checkedAt` is what reveals it.
   publish-status:

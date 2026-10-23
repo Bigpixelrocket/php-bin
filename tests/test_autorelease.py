@@ -2852,8 +2852,8 @@ class AutoreleaseControlTests(unittest.TestCase):
                 self.assertEqual("success", results["finalize"])
                 self.assertEqual("success", results["next-watcher"])
         # An early exit, an unpublished failure, a possibly-live warning after publication,
-        # a release whose record is pending, and a cancelled run start nothing: the daily
-        # schedule retries a failing rebuild, and its recovery files a pending record.
+        # a release whose record is pending, and a cancelled run start nothing: the next
+        # scheduled run retries a failing rebuild, and its recovery files a pending record.
         for case, failing, cancelled_at in (
             ("rejected dispatch inputs", ("preflight",), None),
             ("failed release staging", ("release",), None),

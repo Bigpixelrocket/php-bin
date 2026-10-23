@@ -118,7 +118,12 @@ jobs:
             fi
             exit 1
           fi
+          # An empty selection closes the issue too: nothing unpublished is left, so each tag
+          # it reported was published (its release build passed) or its branch retired.
           if [[ -n "$number" && "${BUILDS:-[]}" != "[]" ]]; then
             gh issue close "$number" --repo "$REPOSITORY" \
               --comment "$(printf 'Every unpublished php-src tag (%s) builds with the release recipe again.\n\nRun: %s\n' "$versions" "$RUN_URL")"
+          elif [[ -n "$number" ]]; then
+            gh issue close "$number" --repo "$REPOSITORY" \
+              --comment "$(printf 'No unpublished php-src tag is left to build: php-bin has published the newest stable tag of every maintained branch.\n\nRun: %s\n' "$RUN_URL")"
           fi
