@@ -142,8 +142,9 @@ For an ordinary stable patch, the admitted no-edit intent goes directly to
 `Autorelease publish transaction`; no implementation job or PR is created. A
 recipe change uses a sealed automation PR first. Never move an existing tag or
 replace a published asset. When the PHP patch is unchanged but the recipe
-changes, the watcher selects a rebuild tag such as `8.5.9-1` for each
-published version, one per run, and each recorded release starts the next run.
+changes, the watcher selects a rebuild tag such as `8.5.9-1` for the newest
+version of each maintained branch, one per run, and each recorded release starts
+the next run. Older patch versions keep their original binaries.
 
 ### New PHP branch
 

@@ -878,8 +878,9 @@ jobs:
 
   # The watcher admits one action per run and runs every 12 hours, while one upstream
   # release day brings a patch on every maintained branch and a recipe change makes
-  # every published version rebuild-due. So a release that is live, verified, and
-  # recorded on main starts the next watcher run at once, and that run admits the next
+  # the newest version of every maintained branch rebuild-due (older patch versions
+  # are never rebuilt). So a release that is live, verified, and recorded on main
+  # starts the next watcher run at once, and that run admits the next
   # due action, if any, through the unchanged classification and admission. Only this
   # outcome chains: a failed or possibly-live run starts nothing, so a rebuild that keeps
   # failing waits for the next scheduled run, and a pending record is left
