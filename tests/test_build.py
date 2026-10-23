@@ -570,8 +570,10 @@ class UpstreamCanaryWorkflowTests(unittest.TestCase):
         self.assertIn("cp canary/modules.txt.pending canary/resume/pending.txt", build)
         # A finished discovery saves an empty state, so the next run tries everything again.
         self.assertIn(": > canary/resume/pending.txt", build)
-        report = next(step for step in self.jobs["report"]["steps"]
-                      if step.get("name") == "File, update, or close the canary issue")["run"]
+        steps = {step.get("name"): step for step in self.jobs["report"]["steps"]}
+        # A marker that cannot be downloaded fails the report rather than closing the issue.
+        self.assertNotIn("continue-on-error", steps["Download unfinished discoveries"])
+        report = steps["File, update, or close the canary issue"]["run"]
         self.assertLess(report.index('if [[ -n "$unfinished" ]]'), report.index("gh issue close"))
 
     def test_a_recheck_names_the_exact_list_edit_for_extensions_that_compile_again(self):

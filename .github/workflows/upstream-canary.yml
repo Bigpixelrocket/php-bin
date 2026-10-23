@@ -201,8 +201,9 @@ jobs:
           pattern: canary-compiles-again-*
           merge-multiple: true
           path: compiles-again
+      # No continue-on-error: a pattern with no match downloads nothing and passes, so a
+      # failure here is a lost marker, which must stop the issue from closing.
       - name: Download unfinished discoveries
-        continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: canary-incomplete-*
