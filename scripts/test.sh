@@ -231,6 +231,30 @@ if "$SCRIPT_DIR/package.sh" "$FIXTURE_ROOT/bin/php" 8.4.99 2>/dev/null; then
   exit 1
 fi
 
+# A branch that leaves every shared extension out ships none, and an empty
+# manifest list, while a stray .so still stops it.
+printf '# every shared extension left out\n' > "$FIXTURE_BUILD/shared-extensions.txt"
+if "$SCRIPT_DIR/package.sh" "$FIXTURE_ROOT/bin/php" 8.4.99-2 2>/dev/null; then
+  echo "Expected packaging to reject a shared extension the empty list does not name." >&2
+  exit 1
+fi
+rm "$FIXTURE_ROOT"/modules/*.so
+"$SCRIPT_DIR/package.sh" "$FIXTURE_ROOT/bin/php" 8.4.99-2
+mkdir "$SCRATCH_DIR/unpacked-none"
+tar -xzf "$ARTIFACT_DIR/php-8.4.99-2-cli-macos-aarch64.tar.gz" -C "$SCRATCH_DIR/unpacked-none"
+if [[ -n "$(ls -A "$SCRATCH_DIR/unpacked-none/lib/php/extensions")" ]]; then
+  echo "Packaging shipped a shared extension the empty list does not name." >&2
+  exit 1
+fi
+python3 - "$SCRATCH_DIR/unpacked-none/share/php-bin/manifest.json" <<'PY'
+import json
+import sys
+
+actual = json.load(open(sys.argv[1]))
+if actual != {"schemaVersion": 1, "release": "8.4.99-2", "phpVersion": "8.4.99", "extensions": []}:
+    sys.exit(f"Unexpected manifest: {actual}")
+PY
+
 # shellcheck source=scripts/lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
