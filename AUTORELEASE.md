@@ -4,7 +4,7 @@ How this repository detects new upstream PHP releases and lifecycle
 changes, prepares bounded repository work, and publishes immutable,
 verified macOS 26 arm64 CLI binaries without a human in the loop.
 
-`PHP autorelease watcher` runs daily, starts again after every recorded
+`PHP autorelease watcher` runs every 12 hours, starts again after every recorded
 release (see [Chained runs](#chained-runs)), and can also be dispatched
 manually. It captures the raw PHP lifecycle page, release feed, php-src tags, and public
 state of both repositories, including response metadata and SHA-256 digests.
@@ -289,8 +289,8 @@ cascade drains.
 - Only that outcome chains. A failed release, a run that stops after
   publication with the release possibly live, and a release whose record did
   not merge start nothing. Selection has no skip, so a rebuild that keeps
-  failing is retried by the daily schedule exactly as before, and that
-  scheduled run's recovery files a pending record.
+  failing is retried by the next scheduled run, and that scheduled run's
+  recovery files a pending record.
 - A chain ends on its own. The next run checks out the main that holds the
   completed record and captures `php_bin_releases` with the release in it, so
   it cannot select that action again, and admission rejects a completed action
@@ -318,7 +318,7 @@ cascade drains.
   and a recovered record merged ahead of the publish's own record would stop
   its record pull request. The publish starts the run that takes the work once
   it succeeds, and a failed one leaves the work and any missing record to the
-  daily schedule. Only watcher runs dispatch publish runs, and they never
+  next scheduled run. Only watcher runs dispatch publish runs, and they never
   overlap, so the investigation reads this before it captures and retains the
   answer in `publish-in-flight.json`. Classification, admission, and
   notifications still run as usual, and the digest of such a run says it held
@@ -330,6 +330,36 @@ cascade drains.
   chains like any other.
 - Each chained run on main republishes the [branch status](#branch-status), so
   `status.json` shows a new release within minutes of its record.
+
+## Upstream canary
+
+`Upstream canary` (`.github/workflows/upstream-canary.yml`, twice a day)
+builds what php-src has tagged but php-bin has not published, straight from
+each tag, with the release recipe and its exact module gate, in a read-only
+job. `scripts/select-canary-builds` picks the newest unpublished stable tag of
+every maintained branch, and the newest tag of any stability for a branch with
+no release yet, which covers the next PHP branch from its first alpha. A branch
+without its own module list is gated against the newest list, exactly the one
+a `new_branch` edit would copy. Nothing names a PHP version: branches come
+from the accepted policy and the tags themselves.
+
+php.net announces a patch days after its tag and a branch months after its
+first pre-release, so an upstream change that breaks the recipe fails here
+first, while there is still time to fix it. A failure files or comments on one
+owner issue titled `Upstream canary: a tagged PHP version does not build`, and
+the next passing canary, or the first one with nothing left to build, closes
+it. Nothing is published, and releases never build from a tag:
+`PHP_SOURCE=tag` exists only for the canary.
+
+The recipe itself avoids assumptions about the upstream tree.
+`scripts/build.sh` downloads, extracts php-src, and only then builds. Between
+those steps it removes every `ext/` directory without a `config*.m4`, since
+PHP's build cannot configure it and StaticPHP would otherwise skip extracting
+an extension source into it (upstream left `ext/imap/tests` behind after imap
+moved to PECL). It also resolves StaticPHP's micro patches itself: for each
+one, the newest file not newer than the branch that applies cleanly. StaticPHP's
+own table stops at the newest branch it knows and falls back to the oldest
+file, which no longer applies to a newer branch.
 
 ## Branch status
 
@@ -363,7 +393,7 @@ The watcher publishes the document to GitHub Pages, at
 - Main admits only reviewed pull requests and the automation records
   `Protected controls` admits; a status file is neither.
 - The capture time changes on every run, so a committed status would be a
-  commit every day.
+  commit on every run.
 
 The read-only investigation job derives and stages the site. A separate
 `Publish branch status` job, holding only `contents: read`, `pages: write`,
@@ -376,8 +406,8 @@ in place without failing the run, so the digest still reports the day's real
 outcome; the stale `checkedAt` below is what reveals it.
 
 Dashboards should read `status.json` and alert when `checkedAt` is older than
-about 36 hours: the watcher runs daily and GitHub can delay a schedule by
-hours, so anything older means the watcher or its deployment stopped. The
+about 24 hours: the watcher runs every 12 hours and GitHub can delay a
+schedule by hours, so anything older means the watcher or its deployment stopped. The
 README badges read the same document through shields.io dynamic JSON queries
 (`$.summary`, `$.badges['<branch>']`, `$.checkedAt`); shields.io cannot filter
 a list, which is why each branch's badge message is also keyed by branch, and
@@ -436,10 +466,10 @@ watcher decides which one is due:
   patches take priority in the classifier.
 - Selection has no skip: a version whose rebuild keeps failing is selected
   again on every run and holds back the rebuilds ordered after it until the
-  recipe is fixed. A failed rebuild starts no next run, so it is retried once
-  a day by the schedule rather than in a loop. The `php_bin_releases` capture reads every page of the
-  releases list, up to 20 pages of 100, and fails as unhealthy rather than
-  truncate a longer list.
+  recipe is fixed. A failed rebuild starts no next run, so it is retried by
+  the next scheduled run rather than in a loop. The `php_bin_releases`
+  capture reads every page of the releases list, up to 20 pages of 100, and
+  fails as unhealthy rather than truncate a longer list.
 
 ## Unattended lifecycle
 

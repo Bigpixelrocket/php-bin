@@ -11,7 +11,29 @@ require_macos_arm64
 # The publisher passes the full release tag, 8.4.5-1 for a rebuild; the build
 # folder keeps that tag, and StaticPHP gets the PHP version without it.
 BUILD_TARGET="${1:-8.4}"
-PHP_VERSION="$(php_source_version "$BUILD_TARGET")"
+# PHP_SOURCE=tag builds the exact php-src git tag instead of the php.net release
+# tarball, so the upstream canary can build a patch, or the next branch's
+# pre-release, before php.net announces it. Releases never set it: only a
+# php.net tarball is ever published.
+PHP_SOURCE="${PHP_SOURCE:-release}"
+PHP_SOURCE_PIN=""
+case "$PHP_SOURCE" in
+  release)
+    PHP_VERSION="$(php_source_version "$BUILD_TARGET")"
+    ;;
+  tag)
+    if [[ ! "$BUILD_TARGET" =~ ^[0-9]+\.[0-9]+\.[0-9]+((alpha|beta|RC)[0-9]+)?$ ]]; then
+      echo "PHP_SOURCE=tag needs an exact php-src tag version, got: $BUILD_TARGET" >&2
+      exit 1
+    fi
+    PHP_VERSION="$BUILD_TARGET"
+    PHP_SOURCE_PIN="php-src:https://github.com/php/php-src/archive/refs/tags/php-$PHP_VERSION.tar.gz"
+    ;;
+  *)
+    echo "PHP_SOURCE must be release or tag, got: $PHP_SOURCE" >&2
+    exit 1
+    ;;
+esac
 STAGE="${2:-s4}"
 STAGE_FILE="$PROJECT_ROOT/stages/$STAGE.txt"
 # Only stages with a companion list build shared extensions; see its header.
@@ -61,9 +83,9 @@ print_failure_logs() {
 # ac_cv_header_unix_h stops configure from picking up c-client's unix.h, which
 # would otherwise leave HAVE_UNIX_H in the shipped php_config.h and break
 # user-built extensions.
-{
+craft_file() {
   cat <<EOF
-php-version: "$PHP_VERSION"
+php-version: "${PHP_VERSION%%[!0-9.]*}"
 extensions: $EXTENSIONS
 EOF
   if [[ -n "$SHARED_EXTENSIONS" ]]; then
@@ -84,8 +106,12 @@ download-options:
 EOF
   # Stages without a shared list leave SHARED_ROWS empty, which awk still
   # reads as one blank record; NF skips it.
-  if awk -F '\t' 'NF && $5 != "-" { found = 1 } END { exit !found }' <<< "$SHARED_ROWS"; then
+  if [[ -n "$PHP_SOURCE_PIN" ]] \
+    || awk -F '\t' 'NF && $5 != "-" { found = 1 } END { exit !found }' <<< "$SHARED_ROWS"; then
     echo "  custom-url:"
+    if [[ -n "$PHP_SOURCE_PIN" ]]; then
+      printf '    - "%s"\n' "$PHP_SOURCE_PIN"
+    fi
     awk -F '\t' 'NF && $5 != "-" { printf "    - \"%s\"\n", $5 }' <<< "$SHARED_ROWS"
   fi
   cat <<EOF
@@ -93,14 +119,90 @@ extra-env:
   MACOSX_DEPLOYMENT_TARGET: "26.0"
   ac_cv_func_memset_s: "no"
   ac_cv_header_unix_h: "no"
+craft-options:
+  download: $1
+  build: $2
 EOF
-} > "$BUILD_DIR/craft.yml"
+}
+craft_file true false > "$BUILD_DIR/craft-download.yml"
+craft_file false true > "$BUILD_DIR/craft-build.yml"
 
-if ! (
-  cd "$BUILD_DIR"
-  "$SPC_BIN" doctor
-  "$SPC_BIN" craft
-); then
+# Remove every php-src/ext directory that holds no config*.m4. Such a directory
+# is not an extension PHP's build can configure: upstream leaves test folders
+# behind when an extension moves out of core (ext/imap/tests since 8.4.27 and
+# 8.5.12), and keeps Windows-only and template directories there. StaticPHP
+# skips extracting a PECL source into a directory that already exists, so a
+# leftover folder would otherwise hide the extension it should become.
+remove_unconfigurable_extension_dirs() {
+  local dir
+
+  for dir in source/php-src/ext/*/; do
+    if ! compgen -G "${dir}config*.m4" > /dev/null; then
+      echo "Removing ${dir%/}: it holds no config*.m4."
+      rm -rf "$dir" || return 1
+    fi
+  done
+}
+
+# StaticPHP's macOS default micro patch list; an SPC_MICRO_PATCHES already in the
+# environment replaces it. Only the CLI is built, but the patches still touch
+# php-src (macos_iconv fixes iconv detection against the bundled libiconv).
+MICRO_PATCHES="${SPC_MICRO_PATCHES-cli_checks,macos_iconv}"
+IFS=. read -r PHP_MAJOR PHP_MINOR_NUMBER _ <<< "${PHP_VERSION%%[!0-9.]*}"
+# Micro patch files carry the branch they target as <major><minor>, 84 for 8.4.
+PHP_BRANCH_NUMBER="$PHP_MAJOR$PHP_MINOR_NUMBER"
+
+# Print the micro patches to apply, as exact file names. StaticPHP picks each
+# patch from a version table that ends at the newest branch it knows and falls
+# back to the oldest file for any newer branch, which then fails to apply. Each
+# patch is resolved here instead: its newest file not newer than this branch that
+# applies cleanly to this source. A patch with no such file is skipped, and the
+# build and module gates decide whether the result is sound.
+resolve_micro_patches() {
+  local name file version chosen
+  local patches_dir="source/php-src/sapi/micro/patches"
+  local resolved=()
+
+  for name in ${MICRO_PATCHES//,/ }; do
+    chosen=""
+    while IFS= read -r file; do
+      if [[ "$file" != "$name.patch" ]]; then
+        version="${file#"${name}_"}"
+        version="${version%.patch}"
+        if [[ ! "$version" =~ ^[0-9]+$ ]] || (( 10#$version > 10#$PHP_BRANCH_NUMBER )); then
+          continue
+        fi
+      fi
+      if (cd source/php-src && patch -p1 --dry-run --silent --force < "sapi/micro/patches/$file") > /dev/null 2>&1; then
+        chosen="${file%.patch}"
+        break
+      fi
+    done < <(find "$patches_dir" -maxdepth 1 \( -name "$name.patch" -o -name "${name}_*.patch" \) -exec basename {} \; | sort -rV)
+    if [[ -n "$chosen" ]]; then
+      resolved+=("$chosen")
+    else
+      echo "Skipping micro patch $name: no version of it applies to PHP $PHP_VERSION." >&2
+    fi
+  done
+  (IFS=,; echo "${resolved[*]+"${resolved[*]}"}")
+}
+
+# Each step runs on its own: inside `if ! ( ... )` bash ignores `set -e`, so a
+# failed step would otherwise fall through to the next one.
+run_staticphp() {
+  local micro_patches
+
+  cd "$BUILD_DIR" \
+    && "$SPC_BIN" doctor \
+    && "$SPC_BIN" craft craft-download.yml \
+    && "$SPC_BIN" extract php-src,micro \
+    && remove_unconfigurable_extension_dirs \
+    && micro_patches="$(resolve_micro_patches)" \
+    && echo "Micro patches: ${micro_patches:-none}" \
+    && SPC_MICRO_PATCHES="$micro_patches" "$SPC_BIN" craft craft-build.yml
+}
+
+if ! (run_staticphp); then
   print_failure_logs
   exit 1
 fi

@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""Choose the php-src tags the upstream canary builds.
+
+For every branch that is maintained, or newer than every maintained branch, the
+canary builds the newest php-src tag php-bin has not published:
+
+- a maintained branch with releases: its newest stable tag, when that is newer
+  than the newest version php-bin published on it;
+- a branch with no php-bin release yet (the next PHP branch, from its first
+  alpha, or one whose first release is still in flight): its newest tag of any
+  stability, so a recipe break shows up long before the branch's first release.
+
+Nothing here names a PHP version: branches come from the accepted policy and the
+tags themselves. A branch without its own module list is gated against the
+newest list in `expected-modules/`, which is exactly the list a `new_branch`
+edit would copy for it.
+
+Prints a JSON array of {"version", "branch", "modules"} objects.
+"""
+
+import argparse
+import json
+import pathlib
+import re
+import sys
+
+TAG_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:(alpha|beta|RC)(\d+))?$")
+STAGES = {"alpha": 0, "beta": 1, "RC": 2, None: 3}
+RELEASE_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-[1-9]\d*)?$")
+BRANCH_RE = re.compile(r"^(\d+)\.(\d+)$")
+
+
+def tag_key(version: str) -> tuple[int, ...]:
+    match = TAG_RE.match(version)
+    if not match:
+        raise ValueError(version)
+    major, minor, patch, stage, number = match.groups()
+    return (int(major), int(minor), int(patch), STAGES[stage], int(number or 0))
+
+
+def branch_key(branch: str) -> tuple[int, int]:
+    match = BRANCH_RE.match(branch)
+    if not match:
+        raise ValueError(f"not a major.minor branch: {branch!r}")
+    return (int(match.group(1)), int(match.group(2)))
+
+
+def branch_of(version: str) -> str:
+    return ".".join(version.split(".")[:2])
+
+
+def select(maintained: list[str], tags: list[str], releases: list[str], module_lists: list[str]) -> list[dict]:
+    if not maintained:
+        raise ValueError("the policy maintains no branch")
+    if not module_lists:
+        raise ValueError("there is no module list to gate a build against")
+    newest_maintained = max(maintained, key=branch_key)
+    newest_list = max(module_lists, key=branch_key)
+
+    published: dict[str, str] = {}
+    for tag in releases:
+        match = RELEASE_RE.match(tag)
+        if not match:
+            continue
+        version = ".".join(match.groups())
+        branch = branch_of(version)
+        if branch not in published or tag_key(version) > tag_key(published[branch]):
+            published[branch] = version
+
+    newest_tag: dict[str, str] = {}
+    newest_stable: dict[str, str] = {}
+    for tag in tags:
+        if not TAG_RE.match(tag):
+            continue
+        branch = branch_of(tag)
+        if branch not in maintained and branch_key(branch) <= branch_key(newest_maintained):
+            continue
+        if branch not in newest_tag or tag_key(tag) > tag_key(newest_tag[branch]):
+            newest_tag[branch] = tag
+        if TAG_RE.match(tag).group(4) is None and (
+            branch not in newest_stable or tag_key(tag) > tag_key(newest_stable[branch])
+        ):
+            newest_stable[branch] = tag
+
+    builds = []
+    for branch in sorted(newest_tag, key=branch_key):
+        if branch in published:
+            version = newest_stable.get(branch)
+            if version is None or tag_key(version) <= tag_key(published[branch]):
+                continue
+        else:
+            version = newest_tag[branch]
+        modules = branch if branch in module_lists else newest_list
+        builds.append({"version": version, "branch": branch, "modules": modules})
+    return builds
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--policy", type=pathlib.Path, required=True)
+    parser.add_argument("--tags", type=pathlib.Path, required=True, help="one php-src tag per line, without the php- prefix")
+    parser.add_argument("--releases", type=pathlib.Path, required=True, help="one php-bin release tag per line")
+    parser.add_argument("--modules-dir", type=pathlib.Path, required=True)
+    args = parser.parse_args()
+    try:
+        maintained = json.loads(args.policy.read_text())["maintainedBranches"]
+        for branch in maintained:
+            branch_key(branch)
+        module_lists = [path.stem for path in args.modules_dir.glob("*.txt") if BRANCH_RE.match(path.stem)]
+        builds = select(
+            maintained,
+            args.tags.read_text().split(),
+            args.releases.read_text().split(),
+            module_lists,
+        )
+    except (OSError, KeyError, TypeError, ValueError) as error:
+        print(f"canary selection rejected: {error}", file=sys.stderr)
+        return 1
+    print(json.dumps(builds, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

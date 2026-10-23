@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://bigpixelrocket.dev/schemas/autorelease-status.schema.json",
   "title": "php-bin branch status",
-  "description": "Per maintained branch, php.net's newest release against php-bin's newest published release, derived from one watcher capture. Published at https://bigpixelrocket.github.io/php-bin/status.json; treat a checkedAt older than 36 hours as a stopped watcher.",
+  "description": "Per maintained branch, php.net's newest release against php-bin's newest published release, derived from one watcher capture. Published at https://bigpixelrocket.github.io/php-bin/status.json; treat a checkedAt older than 24 hours as a stopped watcher.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "checkedAt", "runUrl", "summary", "badges", "trigger", "action", "actionKey", "inProgressActionKeys", "rebuildDueActionKey", "changedCaptures", "captureHealth", "branches"],

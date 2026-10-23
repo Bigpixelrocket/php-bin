@@ -9,11 +9,14 @@ full contract.
 
 ## What the automation does
 
-1. The daily watcher captures upstream evidence and, when it changes,
+1. The watcher runs every 12 hours, captures upstream evidence and, when it changes,
    classifies it with fixed rules into one evidence-bound plan that an
    independent admission check accepts or rejects. Every recorded release
    starts the watcher again, so the next due release starts as soon as the
-   previous one is recorded instead of the next day.
+   previous one is recorded instead of at the next scheduled run. A
+   twice-daily upstream canary builds every unpublished php-src tag, including
+   the next branch's pre-releases, so a recipe break shows up before the
+   release is announced.
 2. For an ordinary stable patch or a rebuild the plan requires no edit and goes
    straight to the publish transaction. A new or retired PHP branch is first
    written deterministically (`support-policy.json`, plus the new branch's
@@ -56,7 +59,7 @@ After that merges, the watcher sees which published versions were built from
 a different recipe and rebuilds them one per run as revisions such as
 `8.4.5-1`. Each recorded rebuild starts the next watcher run, so the whole set
 drains without anyone dispatching it, and a rebuild that fails waits for the
-daily schedule. A change to one branch's `expected-modules/<branch>.txt` rebuilds
+next scheduled run. A change to one branch's `expected-modules/<branch>.txt` rebuilds
 only that branch; a change to a shared recipe input rebuilds every maintained
 version. Each release records the identity of the recipe it was built from
 in its notes, and a version is rebuilt when its newest revision records a

@@ -1,0 +1,130 @@
+name: Upstream canary
+
+# Builds what php-src has tagged but php-bin has not published, straight from each
+# tag, with the release recipe and its exact module gate: the newest unpublished
+# patch of every maintained branch, and the newest tag of any branch with no release
+# yet, from the next branch's first alpha on. php.net announces a patch days after
+# its tag and a branch months after its first pre-release, so an upstream change that
+# breaks the recipe fails here while there is still time to fix it, instead of in the
+# release the watcher admits. Nothing is published. A failure files or updates one
+# owner issue, which the next passing canary, or the first one with nothing left to
+# build, closes.
+on:
+  schedule:
+    - cron: "41 3,15 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: php-upstream-canary
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  select:
+    name: Find unpublished php-src tags
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      builds: ${{ steps.select.outputs.builds }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Select builds
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          git ls-remote --tags --refs https://github.com/php/php-src.git 'refs/tags/php-*' \
+            | awk '{ sub("^refs/tags/php-", "", $2); print $2 }' > "$RUNNER_TEMP/tags.txt"
+          gh api --paginate "repos/$REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft | not) | .tag_name' > "$RUNNER_TEMP/releases.txt"
+          builds="$(./scripts/select-canary-builds \
+            --policy support-policy.json \
+            --tags "$RUNNER_TEMP/tags.txt" \
+            --releases "$RUNNER_TEMP/releases.txt" \
+            --modules-dir expected-modules)"
+          echo "Canary builds: $builds"
+          echo "builds=$builds" >> "$GITHUB_OUTPUT"
+
+  canary:
+    name: PHP ${{ matrix.build.version }} from its php-src tag
+    needs: select
+    if: needs.select.outputs.builds != '[]'
+    runs-on: macos-26
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        build: ${{ fromJSON(needs.select.outputs.builds) }}
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      PHP_SOURCE: tag
+      VERSION: ${{ matrix.build.version }}
+      BRANCH: ${{ matrix.build.branch }}
+      MODULES: ${{ matrix.build.modules }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Verify runner architecture
+        run: test "$(uname -s)" = Darwin && test "$(uname -m)" = arm64
+      - name: Gate a branch without its own module list against the newest one
+        if: matrix.build.modules != matrix.build.branch
+        run: cp "expected-modules/$MODULES.txt" "expected-modules/$BRANCH.txt"
+      - name: Install build dependencies
+        run: scripts/install-build-deps.sh
+      - name: Install pinned StaticPHP
+        run: scripts/install-spc.sh
+      - name: Build and verify
+        run: scripts/build.sh "$VERSION" s4
+
+  report:
+    name: Report the canary result
+    needs: [select, canary]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPOSITORY: ${{ github.repository }}
+      OWNER: ${{ vars.AUTORELEASE_OWNER }}
+      FAILED: ${{ needs.select.result == 'failure' || needs.canary.result == 'failure' }}
+      BUILDS: ${{ needs.select.outputs.builds }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: File, update, or close the canary issue
+        run: |
+          title="Upstream canary: a tagged PHP version does not build"
+          versions="$(jq -r 'map(.version) | join(", ")' <<< "${BUILDS:-[]}" 2>/dev/null || echo unknown)"
+          number="$(gh issue list --repo "$REPOSITORY" --state open --search "\"$title\" in:title" --json number,title \
+            | jq -r --arg title "$title" 'map(select(.title == $title)) | .[0].number // empty')"
+          if [[ "$FAILED" == "true" ]]; then
+            body="$(printf 'The canary could not build every unpublished php-src tag (%s) with the release recipe. The failing job names the version. Fix the recipe before php.net announces it, or the release build fails the same way.\n\nRun: %s\n' "${versions:-none selected}" "$RUN_URL")"
+            if [[ -n "$number" ]]; then
+              gh issue comment "$number" --repo "$REPOSITORY" --body "$body"
+            elif [[ -n "$OWNER" ]]; then
+              gh issue create --repo "$REPOSITORY" --title "$title" --body "$body" --assignee "$OWNER"
+            else
+              gh issue create --repo "$REPOSITORY" --title "$title" --body "$body"
+            fi
+            exit 1
+          fi
+          # An empty selection closes the issue too: nothing unpublished is left, so each tag
+          # it reported was published (its release build passed) or its branch retired.
+          if [[ -n "$number" && "${BUILDS:-[]}" != "[]" ]]; then
+            gh issue close "$number" --repo "$REPOSITORY" \
+              --comment "$(printf 'Every unpublished php-src tag (%s) builds with the release recipe again.\n\nRun: %s\n' "$versions" "$RUN_URL")"
+          elif [[ -n "$number" ]]; then
+            gh issue close "$number" --repo "$REPOSITORY" \
+              --comment "$(printf 'No unpublished php-src tag is left to build: php-bin has published the newest stable tag of every maintained branch.\n\nRun: %s\n' "$RUN_URL")"
+          fi

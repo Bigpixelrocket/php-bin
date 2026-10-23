@@ -782,7 +782,7 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
                 f"but the publish run still finished with conclusion '{conclusion}'. That happens "
                 "when another job failed around the finished release: the fresh build that "
                 "reconciling an existing release did not need, or starting the next watcher run, "
-                "which leaves any further due release to the daily schedule. The release itself "
+                "which leaves any further due release to the next scheduled watcher run. The release itself "
                 "needs nothing; check the run if the failure recurs.",
                 run_url=run_url,
             )
@@ -866,7 +866,7 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
             f"A publish run had not recorded its release when this run started, so the watcher "
             f"admitted {action_key} but changed nothing on main and dispatched nothing. That "
             "publish run starts the next watcher run once its release is recorded, and that run "
-            "takes whatever is due then; if the publish fails, the daily schedule does.",
+            "takes whatever is due then; if the publish fails, the next scheduled run does.",
             status_paragraph,
             run_url=run_url,
         )
@@ -911,7 +911,7 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
             f"Watcher: new PHP branch {version} detected",
             f"A new PHP branch was detected and admitted as {action_key}. Its first publication "
             "proceeds automatically once mise-php records matching exact-commit readiness; until "
-            "then the watcher re-checks daily and mutates nothing.",
+            "then the watcher re-checks every 12 hours and mutates nothing.",
             status_paragraph,
             run_url=run_url,
         )
@@ -941,7 +941,7 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
 def email_fallback(report: dict[str, Any], reason: str) -> dict[str, Any]:
     """Render the last-resort digest for run state no template accepts.
 
-    The daily email must not go silent exactly when the pipeline does something
+    The digest email must not go silent exactly when the pipeline does something
     novel, so rejection by `email_digest` still produces a message. Only values
     that revalidate here are interpolated; everything else is replaced with
     'unknown', and the stated reason is this module's own rejection text. A
@@ -1258,7 +1258,7 @@ def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:
     started. Each successful publish starts the next watcher run once its record is on
     main, so every route that moves main or starts work waits for that run instead of
     re-admitting the release in flight from evidence captured before its record; a
-    publish that fails starts nothing, which leaves the work to the daily schedule. The
+    publish that fails starts nothing, which leaves the work to the next scheduled run. The
     record recovery waits too: that publish files the record itself, and a recovered
     record merged first would move main under its record pull request. The deferral
     replaces only the routes; validation and notification are unchanged.
