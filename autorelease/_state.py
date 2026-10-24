@@ -1069,19 +1069,26 @@ def pending_recipe_rebuild(
 ) -> str | None:
     """Return the action key of the one rebuild revision that is due, or None.
 
-    `recipe_identities` maps every maintained branch to the identity of the recipe it
-    would be built from now. A published version is due when its newest revision was
-    built from a recipe other than its branch's identity, or records no identity at all.
-    The revision is one past the highest published revision of that version, so the key
-    names a tag that cannot exist yet. Only maintained branches are rebuilt: an EOL
-    branch keeps its releases exactly as published. Drafts and prereleases are ignored,
-    so a rebuild whose draft was left by a failed transaction is selected again and
-    resumes that draft.
+    Only the newest published version of each maintained branch is ever rebuilt. Older
+    patch versions keep the binaries they were published with forever, whatever recipe
+    identity they record. The rule is deliberate and must not widen to older versions:
+    every rebuild costs a full build and its own publication, so rebuilding history
+    would make CI time grow with the number of published versions, while someone pinned
+    to an older patch already lacks that branch's later PHP fixes, so a refreshed recipe
+    buys them little.
 
-    Selection is deterministic so the classifier confirms rather than invents it:
-    the newest version of each branch goes first, because that is what branch
-    shorthand installs resolve to, then older versions, newest first. One key is
-    returned per run; later runs rebuild the rest.
+    `recipe_identities` maps every maintained branch to the identity of the recipe it
+    would be built from now. A branch's newest version is due when its newest revision
+    was built from a recipe other than that branch's identity, or records no identity
+    at all. The revision is one past the highest published revision of that version, so
+    the key names a tag that cannot exist yet. Only maintained branches are rebuilt: an
+    EOL branch keeps its releases exactly as published. Drafts and prereleases are
+    ignored, so a rebuild whose draft was left by a failed transaction is selected again
+    and resumes that draft.
+
+    Selection is deterministic so the classifier confirms rather than invents it: due
+    branches go newest version first. One key is returned per run; later runs rebuild
+    the rest.
     """
     require(
         all(SHA256_RE.fullmatch(identity or "") for identity in recipe_identities.values()),
@@ -1109,18 +1116,12 @@ def pending_recipe_rebuild(
             latest_of_branch[branch] = version
     due = [
         version
-        for version, (_revision, release) in newest.items()
-        if release_recipe_identity(release) != recipe_identities[version.rsplit(".", 1)[0]]
+        for branch, version in latest_of_branch.items()
+        if release_recipe_identity(newest[version][1]) != recipe_identities[branch]
     ]
     if not due:
         return None
-    selected = min(
-        due,
-        key=lambda version: (
-            latest_of_branch[version.rsplit(".", 1)[0]] != version,
-            tuple(-part for part in version_key(version)),
-        ),
-    )
+    selected = max(due, key=version_key)
     return f"recipe_rebuild:{selected}:{newest[selected][0] + 1}"
 
 
@@ -1138,8 +1139,8 @@ def watch_decision(
     """Choose the wake trigger, and name any deterministic repair or rebuild that is due.
 
     `recipe_identities` maps each maintained branch to the identity of the checked-out
-    recipe for it. When it is supplied, a published release built from any other recipe
-    keeps the watcher awake: the `rebuild_due` trigger runs the classifier even on a day
+    recipe for it. When it is supplied, a branch whose newest published version was
+    built from any other recipe keeps the watcher awake: the `rebuild_due` trigger runs the classifier even on a day
     whose evidence matches the last reviewed snapshot, so a recorded `no_change` can
     never leave a rebuild pending quietly. The selected key is reported as
     `rebuildActionKey`, and admission accepts no other rebuild.

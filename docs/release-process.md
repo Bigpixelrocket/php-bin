@@ -55,15 +55,18 @@ A human changes what gets built, never how it gets released:
 5. Confirm `scripts/test.sh` and public-language checks pass.
 6. Open a pull request with the build log and module diff.
 
-After that merges, the watcher sees which published versions were built from
-a different recipe and rebuilds them one per run as revisions such as
-`8.4.5-1`. Each recorded rebuild starts the next watcher run, so the whole set
-drains without anyone dispatching it, and a rebuild that fails waits for the
-next scheduled run. A change to one branch's `expected-modules/<branch>.txt` rebuilds
-only that branch; a change to a shared recipe input rebuilds every maintained
-version. Each release records the identity of the recipe it was built from
-in its notes, and a version is rebuilt when its newest revision records a
-different identity or none. The watcher selects the version and revision
+After that merges, the watcher sees which maintained branches have a newest
+version built from a different recipe and rebuilds those versions one per run
+as revisions such as `8.4.5-1`. Older patch versions are never rebuilt: that
+would make CI time grow with every published version, and anyone pinned to an
+older patch already lacks the branch's later PHP fixes. Each recorded rebuild
+starts the next watcher run, so the whole set drains without anyone
+dispatching it, and a rebuild that fails waits for the next scheduled run. A
+change to one branch's `expected-modules/<branch>.txt` rebuilds only that
+branch; a change to a shared recipe input rebuilds the newest version of every
+maintained branch. Each release records the identity of the recipe it was
+built from in its notes, and a branch's newest version is rebuilt when its
+newest revision records a different identity or none. The watcher selects the version and revision
 deterministically, the classifier confirms it as a
 `recipe_rebuild:<version>:<n>` plan, and admission accepts only that key, so a
 revision is never chosen by hand. See "Recipe rebuilds" in

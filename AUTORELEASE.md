@@ -274,15 +274,16 @@ flowchart TD
 
 The classifier admits one action per watcher run, but one upstream release day
 brings a patch on every maintained branch, oldest first, and a recipe change
-makes every published version rebuild-due. A publish run whose `finalize` job
-succeeded therefore ends with `Start the next watcher run`: the release is
-live, fresh public installs of it passed, and its event record is complete on
-main, merged by that job or found already there. The job holds only
+makes the newest version of every maintained branch rebuild-due (older patch
+versions are never rebuilt; see [Recipe rebuilds](#recipe-rebuilds)). A
+publish run whose `finalize` job succeeded therefore ends with `Start the next
+watcher run`: the release is live, fresh public installs of it passed, and its
+event record is complete on main, merged by that job or found already there. The job holds only
 `actions: write`, runs no repository code, and dispatches
 `autorelease-watch.yml` on main with `GITHUB_TOKEN`, which GitHub allows to
 start `workflow_dispatch` runs. The new run captures fresh evidence and admits
 the next due action through the unchanged classification and admission, so a
-release day across four branches, or a full rebuild, finishes in hours instead
+release day across four branches, or a recipe rebuild, finishes in hours instead
 of days. Dispatching the watcher by hand stays safe but is no longer how a
 cascade drains.
 
@@ -440,23 +441,32 @@ watcher decides which one is due:
   `autorelease/_admission.py`). Adding a branch or changing another branch's
   module list rebuilds nothing. The runner image, unpinned Homebrew packages,
   and the workflow definition are not covered, and changing the covered path
-  set itself makes every maintained version due once.
+  set itself makes every maintained branch's newest version due once.
 - The publish transaction writes `Recipe identity: sha256:<hex>` into the
   notes of every release it creates, computed at the exact commit it builds.
   The notes come back inside the `php_bin_releases` capture, so the identity
   survives across runs with no extra state.
-- A published version on a maintained branch is *rebuild due* when its newest
-  revision records a different identity, or none. Every release published
-  before identities were recorded is therefore due once.
-- `pending_recipe_rebuild` in `autorelease/_state.py` picks one due version
-  per run: the newest version of each branch first, then older versions,
-  newest first. Its revision is one past the highest published revision.
+- Only the newest published version of each maintained branch is ever
+  rebuilt. Older patch versions keep their original binaries forever,
+  whatever identity they record. Rebuilding history would make CI time grow
+  with the number of published versions, and someone pinned to an older
+  patch already lacks that branch's later PHP fixes, so a refreshed recipe
+  buys them little. A new patch retires the previous newest version from
+  selection for good. Do not widen selection to older versions.
+- A maintained branch's newest version is *rebuild due* when its newest
+  revision records a different identity, or none. A branch whose newest
+  release was published before identities were recorded is therefore due
+  once.
+- `pending_recipe_rebuild` in `autorelease/_state.py` picks one due branch
+  per run, newest version first, so a recipe change costs one rebuild per
+  maintained branch. Its revision is one past the highest published revision.
   `watch-decision.json` reports it as `rebuildActionKey`, and the `rebuild_due`
   trigger runs the classifier even on an otherwise quiet day.
 - Admission re-derives the same selection from the same capture, commit, and
   policy. A `recipe_rebuild` plan must name exactly that key, set
   `releaseIntent.version` to `<version>-<n>`, require no edits, allow no paths,
-  and cite the `php_bin_releases` tag it supersedes. A `no_change` plan is
+  and cite the `php_bin_releases` tag it supersedes; a plan naming an older
+  version therefore never admits. A `no_change` plan is
   rejected while a rebuild is due, so recorded evidence can never leave one
   pending.
 - The admitted rebuild goes straight to the publish transaction. Each
