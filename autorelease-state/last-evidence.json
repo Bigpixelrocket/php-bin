@@ -1,51 +1,51 @@
 {
   "schemaVersion": 1,
-  "manifestDigest": "sha256:2dc2b4366b8224b34cdb2fe959905604c8af38954120ed891fbd757ef5da2287",
-  "planDigest": "sha256:dfa29e04d78ba1b6508270d9a12a97180feb3ebb44d1e081251675f26e01285a",
+  "manifestDigest": "sha256:d7c35e274983fdc670c20868dbcb7ab029625bae32c27a564fee7d647efce5c1",
+  "planDigest": "sha256:a5902798665a92b0a19c7e6f37f58e2b3ac02300532e8c2e987fc1a04c7e5f6d",
   "captures": [
     {
       "captureId": "php_supported_versions",
-      "digest": "sha256:c496efaf0795c0d294a2c803ea8409cd76cfab062a3d2ae42b81b446140ff211",
+      "digest": "sha256:34ee54e6a53461c8023b610d96535c63a0ce84a613c9359a963e2c23e14c7de9",
       "status": 200
     },
     {
       "captureId": "php_release_feed",
-      "digest": "sha256:4ecf6e7276a1d6eeab7152be73b71fd19630fb185ce2d60f5e1cc22ac4c37722",
+      "digest": "sha256:fcd8b43f566bf97ffb4285693aa72c7d762c75d90735f9abc36c9522d85639c0",
       "status": 200
     },
     {
       "captureId": "php_release_feed_8.2",
-      "digest": "sha256:e3cb7cafa1a75dd91759c7019eb503921038ff574240f260fe31828e2c01b1eb",
+      "digest": "sha256:47eeb45b8b4c201139bcc16458308bcc52441383bb1517db62aba6b284f6b20f",
       "status": 200
     },
     {
       "captureId": "php_release_feed_8.3",
-      "digest": "sha256:9a72628588339afd84203a09a602b0d8ac57642ece32afa5ebe4385789874a10",
+      "digest": "sha256:a5ffb2e3ef72d5643fc82cb86063fb9f194a2927679cddec3e2c135c6238b9a7",
       "status": 200
     },
     {
       "captureId": "php_release_feed_8.4",
-      "digest": "sha256:0d3a0f28b6a141dc0add5017442770704ac55e17b1f49d56994edcd08f797718",
+      "digest": "sha256:853e78efcc306820a89d40efccfedb9ef1a5bc5aa0dcb449b7da2879bb6f836f",
       "status": 200
     },
     {
       "captureId": "php_release_feed_8.5",
-      "digest": "sha256:f6928a8b512c059043d15db0d098bbd698d4dd257f92d60f215f9657474f4b59",
+      "digest": "sha256:daefedf879e64f5b5922c36250e78f07b77171eff7bc0cdb09fe56a930abe97b",
       "status": 200
     },
     {
       "captureId": "php_source_tags",
-      "digest": "sha256:4afac5386226259ccd1b125b2d45746fdc48fe041d98f68588f9eec36f681b31",
+      "digest": "sha256:f3f99af1aea800d31524616a72003ed1b699858344a605abb02efc3fb560e3b5",
       "status": 200
     },
     {
       "captureId": "php_bin_releases",
-      "digest": "sha256:bff42ce772b890d6ca1ae90639b60b85b6c00c373b92b77ea6b5c06b284d9593",
+      "digest": "sha256:f1f9dc588d2e0c6e7248e56ddd771acfd05c3026a3f79605b0f8913ff0320cba",
       "status": 200
     },
     {
       "captureId": "php_bin_state",
-      "digest": "sha256:0b2804fd3f7268194cd4a7e912232fc9d9585cc8334c3a3263b45a0dd3e922f6",
+      "digest": "sha256:2489eb6e35a918a18b7fff05b4dfe2c363f663c7a833835bcc0d05c70804b07f",
       "status": 200
     },
     {

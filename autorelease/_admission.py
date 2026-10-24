@@ -54,7 +54,7 @@ REQUIRED_PLAN_CHECKS = ["Script checks"]
 # own `expected-modules/<branch>.txt` (see `recipe_identity`). Inputs outside the
 # repository (the runner image, unpinned Homebrew packages) and the workflow definition
 # are deliberately not covered: they change without a reviewed recipe change, and
-# covering them would rebuild every release on an unrelated workflow edit.
+# covering them would rebuild every branch's newest release on an unrelated workflow edit.
 RECIPE_INPUT_PATHS = (
     ".spc-sha256",
     ".spc-version",

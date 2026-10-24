@@ -750,12 +750,15 @@ class AutoreleaseControlTests(unittest.TestCase):
         # A release that is already public is immutable here, and its badge is left alone.
         self.assertEqual([], publish("8.5.11-3", is_draft=False))
 
-    def test_rebuild_selection_is_deterministic_and_covers_every_published_version(self):
+    def test_rebuild_selection_rebuilds_only_the_newest_version_of_each_branch(self):
+        # Older patch versions keep their original binaries forever: rebuilding history
+        # would make CI time grow with every published version, and anyone pinned to an
+        # older patch already lacks that branch's later PHP fixes.
         current = "sha256:" + "c" * 64
         # The releases published before recipe identities existed record none.
         releases = [
             self._published(tag)
-            for tag in ("8.5.11", "8.5.10", "8.5.9", "8.5.8", "8.4.23", "8.3.32", "8.2.32")
+            for tag in ("8.5.11", "8.5.10", "8.5.9", "8.5.8", "8.4.23", "8.4.22", "8.3.32", "8.2.32", "8.2.31")
         ]
         maintained = ["8.2", "8.3", "8.4", "8.5"]
         order = []
@@ -764,19 +767,28 @@ class AutoreleaseControlTests(unittest.TestCase):
             _prefix, version, revision = key.split(":")
             releases.append(self._published(f"{version}-{revision}", current))
             self.assertLess(len(order), 10, "selection never converged")
-        # Each branch's newest version first, since branch shorthand resolves to it.
+        # Exactly one rebuild per maintained branch, newest version only, newest first.
         self.assertEqual(
             [
                 "recipe_rebuild:8.5.11:1",
                 "recipe_rebuild:8.4.23:1",
                 "recipe_rebuild:8.3.32:1",
                 "recipe_rebuild:8.2.32:1",
-                "recipe_rebuild:8.5.10:1",
-                "recipe_rebuild:8.5.9:1",
-                "recipe_rebuild:8.5.8:1",
             ],
             order,
         )
+        # An older version is never selected, with a stale identity or none, once its
+        # branch's newest version is current.
+        for older in (self._published("8.4.22"), self._published("8.4.22", "sha256:" + "d" * 64)):
+            self.assertIsNone(pending_recipe_rebuild([self._published("8.4.23", current), older], {"8.4": current}))
+        # A patch published by the current recipe needs no rebuild and retires the
+        # previous newest version from selection for good.
+        fresh = [self._published("8.4.26", current), self._published("8.4.23")]
+        self.assertIsNone(pending_recipe_rebuild(fresh, {"8.4": current}))
+        # A stale newest version is selected even while an older one records the current
+        # identity, and the older one is never selected in its place.
+        stale_newest = [self._published("8.4.26"), self._published("8.4.23", current)]
+        self.assertEqual("recipe_rebuild:8.4.26:1", pending_recipe_rebuild(stale_newest, {"8.4": current}))
         # A later recipe change makes the newest revision due again, one revision on.
         changed = "sha256:" + "d" * 64
         self.assertEqual("recipe_rebuild:8.5.11:2", pending_recipe_rebuild(releases, dict.fromkeys(maintained, changed)))
@@ -785,16 +797,15 @@ class AutoreleaseControlTests(unittest.TestCase):
             "recipe_rebuild:8.4.23:2",
             pending_recipe_rebuild(releases, {**dict.fromkeys(maintained, current), "8.4": changed}),
         )
-        # A patch published by the current recipe needs no rebuild.
-        fresh = [self._published("8.4.26", current), self._published("8.4.23")]
-        self.assertEqual("recipe_rebuild:8.4.23:1", pending_recipe_rebuild(fresh, {"8.4": current}))
-        self.assertIsNone(pending_recipe_rebuild(fresh[:1], {"8.4": current}))
         # Drafts and prereleases never count: a rebuild whose draft a failed transaction
         # left behind is selected again, and the transaction resumes that draft.
-        draft = [self._published("8.4.26", current), self._published("8.4.23"), self._published("8.4.23-1", current, draft=True)]
-        self.assertEqual("recipe_rebuild:8.4.23:1", pending_recipe_rebuild(draft, {"8.4": current}))
+        draft = [self._published("8.4.26"), self._published("8.4.23"), self._published("8.4.26-1", current, draft=True)]
+        self.assertEqual("recipe_rebuild:8.4.26:1", pending_recipe_rebuild(draft, {"8.4": current}))
         prerelease = [self._published("8.4.23-1", current, prerelease=True), self._published("8.4.23")]
         self.assertEqual("recipe_rebuild:8.4.23:1", pending_recipe_rebuild(prerelease, {"8.4": current}))
+        # A draft or prerelease of a later patch does not make it the branch's newest.
+        unreleased = [self._published("8.4.24", current, draft=True), self._published("8.4.25", current, prerelease=True)]
+        self.assertEqual("recipe_rebuild:8.4.23:1", pending_recipe_rebuild([*unreleased, self._published("8.4.23")], {"8.4": current}))
         # An EOL branch keeps its releases exactly as published.
         self.assertIsNone(pending_recipe_rebuild([self._published("8.1.33")], dict.fromkeys(maintained, current)))
         for malformed in ("8.5.9-0", "8.5.9-rc1", "v8.5.9", "8.5"):
@@ -893,7 +904,7 @@ class AutoreleaseControlTests(unittest.TestCase):
         head = git(ROOT, "rev-parse", "HEAD").stdout.strip()
         branch = json.loads((ROOT / "support-policy.json").read_text())["maintainedBranches"][-1]
         identity = recipe_identity(ROOT, head, branch)
-        releases = [self._published(f"{branch}.2", identity), self._published(f"{branch}.1")]
+        releases = [self._published(f"{branch}.2"), self._published(f"{branch}.1")]
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
             (root / "raw").mkdir()
@@ -902,13 +913,30 @@ class AutoreleaseControlTests(unittest.TestCase):
             manifest_path = root / "evidence-manifest.json"
             capture = {"captureId": "php_bin_releases", "status": 200, "digest": sha256_bytes(body), "bodyPath": "raw/php_bin_releases.body"}
             manifest_path.write_bytes(canonical_json({"schemaVersion": 1, "captures": [capture]}))
-            self.assertEqual(f"recipe_rebuild:{branch}.1:1", due_recipe_rebuild(manifest_path, ROOT, head))
+            self.assertEqual(f"recipe_rebuild:{branch}.2:1", due_recipe_rebuild(manifest_path, ROOT, head))
             manifest_path.write_bytes(canonical_json({"schemaVersion": 1, "captures": [{**capture, "status": 500}]}))
             self.assertIsNone(due_recipe_rebuild(manifest_path, ROOT, head))
             # Like the watcher, admission selects nothing while any other source is unhealthy.
             other = {"captureId": "php_release_feed", "status": 503, "digest": sha256_bytes(b""), "bodyPath": "raw/feed.body"}
             manifest_path.write_bytes(canonical_json({"schemaVersion": 1, "captures": [capture, other]}))
             self.assertIsNone(due_recipe_rebuild(manifest_path, ROOT, head))
+            # Once the newest version is current, an older version is never due, so a plan
+            # naming its rebuild is rejected even though that version records no identity.
+            current = canonical_json([self._published(f"{branch}.2", identity), self._published(f"{branch}.1")])
+            (root / "raw/php_bin_releases.body").write_bytes(current)
+            current_capture = {**capture, "digest": sha256_bytes(current)}
+            manifest_path.write_bytes(
+                canonical_json({"schemaVersion": 1, "manifestDigest": "sha256:" + "c" * 64, "captures": [current_capture]})
+            )
+            pending = due_recipe_rebuild(manifest_path, ROOT, head)
+            self.assertIsNone(pending)
+            older = full_plan(
+                action="recipe_rebuild",
+                actionKey=f"recipe_rebuild:{branch}.1:1",
+                releaseIntent={"version": f"{branch}.1-1", "sourceIdentifier": "php_bin_releases"},
+            )
+            with self.assertRaisesRegex(ControlError, "not the selected rebuild"):
+                _validate_plan_shape(older, manifest_path, set(), pending)
 
     def test_unprovable_release_records_are_not_recovered(self):
         manifest = self._releases_manifest()
