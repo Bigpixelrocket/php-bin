@@ -1,14 +1,22 @@
 name: Upstream canary
 
 # Builds what php-src has tagged but php-bin has not published, straight from each
-# tag, with the release recipe and its exact module gate: the newest unpublished
-# patch of every maintained branch, and the newest tag of any branch with no release
-# yet, from the next branch's first alpha on. php.net announces a patch days after
-# its tag and a branch months after its first pre-release, so an upstream change that
-# breaks the recipe fails here while there is still time to fix it, instead of in the
-# release the watcher admits. Nothing is published. A failure files or updates one
-# owner issue, which the next passing canary, or the first one with nothing left to
-# build, closes.
+# tag, with the release recipe and its module gate (see scripts/select-canary-builds):
+# the newest unpublished patch of every maintained branch exactly as its release
+# would build, and the next branch's newest tag, from its first alpha on, the way its
+# new-branch discovery will (an extension that does not compile is left out). php.net
+# announces a patch days after its tag and a branch months after its first
+# pre-release, so an upstream change that breaks the recipe fails here while there is
+# still time to fix it. Nothing is published. A failure files or updates one owner
+# issue, which the next passing canary, or the first one with nothing left to build,
+# closes. A discovery longer than one job stops itself and the next run resumes it
+# from what it left out (an Actions cache per mode and tag); until it finishes, the
+# issue stays as it is.
+#
+# A branch whose module list leaves extensions out is rebuilt with every extension
+# tried. One that compiles again is reported in its own issue, with the lines that
+# change in expected-modules/<branch>.txt; that pull request makes the watcher
+# rebuild the branch with it.
 on:
   schedule:
     - cron: "41 3,15 * * *"
@@ -55,11 +63,12 @@ jobs:
           echo "builds=$builds" >> "$GITHUB_OUTPUT"
 
   canary:
-    name: PHP ${{ matrix.build.version }} from its php-src tag
+    name: PHP ${{ matrix.build.version }} from its php-src tag (${{ matrix.build.mode }})
     needs: select
     if: needs.select.outputs.builds != '[]'
     runs-on: macos-26
-    timeout-minutes: 120
+    # A discovery can take hours; it stops itself before GitHub's six-hour limit.
+    timeout-minutes: 350
     strategy:
       fail-fast: false
       matrix:
@@ -69,22 +78,105 @@ jobs:
       PHP_SOURCE: tag
       VERSION: ${{ matrix.build.version }}
       BRANCH: ${{ matrix.build.branch }}
-      MODULES: ${{ matrix.build.modules }}
+      MODE: ${{ matrix.build.mode }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - name: Verify runner architecture
         run: test "$(uname -s)" = Darwin && test "$(uname -m)" = arm64
-      - name: Gate a branch without its own module list against the newest one
-        if: matrix.build.modules != matrix.build.branch
-        run: cp "expected-modules/$MODULES.txt" "expected-modules/$BRANCH.txt"
       - name: Install build dependencies
         run: scripts/install-build-deps.sh
       - name: Install pinned StaticPHP
         run: scripts/install-spc.sh
+      # The newest saved state of this mode's discovery of this exact tag: what an
+      # unfinished run left out, or an empty file once a run finished it.
+      - name: Restore an unfinished discovery
+        if: matrix.build.mode != 'release'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: canary/resume
+          key: canary-discovery-${{ matrix.build.mode }}-${{ matrix.build.version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: canary-discovery-${{ matrix.build.mode }}-${{ matrix.build.version }}-
       - name: Build and verify
-        run: scripts/build.sh "$VERSION" s4
+        id: build
+        run: |
+          mkdir -p canary
+          if [[ "$MODE" == "release" ]]; then
+            scripts/build.sh "$VERSION" s4
+            exit 0
+          fi
+          resumed=false
+          if [[ -s canary/resume/pending.txt ]]; then
+            export DISCOVER_RESUME="$PWD/canary/resume/pending.txt"
+            resumed=true
+          fi
+          set +e
+          DISCOVER_MODULE_LIST="$PWD/canary/modules.txt" \
+            DISCOVER_DEADLINE="$(( $(date +%s) + 290 * 60 ))" \
+            scripts/build.sh "$VERSION" s4
+          status=$?
+          set -e
+          if [[ "$status" == "75" ]]; then
+            # Everything it reached either built or was left out with a named cause.
+            # The next run resumes from here, and until one finishes this build
+            # proves nothing, so the report leaves the canary issue as it is.
+            mkdir -p canary/resume
+            cp canary/modules.txt.pending canary/resume/pending.txt
+            echo "$VERSION ($MODE)" > "canary/incomplete-$BRANCH-$MODE.txt"
+            echo "save=true" >> "$GITHUB_OUTPUT"
+            echo "Discovery for PHP $VERSION needs more than one job; the next canary run resumes it."
+            exit 0
+          fi
+          if [[ "$status" == "0" && "$resumed" == "true" ]]; then
+            # Finished: the next run of this tag starts over with every extension.
+            : > canary/resume/pending.txt
+            echo "save=true" >> "$GITHUB_OUTPUT"
+          fi
+          exit "$status"
+      - name: Save the discovery state for the next run
+        if: steps.build.outputs.save == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: canary/resume
+          key: canary-discovery-${{ matrix.build.mode }}-${{ matrix.build.version }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Retain an unfinished discovery
+        if: hashFiles('canary/incomplete-*.txt') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: canary-incomplete-${{ matrix.build.branch }}-${{ matrix.build.mode }}
+          path: canary/incomplete-*.txt
+          if-no-files-found: error
+          retention-days: 30
+      - name: Find left-out extensions that compile again
+        if: matrix.build.mode == 'recheck' && hashFiles('canary/modules.txt') != ''
+        run: |
+          # shellcheck disable=SC1091
+          source scripts/lib.sh
+          list="expected-modules/$BRANCH.txt"
+          LC_ALL=C comm -23 \
+            <(module_list_unbuilt "$list" | LC_ALL=C sort) \
+            <(module_list_unbuilt canary/modules.txt | LC_ALL=C sort) > canary/compiles.txt
+          if [[ -s canary/compiles.txt ]]; then
+            # A static or default-on extension also adds modules the list must
+            # expect; an off-by-default one adds none.
+            LC_ALL=C comm -13 \
+              <(module_list_modules "$list" | normalize_modules) \
+              <(module_list_modules canary/modules.txt | normalize_modules) > canary/adds.txt
+            remove="$(sed 's/^/!/' canary/compiles.txt | paste -sd, - | sed 's/,/, /g')"
+            add="$(paste -sd, - < canary/adds.txt | sed 's/,/, /g')"
+            echo "Left out of PHP $BRANCH but compiling again: $(paste -sd, - < canary/compiles.txt)"
+            echo "expected-modules/$BRANCH.txt: remove ${remove}; add ${add:-no line}" \
+              > "canary/compiles-again-$BRANCH.txt"
+          fi
+      - name: Retain left-out extensions that compile again
+        if: matrix.build.mode == 'recheck' && hashFiles('canary/compiles-again-*.txt') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: canary-compiles-again-${{ matrix.build.branch }}
+          path: canary/compiles-again-*.txt
+          if-no-files-found: error
+          retention-days: 30
 
   report:
     name: Report the canary result
@@ -102,6 +194,37 @@ jobs:
       BUILDS: ${{ needs.select.outputs.builds }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
+      - name: Download left-out extensions that compile again
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: canary-compiles-again-*
+          merge-multiple: true
+          path: compiles-again
+      # No continue-on-error: a pattern with no match downloads nothing and passes, so a
+      # failure here is a lost marker, which must stop the issue from closing.
+      - name: Download unfinished discoveries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: canary-incomplete-*
+          merge-multiple: true
+          path: incomplete
+      - name: Report left-out extensions that compile again
+        run: |
+          title="Upstream canary: a left-out PHP extension compiles again"
+          found="$(cat compiles-again/*.txt 2> /dev/null | LC_ALL=C sort || true)"
+          number="$(gh issue list --repo "$REPOSITORY" --state open --search "\"$title\" in:title" --json number,title \
+            | jq -r --arg title "$title" 'map(select(.title == $title)) | .[0].number // empty')"
+          if [[ -n "$found" ]]; then
+            body="$(printf 'These extensions are left out of a branch by a "!" line in expected-modules/<branch>.txt, but they now compile there. Make these changes to each list by pull request; the lines to add are the modules the canary build reports that the list does not expect yet, so the exact module comparison passes. The watcher then rebuilds the branch with the extensions.\n\n%s\n\nRun: %s\n' "- ${found//$'\n'/$'\n'- }" "$RUN_URL")"
+            if [[ -n "$number" ]]; then
+              gh issue comment "$number" --repo "$REPOSITORY" --body "$body"
+            elif [[ -n "$OWNER" ]]; then
+              gh issue create --repo "$REPOSITORY" --title "$title" --body "$body" --assignee "$OWNER"
+            else
+              gh issue create --repo "$REPOSITORY" --title "$title" --body "$body"
+            fi
+          fi
       - name: File, update, or close the canary issue
         run: |
           title="Upstream canary: a tagged PHP version does not build"
@@ -118,6 +241,13 @@ jobs:
               gh issue create --repo "$REPOSITORY" --title "$title" --body "$body"
             fi
             exit 1
+          fi
+          # A discovery still resuming has not built its tag yet, so it proves nothing
+          # either way; the issue closes once every selected build has finished.
+          unfinished="$(cat incomplete/*.txt 2> /dev/null | paste -sd, - | sed 's/,/, /g' || true)"
+          if [[ -n "$unfinished" ]]; then
+            echo "Still discovering, resumed by the next run: $unfinished. The canary issue stays as it is."
+            exit 0
           fi
           # An empty selection closes the issue too: nothing unpublished is left, so each tag
           # it reported was published (its release build passed) or its branch retired.

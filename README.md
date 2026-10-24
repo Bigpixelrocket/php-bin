@@ -150,12 +150,15 @@ the next run. Older patch versions keep their original binaries.
 
 For a new branch such as PHP `8.6`:
 
-The watcher adds the branch to `support-policy.json` and copies the newest
-maintained branch's module list to `expected-modules/<branch>.txt`, and
-`mise-php` regenerates its support snapshot from the new policy. The branch
-merges only after its first release builds and passes the exact module
-comparison; a module difference stops with an owner issue that names it, and
-the list is then corrected by pull request. Publication waits for readiness
+The watcher adds the branch to `support-policy.json` and writes
+`expected-modules/<branch>.txt` from a discovery build: whatever builds on the
+new branch, with a `!<extension>` line for each optional extension that does
+not compile there yet and was left out. `mise-php` regenerates its support
+snapshot from the new policy. The branch merges only after its first release
+builds and passes the exact module comparison against that list, and every
+later release of the branch is held to the same list. The upstream canary
+reports when a left-out extension compiles again, with the list edit that
+adds it back by pull request. Publication waits for readiness
 records tied to the same action key, evidence digests, php-bin policy commit,
 and exact repository commits.
 

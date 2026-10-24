@@ -37,6 +37,7 @@
     "scripts/lib.sh",
     "scripts/install-spc.sh",
     "scripts/install-build-deps.sh",
+    "scripts/attribute-build-failure",
     ".spc-version",
     ".spc-sha256"
   ]

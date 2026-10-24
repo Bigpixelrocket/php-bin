@@ -1,8 +1,11 @@
 """Deterministic repository edits for admitted lifecycle plans.
 
-A `new_branch` plan adds `expected-modules/<branch>.txt`, copied byte for byte from the
-newest branch the accepted policy already maintains, and regenerates
-`support-policy.json` with the branch added. A `branch_eol` plan regenerates the policy
+A `new_branch` plan adds `expected-modules/<branch>.txt` and regenerates
+`support-policy.json` with the branch added. The module list is the one the branch's
+discovery build produced (`DISCOVER_MODULE_LIST` in `scripts/build.sh`): what actually
+built, plus a `!<extension>` line for each extension that did not compile and was left
+out. Without a discovered list it is copied byte for byte from the newest branch the
+accepted policy already maintains. A `branch_eol` plan regenerates the policy
 with the branch removed and leaves its module list in place, so historical rebuild
 inputs stay reviewable. The new policy is bound to the plan's own evidence digests and
 action key, and accepted at the capture time, so the same admitted plan always
@@ -15,9 +18,10 @@ records the exact commit already on main.
 
 These edits are proposals, not authority. `_admission.seal_patch` re-checks every path
 against the plan, the policy against its invariants and evidence, and the clean
-validation and exact-SHA merge gates run after it. A copied module list that does not
-match the new branch's real build fails the exact module comparison of that build
-and stops with an owner issue; a human then corrects the list by pull request.
+validation and exact-SHA merge gates run after it. A module list that does not match
+the new branch's real build fails the exact module comparison of that build and stops
+with an owner issue. A list already on the base, such as one a human corrected by pull
+request, is never overwritten.
 """
 
 from __future__ import annotations
@@ -38,6 +42,25 @@ from ._validation import ControlError, contained_path, require, sha256_file
 
 
 LIFECYCLE_ACTIONS = frozenset({"new_branch", "branch_eol"})
+MODULE_LINE_RE = re.compile(r"!?[a-z][a-z0-9_]*")
+
+
+def canonical_module_list(text: str) -> str:
+    """Validate a discovered module list and return it in its one canonical form.
+
+    Every line is a normalized module name or `!<extension>`; at least one module is
+    listed, nothing repeats, and no name is both built and left out. The canonical form
+    lists the modules sorted, then the left-out extensions sorted, so the same build
+    always yields the same bytes.
+    """
+    lines = text.splitlines()
+    require(all(MODULE_LINE_RE.fullmatch(line) for line in lines), "module list has an invalid line")
+    require(len(lines) == len(set(lines)), "module list repeats a line")
+    modules = sorted(line for line in lines if not line.startswith("!"))
+    unbuilt = sorted(line[1:] for line in lines if line.startswith("!"))
+    require(bool(modules), "module list names no module")
+    require(not set(modules) & set(unbuilt), "module list both builds and leaves out the same name")
+    return "".join(f"{name}\n" for name in modules) + "".join(f"!{name}\n" for name in unbuilt)
 
 
 def _branch_key(branch: str) -> tuple[int, ...]:
@@ -74,6 +97,7 @@ def apply_lifecycle_plan(
     repo: pathlib.Path,
     plan: dict[str, Any],
     manifest: dict[str, Any],
+    module_list: str | None = None,
 ) -> list[str]:
     """Write the edits one admitted lifecycle plan requires, and return the changed paths.
 
@@ -81,14 +105,17 @@ def apply_lifecycle_plan(
     manifest the plan was admitted against. The accepted policy in `repo` must still
     validate, and a plan for any other action is rejected: only lifecycle work edits the
     repository. A lifecycle resume writes nothing and returns no path, once its edit is
-    verified present and no event record exists for it.
+    verified present and no event record exists for it. `module_list` is the new
+    branch's discovered list; only a `new_branch` edit that writes a list accepts one.
     """
     action = plan.get("action")
     require(action in LIFECYCLE_ACTIONS, f"no deterministic repository edit exists for action: {action}")
     require(plan.get("editsRequired") is True, "lifecycle plan does not require edits")
     if is_lifecycle_resume(plan):
+        require(module_list is None, "a lifecycle resume writes no module list")
         validate_lifecycle_on_base(repo, plan, recorded_action_keys(repo / "autorelease-events"))
         return []
+    require(module_list is None or action == "new_branch", "only a new branch takes a module list")
     key = plan.get("actionKey", "")
     match = re.fullmatch(r"(?:new_branch:(\d+\.\d+)|branch_eol:(\d+\.\d+):\d{4}-\d{2}-\d{2})", key)
     require(bool(match), f"lifecycle action key is invalid: {key}")
@@ -105,10 +132,17 @@ def apply_lifecycle_plan(
         older = [item for item in maintained if _branch_key(item) < _branch_key(branch)]
         require(bool(older), f"no maintained branch precedes PHP {branch} to copy its module list from")
         target = contained_path(repo, f"expected-modules/{branch}.txt", "module list path")
+        require(
+            module_list is None or not target.exists(),
+            f"PHP {branch} already has a module list, which a discovered one never replaces",
+        )
         if not target.exists():
-            source = contained_path(repo, f"expected-modules/{older[-1]}.txt", "module list path")
-            require(source.is_file(), f"module list of PHP {older[-1]} is missing")
-            target.write_bytes(source.read_bytes())
+            if module_list is not None:
+                target.write_text(canonical_module_list(module_list))
+            else:
+                source = contained_path(repo, f"expected-modules/{older[-1]}.txt", "module list path")
+                require(source.is_file(), f"module list of PHP {older[-1]} is missing")
+                target.write_bytes(source.read_bytes())
             changed.append(f"expected-modules/{branch}.txt")
         branches = sorted({*maintained, branch}, key=_branch_key)
     else:

@@ -5,17 +5,20 @@ For every branch that is maintained, or newer than every maintained branch, the
 canary builds the newest php-src tag php-bin has not published:
 
 - a maintained branch with releases: its newest stable tag, when that is newer
-  than the newest version php-bin published on it;
-- a branch with no php-bin release yet (the next PHP branch, from its first
-  alpha, or one whose first release is still in flight): its newest tag of any
-  stability, so a recipe break shows up long before the branch's first release.
+  than the newest version php-bin published on it (`release`: the exact build a
+  release would run, against the branch's module list);
+- a branch with no module list yet (the next PHP branch, from its first alpha):
+  its newest tag of any stability, built the way its `new_branch` edit will
+  discover its list (`discover`: an extension that does not compile is left out).
 
-Nothing here names a PHP version: branches come from the accepted policy and the
-tags themselves. A branch without its own module list is gated against the
-newest list in `expected-modules/`, which is exactly the list a `new_branch`
-edit would copy for it.
+A maintained branch whose module list leaves extensions out (`!` lines) is also
+rebuilt at its newest stable tag with every extension tried (`recheck`), so the
+canary can say when a left-out extension compiles again.
 
-Prints a JSON array of {"version", "branch", "modules"} objects.
+Nothing here names a PHP version: branches come from the accepted policy, the
+module lists, and the tags themselves.
+
+Prints a JSON array of {"version", "branch", "mode"} objects.
 """
 
 import argparse
@@ -49,13 +52,13 @@ def branch_of(version: str) -> str:
     return ".".join(version.split(".")[:2])
 
 
-def select(maintained: list[str], tags: list[str], releases: list[str], module_lists: list[str]) -> list[dict]:
+def select(
+    maintained: list[str], tags: list[str], releases: list[str], module_lists: dict[str, bool]
+) -> list[dict]:
+    """`module_lists` maps each branch with a list to whether it leaves anything out."""
     if not maintained:
         raise ValueError("the policy maintains no branch")
-    if not module_lists:
-        raise ValueError("there is no module list to gate a build against")
     newest_maintained = max(maintained, key=branch_key)
-    newest_list = max(module_lists, key=branch_key)
 
     published: dict[str, str] = {}
     for tag in releases:
@@ -84,14 +87,14 @@ def select(maintained: list[str], tags: list[str], releases: list[str], module_l
 
     builds = []
     for branch in sorted(newest_tag, key=branch_key):
-        if branch in published:
-            version = newest_stable.get(branch)
-            if version is None or tag_key(version) <= tag_key(published[branch]):
-                continue
-        else:
-            version = newest_tag[branch]
-        modules = branch if branch in module_lists else newest_list
-        builds.append({"version": version, "branch": branch, "modules": modules})
+        if branch not in module_lists:
+            builds.append({"version": newest_tag[branch], "branch": branch, "mode": "discover"})
+            continue
+        stable = newest_stable.get(branch)
+        if stable and (branch not in published or tag_key(stable) > tag_key(published[branch])):
+            builds.append({"version": stable, "branch": branch, "mode": "release"})
+        if stable and branch in maintained and module_lists[branch]:
+            builds.append({"version": stable, "branch": branch, "mode": "recheck"})
     return builds
 
 
@@ -106,7 +109,11 @@ def main() -> int:
         maintained = json.loads(args.policy.read_text())["maintainedBranches"]
         for branch in maintained:
             branch_key(branch)
-        module_lists = [path.stem for path in args.modules_dir.glob("*.txt") if BRANCH_RE.match(path.stem)]
+        module_lists = {
+            path.stem: any(line.lstrip().startswith("!") for line in path.read_text().splitlines())
+            for path in args.modules_dir.glob("*.txt")
+            if BRANCH_RE.match(path.stem)
+        }
         builds = select(
             maintained,
             args.tags.read_text().split(),

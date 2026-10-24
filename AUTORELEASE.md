@@ -336,13 +336,27 @@ cascade drains.
 
 `Upstream canary` (`.github/workflows/upstream-canary.yml`, twice a day)
 builds what php-src has tagged but php-bin has not published, straight from
-each tag, with the release recipe and its exact module gate, in a read-only
-job. `scripts/select-canary-builds` picks the newest unpublished stable tag of
-every maintained branch, and the newest tag of any stability for a branch with
-no release yet, which covers the next PHP branch from its first alpha. A branch
-without its own module list is gated against the newest list, exactly the one
-a `new_branch` edit would copy. Nothing names a PHP version: branches come
-from the accepted policy and the tags themselves.
+each tag, with the release recipe and its module gate, in a read-only job. `scripts/select-canary-builds` picks the newest unpublished stable tag of
+every maintained branch, built exactly as its release would be, and the newest
+tag of any stability for a branch with no module list yet, which covers the
+next PHP branch from its first alpha. That one is built the way its
+`new_branch` discovery will be (see [Unattended lifecycle](#unattended-lifecycle)),
+so it fails only when a release would. Nothing names a PHP version: branches
+come from the accepted policy, the module lists, and the tags themselves.
+
+A maintained branch whose module list leaves extensions out is also rebuilt at
+its newest stable tag with every extension tried. An extension that compiles
+there again is reported in one owner issue titled
+`Upstream canary: a left-out PHP extension compiles again`, with the exact
+edit to `expected-modules/<branch>.txt`: its `!` line removed and, for a
+static or default-on extension, the modules it adds to `php -m`. That pull
+request changes the branch's recipe identity, so the watcher rebuilds the
+branch with it.
+
+A discovery or recheck that does not finish within one job stops itself, as
+`new_branch` discovery passes do, and the next canary run resumes it from what
+it left out (an Actions cache per mode and tag). Until one finishes, that
+build proves nothing, so the canary issue below stays as it is.
 
 php.net announces a patch days after its tag and a branch months after its
 first pre-release, so an upstream change that breaks the recipe fails here
@@ -489,20 +503,46 @@ validators, and policy files all accept any `<major>.<minor>`, so PHP `8.6`,
 `9.0`, and `10.0` all travel the same path with no code change.
 
 When upstream evidence first shows a new branch, `autorelease-implement.yml`
-runs `scripts/apply-autorelease-plan`: it copies the newest maintained
-branch's `expected-modules/<branch>.txt` byte for byte (the only per-branch
-recipe input; `stages/` and `patches/` are shared by every branch) and regenerates `support-policy.json` with the branch added, bound to
-the plan's evidence digests and action key and accepted at the capture time.
-The sealed edit is validated in a clean checkout, and the branch's first
-release is then built for real at the validated commit. Only an exact module
-comparison pass lets it merge. When the new branch builds a different module
-set, the run stops without merging and the owner issue for the
-`new_branch:<branch>` key states the exact missing (`-`) and unexpected (`+`)
-modules; a human corrects `expected-modules/<branch>.txt` by pull request, and
-the next watcher run retries with that list, which the edit never overwrites.
-Until then each watcher run with no patch due retries the same build and
-fails the same way; patches on maintained branches go first and never wait
-for it.
+first learns the branch's module list from a discovery build at the admitted
+base (`DISCOVER_MODULE_LIST` in `scripts/build.sh`, read-only like every
+build). Every stage extension is tried. When the build fails and a compiler
+error points into an extension's source (`scripts/attribute-build-failure`),
+that extension is left out, with every shared extension that requires it, and
+the build is retried with the libraries already built. An error inside one of
+PHP's own headers belongs to the extension source that included it, a
+`configure: error:` belongs to the shared extension whose own configure run
+failed (for example one that refuses an unsupported PHP version), and an
+error in an extension already left out means StaticPHP built it again as a
+dependency, so the tried extensions that depend on it (its own
+`spc dev:extensions` table) are left out instead. An error that names no
+extension, in PHP itself or a library, fails the run instead of guessing.
+StaticPHP stops at the first extension that fails, so a branch most PECL
+extensions do not support yet takes one attempt per extension: PHP 8.6.0RC4
+needed about two dozen. Discovery therefore runs as up to three passes of
+`.github/workflows/autorelease-discover.yml`, each stopping itself before
+GitHub's six-hour job limit (`DISCOVER_DEADLINE`) and handing what it left out
+to the next (`DISCOVER_RESUME`). When a retry fails with nothing to blame on
+libraries built for a larger library set, they are rebuilt once, since a
+library such as libcurl can still link against one that is no longer built. The
+list is what then built and passed the gate, plus a `!<extension>` line for
+each extension left out. New core modules a branch adds are simply part of
+what built.
+
+`scripts/apply-autorelease-plan` writes that list as
+`expected-modules/<branch>.txt` (the only per-branch recipe input; `stages/`
+and `patches/` are shared by every branch) in its canonical form, and
+regenerates `support-policy.json` with the branch added, bound to the plan's
+evidence digests and action key and accepted at the capture time. The sealed
+edit is validated in a clean checkout, and the branch's first release is then
+built for real at the validated commit, which must pass the exact module
+comparison against the list. Every later build of the branch reads the same
+list: a `!` line keeps the extension out, and the comparison stays exact, so a
+patch release never silently loses an extension the branch shipped. A list
+already on the base, such as one corrected by pull request, is used as it is
+and never rediscovered. A run that still fails stops without merging, and the
+owner issue for the `new_branch:<branch>` key carries the failure; the next
+watcher run with no patch due retries it, and patches on maintained branches
+go first and never wait for it.
 `mise-php` then regenerates `support-snapshot.json` and `lib/policy.lua`
 from the merged policy with its own deterministic scripts. The readiness and
 event records then merge on their own: `autorelease-events/`, `autorelease-state/`, and `mise-php`'s

@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""Name the extensions a failed StaticPHP build's compiler errors point into.
+
+Reads the logs StaticPHP wrote for the failed invocation and prints, one per line,
+every extension from `--extensions` that a compiler error (`<file>:<line>: error:`)
+or a failed make target (`*** [<file>] Error`) names by its source directory. An
+error inside a shared header, such as one of PHP's own installed headers, belongs to
+the source file that included it: clang prints that chain (`In file included from
+<file>:<line>:`) right before the diagnostic it applies to. A `configure: error:`
+belongs to the extension the configure run before it builds, when that run names
+exactly one (`--enable-<ext>=shared` or `--with-<ext>=shared`, as a shared
+extension's own configure does); PHP's own configure names many and stays
+unattributed. Source directories are
+`<build>/source/php-src/ext/<dir>/...`, `<build>/source/<dir>/...`, or a make
+target `ext/<dir>/...` relative to php-src. A directory names an extension when it
+equals the extension's name, optionally with StaticPHP's `ext-` prefix or `-src`
+suffix and with dashes for underscores. StaticPHP extracts libraries to
+`<build>/source/<library>` too, and some share a name with an extension (zstd,
+curl, openssl), so a `<build>/source/<dir>` that is a library a tried extension
+depends on or suggests (the `lib-depends` and `lib-suggests` columns of
+`--dependencies`) names nothing; without that table no such directory names
+anything.
+
+StaticPHP adds every extension a requested one depends on (its `ext-depends`), so
+an extension already left out can be built again behind the caller's back and fail
+again. When an error names one of `--unbuilt`, the extensions to leave out are the
+tried ones that depend on it, directly or through another tried extension, read
+from `--dependencies`: the output of `spc dev:extensions <tried extensions>`.
+
+Nothing else is guessed. An error in PHP itself, in a library, or in a file no
+extension owns names nothing, and an empty answer makes the caller fail the build
+rather than leave out something that did not cause it.
+"""
+
+import argparse
+import pathlib
+import re
+import sys
+
+ERROR_RE = re.compile(r"(?P<path>[^\s'\"():]+):\d+(?::\d+)?: (?:fatal )?error:")
+DIAGNOSTIC_RE = re.compile(r"[^\s'\"():]+:\d+(?::\d+)?: (?:fatal error|error|warning|note):")
+INCLUDED_RE = re.compile(r"^(?:In file included from|\s+from) (?P<path>[^\s'\"():]+):\d+[:,]")
+MAKE_RE = re.compile(r"\*\*\* \[(?P<path>[^\]\s]+)\] Error \d+")
+CONFIGURE_RUN_RE = re.compile(r"\./configure\b")
+CONFIGURE_FLAG_RE = re.compile(r"--(?:enable|with)-(?P<name>[a-z0-9][a-z0-9_-]*)=shared\b")
+EXTENSION_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def dependencies_from_table(text: str) -> tuple[dict[str, set[str]], set[str]]:
+    """Read `spc dev:extensions`, by column header.
+
+    Returns each extension's `ext-depends`, and every library any of them depends on
+    or suggests.
+    """
+    rows = [
+        [cell.strip() for cell in ANSI_RE.sub("", line).strip().strip("│").split("│")]
+        for line in text.splitlines()
+        if ANSI_RE.sub("", line).strip().startswith("│")
+    ]
+    if not rows:
+        return {}, set()
+    header = rows[0]
+    columns = ("name", "ext-depends", "lib-depends", "lib-suggests")
+    if any(column not in header for column in columns):
+        raise ValueError(f"the extension table lacks one of the columns {', '.join(columns)}")
+    name, depends, libraries, suggested = (header.index(column) for column in columns)
+    rows = [row for row in rows[1:] if len(row) == len(header)]
+
+    def items(cell: str) -> set[str]:
+        return {item.strip() for item in cell.split(",") if item.strip()}
+
+    graph = {row[name]: items(row[depends]) for row in rows}
+    return graph, {library for row in rows for library in items(row[libraries]) | items(row[suggested])}
+
+
+def dependents(tried: set[str], dropped: set[str], graph: dict[str, set[str]]) -> set[str]:
+    """Tried extensions that depend on a dropped one, directly or through each other."""
+    result: set[str] = set()
+    targets = set(dropped)
+    while True:
+        more = {name for name in tried - result if graph.get(name, set()) & targets}
+        if not more:
+            return result
+        result |= more
+        targets |= more
+
+
+def directory_of(path: str, source_dir: str, libraries: set[str] | None) -> str | None:
+    """Return the extension source directory a path belongs to, or None for anything else.
+
+    `libraries` are the library source directories to tell apart from an extension's;
+    None means they are unknown, and then only php-src's own `ext/` directories count.
+    """
+    if path.startswith(source_dir + "/"):
+        parts = path[len(source_dir) + 1 :].split("/")
+        if parts[0] == "php-src":
+            return parts[2] if len(parts) > 3 and parts[1] == "ext" else None
+        if libraries is None or parts[0] in libraries:
+            return None
+        return parts[0] if len(parts) > 1 else None
+    parts = path.split("/")
+    if len(parts) > 2 and parts[0] == "ext":
+        return parts[1]
+    return None
+
+
+def extension_for(directory: str, extensions: set[str]) -> str | None:
+    name = directory.lower()
+    name = name.removeprefix("ext-").removesuffix("-src").replace("-", "_")
+    return name if name in extensions else None
+
+
+def attribute(lines, source_dir: str, extensions: set[str], libraries: set[str] | None = None) -> list[str]:
+    found = set()
+    included_from: list[str] = []
+    configuring: str | None = None
+
+    def owner(path: str) -> str | None:
+        directory = directory_of(path, source_dir, libraries)
+        return extension_for(directory, extensions) if directory else None
+
+    for line in lines:
+        if CONFIGURE_RUN_RE.search(line) and "configure: error:" not in line:
+            names = {match.group("name").replace("-", "_") for match in CONFIGURE_FLAG_RE.finditer(line)}
+            configuring = names.pop() if len(names) == 1 else None
+        if "configure: error:" in line and configuring in extensions:
+            found.add(configuring)
+        included = INCLUDED_RE.match(line)
+        if included:
+            if line.startswith("In file included from"):
+                included_from = []
+            included_from.append(included.group("path"))
+            continue
+        error = ERROR_RE.search(line)
+        if error:
+            # The error's own file first, then the files that included it.
+            for path in (error.group("path"), *included_from):
+                extension = owner(path)
+                if extension:
+                    found.add(extension)
+                    break
+        for match in MAKE_RE.finditer(line):
+            extension = owner(match.group("path"))
+            if extension:
+                found.add(extension)
+        # An include chain belongs to the one diagnostic printed right after it.
+        if DIAGNOSTIC_RE.search(line):
+            included_from = []
+    return sorted(found)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--log-dir", type=pathlib.Path, required=True)
+    parser.add_argument("--extensions", required=True, help="comma-separated extensions the build tried")
+    parser.add_argument("--unbuilt", default="", help="comma-separated extensions already left out")
+    parser.add_argument("--dependencies", type=pathlib.Path, help="output of spc dev:extensions <tried>")
+    args = parser.parse_args()
+    extensions = {name for name in args.extensions.split(",") if name}
+    unbuilt = {name for name in args.unbuilt.split(",") if name} - extensions
+    invalid = sorted(name for name in extensions | unbuilt if not EXTENSION_RE.match(name))
+    if invalid:
+        print(f"invalid extension names: {', '.join(invalid)}", file=sys.stderr)
+        return 1
+    graph: dict[str, set[str]] = {}
+    libraries: set[str] | None = None
+    if args.dependencies:
+        try:
+            graph, libraries = dependencies_from_table(args.dependencies.read_text())
+        except (OSError, ValueError) as error:
+            print(f"cannot read extension dependencies: {error}", file=sys.stderr)
+            return 1
+    # StaticPHP builds under <build>/source and logs to <build>/log, with the
+    # build directory spelled as it resolved it, so both spellings are matched.
+    build_dir = args.log_dir.resolve().parent
+    found = set()
+    for spelling in {str(args.log_dir.absolute().parent), str(build_dir)}:
+        for log in sorted(args.log_dir.glob("spc.*.log")):
+            with log.open(errors="replace") as handle:
+                found.update(attribute(handle, f"{spelling}/source", extensions | unbuilt, libraries))
+    culprits = found & extensions
+    pulled_back = found & unbuilt
+    if pulled_back:
+        culprits |= dependents(extensions, pulled_back, graph)
+    for name in sorted(culprits):
+        print(name)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

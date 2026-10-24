@@ -2180,7 +2180,9 @@ class AutoreleaseControlTests(unittest.TestCase):
                      "scripts/lib.sh",
                      # Pin the compiler toolchain that produces published binaries.
                      "scripts/install-spc.sh", "scripts/install-build-deps.sh",
-                     ".spc-version", ".spc-sha256"):
+                     ".spc-version", ".spc-sha256",
+                     # Decides which extensions a new branch's unattended release leaves out.
+                     "scripts/attribute-build-failure"):
             self.assertTrue(path_is_protected(path), path)
 
     def test_codeowners_covers_every_protected_script(self):

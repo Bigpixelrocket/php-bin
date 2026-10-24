@@ -133,8 +133,9 @@ if [[ -f "$KIT_INCLUDE/ext/simdjson/src/simdjson_bindings_defs.h" ]]; then
 fi
 
 # Ship exactly the listed shared extensions: a missing or unlisted .so means
-# the build and the list the gate verified have drifted apart.
-cut -f1 <<< "$SHARED_ROWS" | LC_ALL=C sort > "$TEMP_DIR/listed.txt"
+# the build and the list the gate verified have drifted apart. A branch can
+# leave every shared extension out, and then ships none.
+awk -F '\t' 'NF { print $1 }' <<< "$SHARED_ROWS" | LC_ALL=C sort > "$TEMP_DIR/listed.txt"
 find "$BUILDROOT/modules" -maxdepth 1 -name '*.so' -exec basename {} .so \; 2>/dev/null \
   | LC_ALL=C sort > "$TEMP_DIR/built.txt"
 if ! diff -u "$TEMP_DIR/listed.txt" "$TEMP_DIR/built.txt" >&2; then
@@ -196,15 +197,15 @@ awk -F '\t' -v release="$RELEASE_TAG" -v php="$PHP_PATCH_VERSION" '
   BEGIN {
     printf "{\n  \"schemaVersion\": 1,\n  \"release\": \"%s\",\n  \"phpVersion\": \"%s\",\n  \"extensions\": [", release, php
   }
-  {
+  NF {
     requires = ""
     if ($4 != "-") {
       count = split($4, names, ",")
       for (i = 1; i <= count; i++) requires = requires (i > 1 ? ", " : "") "\"" names[i] "\""
     }
-    printf "%s\n    {\"name\": \"%s\", \"zend\": %s, \"default\": %s, \"requires\": [%s]}", (NR > 1 ? "," : ""), $1, ($3 == "zend_extension" ? "true" : "false"), ($2 == "on" ? "true" : "false"), requires
+    printf "%s\n    {\"name\": \"%s\", \"zend\": %s, \"default\": %s, \"requires\": [%s]}", (listed++ ? "," : ""), $1, ($3 == "zend_extension" ? "true" : "false"), ($2 == "on" ? "true" : "false"), requires
   }
-  END { printf "\n  ]\n}\n" }
+  END { printf "%s]\n}\n", (listed ? "\n  " : "") }
 ' <<< "$SHARED_ROWS" > "$PACKAGE/share/php-bin/manifest.json"
 
 # Compiled binaries keep source file paths for assertion messages, as every

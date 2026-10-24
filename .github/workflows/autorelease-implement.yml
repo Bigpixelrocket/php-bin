@@ -45,9 +45,97 @@ jobs:
             echo "base_sha=$BASE_SHA"
           } >> "$GITHUB_OUTPUT"
 
+  # A new branch learns its module list from a discovery build before its edit is
+  # sealed: every stage extension is tried, and one that does not compile there is
+  # left out and named in the list with a `!` line (DISCOVER_MODULE_LIST in
+  # scripts/build.sh). A list already on the base, such as one corrected by pull
+  # request, is used as it is; an EOL or a resume writes no list.
+  discovery-scope:
+    name: Decide whether the new branch needs discovery
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      discover: ${{ steps.decide.outputs.discover }}
+      version: ${{ steps.decide.outputs.version }}
+      action_key: ${{ steps.decide.outputs.action_key }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.preflight.outputs.base_sha }}
+          persist-credentials: false
+      - name: Download admitted classification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ needs.preflight.outputs.run_id }}
+        run: gh run download "$RUN_ID" --name "autorelease-investigation-$RUN_ID" --dir autorelease-run
+      - name: Decide
+        id: decide
+        run: |
+          plan=autorelease-run/autorelease-plan.json
+          action_key="$(jq -r .actionKey "$plan")"
+          ./autorelease/control.py action-filename "$action_key" > /dev/null
+          version="$(jq -r '.releaseIntent.version // ""' "$plan")"
+          discover=false
+          if [[ "$(jq -r .action "$plan")" == "new_branch" ]] \
+            && jq -e '[.allowedPaths[]?[]] | length > 0' "$plan" > /dev/null; then
+            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            if [[ ! -e "expected-modules/${version%.*}.txt" ]]; then
+              discover=true
+            fi
+          fi
+          echo "Discovery needed: $discover"
+          {
+            echo "discover=$discover"
+            echo "version=$version"
+            echo "action_key=$action_key"
+          } >> "$GITHUB_OUTPUT"
+
+  # Discovery runs in up to three passes (autorelease-discover.yml), each resuming
+  # from what the one before left out, so it can outlast one job's time limit. Every
+  # pass always runs, as a no-op when it has nothing to do.
+  discover-1:
+    name: Discover the new branch's modules, pass 1
+    needs: [preflight, discovery-scope]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/autorelease-discover.yml
+    with:
+      needed: ${{ needs.discovery-scope.outputs.discover == 'true' }}
+      base_sha: ${{ needs.preflight.outputs.base_sha }}
+      version: ${{ needs.discovery-scope.outputs.version }}
+      pass: "1"
+      final: false
+
+  discover-2:
+    name: Discover the new branch's modules, pass 2
+    needs: [preflight, discovery-scope, discover-1]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/autorelease-discover.yml
+    with:
+      needed: ${{ needs.discover-1.outputs.pending == 'true' }}
+      base_sha: ${{ needs.preflight.outputs.base_sha }}
+      version: ${{ needs.discovery-scope.outputs.version }}
+      pass: "2"
+      final: false
+
+  discover-3:
+    name: Discover the new branch's modules, pass 3
+    needs: [preflight, discovery-scope, discover-2]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/autorelease-discover.yml
+    with:
+      needed: ${{ needs.discover-2.outputs.pending == 'true' }}
+      base_sha: ${{ needs.preflight.outputs.base_sha }}
+      version: ${{ needs.discovery-scope.outputs.version }}
+      pass: "3"
+      final: true
+
   implement:
     name: Deterministic lifecycle edit and sealing
-    needs: preflight
+    needs: [preflight, discovery-scope, discover-1, discover-2, discover-3]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -91,12 +179,25 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$BASE_SHA"
           test "$(jq -r .preconditions.phpBinHead autorelease-run/autorelease-plan.json)" = "$BASE_SHA"
+      - name: Download the discovered module list
+        if: needs.discovery-scope.outputs.discover == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: discovered-modules-${{ github.run_id }}
+          path: ${{ runner.temp }}/discovered
       - name: Apply the admitted lifecycle edit
+        env:
+          DISCOVERED: ${{ needs.discovery-scope.outputs.discover }}
         run: |
+          module_list=()
+          if [[ "$DISCOVERED" == "true" ]]; then
+            module_list=(--module-list "$RUNNER_TEMP/discovered/modules.txt")
+          fi
           ./scripts/apply-autorelease-plan \
             --plan autorelease-run/autorelease-plan.json \
             --manifest autorelease-run/evidence/evidence-manifest.json \
-            --repo .
+            --repo . \
+            "${module_list[@]}"
       - name: Seal exact deterministic diff
         id: sealed
         env:
@@ -519,8 +620,8 @@ jobs:
   # diff, so the owner can correct expected-modules/<branch>.txt by pull request.
   notify-failure:
     name: Notify actionable implementation failure
-    needs: [preflight, implement, validate, build-new-branch, merge]
-    if: always() && needs.preflight.result == 'success' && (needs.implement.result == 'failure' || needs.validate.result == 'failure' || needs['build-new-branch'].result == 'failure' || needs.merge.result == 'failure')
+    needs: [preflight, discovery-scope, discover-1, discover-2, discover-3, implement, validate, build-new-branch, merge]
+    if: always() && needs.preflight.result == 'success' && (needs['discovery-scope'].result == 'failure' || needs['discover-1'].result == 'failure' || needs['discover-2'].result == 'failure' || needs['discover-3'].result == 'failure' || needs.implement.result == 'failure' || needs.validate.result == 'failure' || needs['build-new-branch'].result == 'failure' || needs.merge.result == 'failure')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -542,8 +643,8 @@ jobs:
           path: new-branch-build
       - name: Create a structured event keyed on the admitted action
         env:
-          ACTION_KEY: ${{ needs.implement.outputs.action_key }}
-          VERSION: ${{ needs.implement.outputs.version }}
+          ACTION_KEY: ${{ needs.implement.outputs.action_key || needs['discovery-scope'].outputs.action_key }}
+          VERSION: ${{ needs.implement.outputs.version || needs['discovery-scope'].outputs.version }}
           BUILD_RESULT: ${{ needs['build-new-branch'].result }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
