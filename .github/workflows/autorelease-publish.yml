@@ -413,8 +413,11 @@ jobs:
           ref: ${{ needs.release.outputs.mise_commit }}
           path: mise-php
           persist-credentials: false
-      # mise installs no tools here. Without the cache it never runs a mise binary
-      # another job could have saved.
+      # mise installs the Python, ShellCheck, and jq pinned in php-bin's mise.lock
+      # (checksums verified) and puts them on PATH, so the artifact server below runs
+      # on the Python 3.12 that CI tests. The install step then points mise at empty
+      # folders, so the draft PHP installs on its own. Without the cache, no mise
+      # binary or tool comes from a cache another job could have saved.
       - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
           github_token: ${{ github.token }}
