@@ -643,6 +643,13 @@ class NewBranchDiscoveryWorkflowTests(unittest.TestCase):
             {leg["platform"]: leg["runner"] for leg in build["strategy"]["matrix"]["include"]},
         )
         self.assertEqual({"contents": "read"}, build["permissions"])
+        # Each Linux leg runs the publish smoke test before the edit can merge.
+        smoke = self.step(build, "Package and smoke test on Linux distributions")
+        self.assertEqual("startsWith(matrix.platform, 'linux-')", smoke["if"])
+        self.assertNotIn("github.token", json.dumps(smoke))
+        self.assertIn('./scripts/smoke-test-linux.sh "$archive" "expected-modules/${VERSION%.*}.txt"', smoke["run"])
+        names = [step.get("name") for step in build["steps"]]
+        self.assertLess(names.index("Build and compare modules exactly"), names.index("Package and smoke test on Linux distributions"))
         retained = self.step(build, "Retain the module comparison")
         self.assertEqual("new-branch-build-${{ github.run_id }}-${{ matrix.platform }}", retained["with"]["name"])
         combine = self.step(self.jobs["notify-failure"], "Combine the platforms' module comparisons")

@@ -573,7 +573,8 @@ regenerates `support-policy.json` with the branch added, bound to the plan's
 evidence digests and action key and accepted at the capture time. The sealed
 edit is validated in a clean checkout, and the branch's first release is then
 built for real at the validated commit on every platform, each of which must
-pass the exact module comparison against the list; the owner issue carries
+pass the exact module comparison against the list, and each Linux archive must
+pass the same distribution smoke test the release runs; the owner issue carries
 each failing platform's module diff. Every later build of the branch reads the same
 list: a `!` line keeps the extension out, and the comparison stays exact, so a
 patch release never silently loses an extension the branch shipped. A list

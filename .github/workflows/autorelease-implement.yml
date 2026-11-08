@@ -526,6 +526,16 @@ jobs:
             fi
             exit "$status"
           fi
+      # The first publish smoke-tests every Linux archive on each glibc distribution
+      # and baseline CPU it promises. Running the same test here stops a new branch
+      # that fails it before its lifecycle edit merges, instead of in a publish run.
+      - name: Package and smoke test on Linux distributions
+        if: startsWith(matrix.platform, 'linux-')
+        run: |
+          archive=".artifacts/php-$VERSION-cli-$PLATFORM.tar.gz"
+          ./scripts/package.sh ".build/$VERSION/s4/buildroot/bin/php" "$VERSION"
+          ./scripts/validate-autorelease-archive --archive "$archive" --version "$VERSION"
+          ./scripts/smoke-test-linux.sh "$archive" "expected-modules/${VERSION%.*}.txt"
       - name: Retain the module comparison
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
