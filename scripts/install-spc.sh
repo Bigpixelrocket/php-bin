@@ -20,7 +20,9 @@ trap 'rm -rf "$TEMP_DIR"' EXIT
 fetch_pinned() {
   local url="$1" expected="$2" output="$3" actual
 
-  curl --fail --location --retry 3 --output "$output" "$url" || return 1
+  # GitHub release downloads fail in bursts with 504s and dropped connections.
+  curl --fail --location --retry 5 --retry-delay 15 --retry-all-errors \
+    --output "$output" "$url" || return 1
   actual="$(sha256_of "$output")"
   if [[ "$actual" != "$expected" ]]; then
     echo "Checksum mismatch for $url." >&2
