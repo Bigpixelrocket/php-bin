@@ -108,8 +108,8 @@ jobs:
       - name: Install pinned mise
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
         with:
-          version: 2026.7.13
-          sha256: ef747f4bd944d7cb4efe1832ec6cd29dfdbc217389122fa37c20d116d90c1eb6
+          version: 2026.10.19
+          sha256: 7dc61dfa71abbcda1c40d18440bc556b5d58b80e6042bc4f95fd106fa1bb3c66
           install: false
       - name: Probe production credential boundaries
         run: |
