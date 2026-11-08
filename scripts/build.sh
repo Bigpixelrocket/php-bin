@@ -15,13 +15,6 @@ PLATFORM="$(build_platform)"
 LINUX_GLIBC_BASELINE="2.17"
 if [[ "$PLATFORM" == linux-* ]]; then
   export SPC_TARGET="native-native-gnu.$LINUX_GLIBC_BASELINE"
-  # zig compiles with clang, which rejects a call to an undeclared function as an
-  # error where GCC, which StaticPHP's Linux recipes were written for, warned.
-  # imap's c-client makes such calls (safe_flock), and StaticPHP's own macOS imap
-  # build passes the same allowance to clang. They stay warnings, and the glibc
-  # symbol check below still fails any call that links a function glibc 2.17
-  # lacks.
-  export SPC_COMPILER_EXTRA="${SPC_COMPILER_EXTRA:+$SPC_COMPILER_EXTRA }-Wno-error=implicit-function-declaration -Wno-error=incompatible-function-pointer-types"
 fi
 
 # The publisher passes the full release tag, 8.4.5-1 for a rebuild; the build
@@ -349,6 +342,29 @@ C
     && "$zig" ar rcs buildroot/lib/libcrypt.a "$BUILD_DIR/crypt-stub/crypt.o"
 }
 
+# Build imap's c-client library on its own before the main build, which then
+# finds it installed and skips it. zig compiles with clang, which rejects a call
+# to an undeclared function where GCC, which StaticPHP's Linux recipes were
+# written for, only warned; c-client makes such calls (safe_flock), and
+# StaticPHP's own macOS imap build gives clang the same allowance. It applies to
+# c-client alone: configure scripts such as PostgreSQL's require the compiler to
+# reject undeclared calls. OpenSSL is built first, without the allowance, so
+# c-client still builds with SSL as it does in the main build.
+build_imap_library() {
+  local allowance="-Wno-error=implicit-function-declaration -Wno-error=incompatible-function-pointer-types"
+  local libraries=imap
+
+  if [[ ",$EXTENSIONS," != *",imap,"* ]]; then
+    return 0
+  fi
+  if [[ ",$EXTENSIONS," == *",openssl,"* ]]; then
+    "$SPC_BIN" build:libs openssl || return 1
+    libraries="openssl,imap"
+  fi
+  SPC_COMPILER_EXTRA="${SPC_COMPILER_EXTRA:+$SPC_COMPILER_EXTRA }$allowance" \
+    "$SPC_BIN" build:libs "$libraries"
+}
+
 # Each step runs on its own: inside `if ! ( ... )` bash ignores `set -e`, so a
 # failed step would otherwise fall through to the next one.
 run_staticphp() {
@@ -358,6 +374,7 @@ run_staticphp() {
     && { [[ "$PLATFORM" != linux-* ]] || { install_pinned_zig && install_crypt_stub; }; } \
     && "$SPC_BIN" doctor \
     && "$SPC_BIN" craft craft-download.yml \
+    && { [[ "$PLATFORM" != linux-* ]] || build_imap_library; } \
     && "$SPC_BIN" extract php-src,micro \
     && remove_unconfigurable_extension_dirs \
     && micro_patches="$(resolve_micro_patches)" \
