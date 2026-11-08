@@ -8,15 +8,32 @@ system package for a particular connection or feature.
 
 Shared extensions load from each install's `bin/php.ini`. One that is turned off
 there is absent from `php -m` even though its `.so` ships in
-`lib/php/extensions`. Every shared extension links only macOS system
-libraries; anything else it needs is built into its own `.so`.
+`lib/php/extensions`. Every shared extension links only operating system
+libraries (macOS system libraries, or glibc on Linux); anything else it needs is
+built into its own `.so`.
+
+## Linux
+
+The Linux archives, `linux-x86_64` and `linux-aarch64`, run on any glibc
+distribution with glibc 2.17 or newer: Fedora, RHEL and its rebuilds from 7 on,
+Ubuntu from 16.04 on, Debian, Pop!_OS, Arch Linux and Omarchy, and Gentoo with
+glibc. `bin/php` links glibc dynamically, because PHP can load the shared
+extensions only through glibc's dynamic loader, and builds everything else in,
+including the C++ runtime that imagick and mongodb use. It needs no
+distribution package besides glibc itself, which every such system has.
+
+musl distributions such as Alpine, and NixOS, which has no dynamic loader at
+the standard path, cannot run these archives.
 
 ## SQL Server
 
 `sqlsrv` and `pdo_sqlsrv` require a compatible ODBC driver at runtime. On an
 Apple Silicon Mac, install Microsoft's current ODBC driver using its published
-Homebrew instructions. `unixODBC` alone provides the driver manager; it does
-not provide the SQL Server driver.
+Homebrew instructions. On Linux, install Microsoft's `msodbcsql18` package for
+the distribution; the unixODBC driver manager built into PHP reads the driver
+list from `/etc/odbcinst.ini`, where that package registers itself.
+`unixODBC` alone provides the driver manager; it does not provide the SQL
+Server driver.
 
 Verify the installation with:
 

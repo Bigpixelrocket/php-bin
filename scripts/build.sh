@@ -15,6 +15,13 @@ PLATFORM="$(build_platform)"
 LINUX_GLIBC_BASELINE="2.17"
 if [[ "$PLATFORM" == linux-* ]]; then
   export SPC_TARGET="native-native-gnu.$LINUX_GLIBC_BASELINE"
+  # zig compiles with clang, which rejects a call to an undeclared function as an
+  # error where GCC, which StaticPHP's Linux recipes were written for, warned.
+  # imap's c-client makes such calls (safe_flock), and StaticPHP's own macOS imap
+  # build passes the same allowance to clang. They stay warnings, and the glibc
+  # symbol check below still fails any call that links a function glibc 2.17
+  # lacks.
+  export SPC_COMPILER_EXTRA="${SPC_COMPILER_EXTRA:+$SPC_COMPILER_EXTRA }-Wno-error=implicit-function-declaration -Wno-error=incompatible-function-pointer-types"
 fi
 
 # The publisher passes the full release tag, 8.4.5-1 for a rebuild; the build
