@@ -36,6 +36,17 @@ trap 'rm -rf "$SCRATCH_DIR"' EXIT
 
 # A build tree shaped like build.sh leaves it: the build kit still holding this
 # machine's paths, two shared extensions, and the verified extension list.
+# shellcheck source=scripts/lib.sh
+source "$SCRIPT_DIR/lib.sh"
+# Archives are named after the platform that packaged them, and phpize finds sed
+# where that platform keeps it.
+PLATFORM="$(build_platform)"
+if [[ "$PLATFORM" == macos-* ]]; then
+  SED_LINE='SED="/usr/bin/sed"'
+else
+  SED_LINE='SED="/bin/sed"'
+fi
+
 FIXTURE_BUILD="$SCRATCH_DIR/build"
 FIXTURE_ROOT="$FIXTURE_BUILD/buildroot"
 mkdir -p "$FIXTURE_ROOT/bin" "$FIXTURE_ROOT/modules" \
@@ -91,8 +102,8 @@ printf 'fixture\n' > "$FIXTURE_ROOT/modules/demo_off.so"
 printf 'demo_on on\ndemo_off off zend requires=demo_on\n' > "$FIXTURE_BUILD/shared-extensions.txt"
 
 "$SCRIPT_DIR/package.sh" "$FIXTURE_ROOT/bin/php" 8.4.99-1
-ARCHIVE="$ARTIFACT_DIR/php-8.4.99-1-cli-macos-aarch64.tar.gz"
-grep -Fq 'php-8.4.99-1-cli-macos-aarch64.tar.gz' "$ARTIFACT_DIR/SHA256SUMS"
+ARCHIVE="$ARTIFACT_DIR/php-8.4.99-1-cli-$PLATFORM.tar.gz"
+grep -Fqx "$(sha256_of "$ARCHIVE")  php-8.4.99-1-cli-$PLATFORM.tar.gz" "$ARTIFACT_DIR/SHA256SUMS"
 tar -tzf "$ARCHIVE" | LC_ALL=C sort > "$SCRATCH_DIR/members.txt"
 for member in \
   ./bin/php ./bin/php-config ./bin/phpize \
@@ -127,7 +138,7 @@ fi
 # The ${prefix} reference is literal php-config text, not shell expansion.
 # shellcheck disable=SC2016
 for line in \
-  'SED="/usr/bin/sed"' \
+  "$SED_LINE" \
   'prefix="@PHP_BIN_PREFIX@"' \
   'datarootdir="@PHP_BIN_PREFIX@/share"' \
   'include_dir="${prefix}/include/php"' \
@@ -141,7 +152,7 @@ do
 done
 grep -Fqx "prefix='@PHP_BIN_PREFIX@'" "$SCRATCH_DIR/unpacked/bin/phpize"
 grep -Fqx '#define __GMP_CFLAGS "-I@PHP_BIN_PREFIX@/include"' "$SCRATCH_DIR/unpacked/include/php/gmp.h"
-grep -Fqx 'SED="/usr/bin/sed"' "$SCRATCH_DIR/unpacked/bin/phpize"
+grep -Fqx "$SED_LINE" "$SCRATCH_DIR/unpacked/bin/phpize"
 python3 - "$SCRATCH_DIR/unpacked/share/php-bin/manifest.json" <<'PY'
 import json
 import sys
@@ -241,7 +252,7 @@ fi
 rm "$FIXTURE_ROOT"/modules/*.so
 "$SCRIPT_DIR/package.sh" "$FIXTURE_ROOT/bin/php" 8.4.99-2
 mkdir "$SCRATCH_DIR/unpacked-none"
-tar -xzf "$ARTIFACT_DIR/php-8.4.99-2-cli-macos-aarch64.tar.gz" -C "$SCRATCH_DIR/unpacked-none"
+tar -xzf "$ARTIFACT_DIR/php-8.4.99-2-cli-$PLATFORM.tar.gz" -C "$SCRATCH_DIR/unpacked-none"
 if [[ -n "$(ls -A "$SCRATCH_DIR/unpacked-none/lib/php/extensions")" ]]; then
   echo "Packaging shipped a shared extension the empty list does not name." >&2
   exit 1
@@ -254,9 +265,6 @@ actual = json.load(open(sys.argv[1]))
 if actual != {"schemaVersion": 1, "release": "8.4.99-2", "phpVersion": "8.4.99", "extensions": []}:
     sys.exit(f"Unexpected manifest: {actual}")
 PY
-
-# shellcheck source=scripts/lib.sh
-source "$SCRIPT_DIR/lib.sh"
 
 # build.sh receives the publisher's full release tag; a rebuild revision builds
 # the same PHP patch.

@@ -6,7 +6,20 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib.sh"
 
-require_macos_arm64
+PLATFORM="$(build_platform)"
+
+# Linux binaries link glibc dynamically, so they can load the shared extensions,
+# and everything else statically. The glibc 2.17 baseline (CentOS 7, Ubuntu
+# 16.04) makes one binary run on every maintained glibc distribution; zig links
+# against that version's symbols whatever glibc the build machine has. The target
+# names the architecture rather than `native`, which would let zig use every
+# instruction the build machine's CPU has (AVX2 or AVX-512 on CI runners) and
+# crash older CPUs; a named architecture compiles for its baseline CPU (x86-64,
+# ARMv8-A).
+LINUX_GLIBC_BASELINE="2.17"
+if [[ "$PLATFORM" == linux-* ]]; then
+  export SPC_TARGET="${PLATFORM#linux-}-linux-gnu.$LINUX_GLIBC_BASELINE"
+fi
 
 # The publisher passes the full release tag, 8.4.5-1 for a rebuild; the build
 # folder keeps that tag, and StaticPHP gets the PHP version without it.
@@ -200,9 +213,17 @@ EOF
     fi
     awk -F '\t' 'NF && $5 != "-" { printf "    - \"%s\"\n", $5 }' <<< "$SHARED_ROWS"
   fi
+  echo "extra-env:"
+  if [[ "$PLATFORM" == macos-* ]]; then
+    echo '  MACOSX_DEPLOYMENT_TARGET: "26.0"'
+  else
+    # zig carries current glibc headers whatever version it links against, so a
+    # configure check for a declaration finds functions glibc 2.17 lacks. These
+    # are the ones a shipped extension uses (excimer); it has fallbacks for both.
+    echo '  ac_cv_have_decl_gettid: "no"'
+    echo '  ac_cv_have_decl_pthread_attr_setsigmask_np: "no"'
+  fi
   cat <<EOF
-extra-env:
-  MACOSX_DEPLOYMENT_TARGET: "26.0"
   ac_cv_func_memset_s: "no"
   ac_cv_header_unix_h: "no"
 craft-options:
@@ -228,10 +249,15 @@ remove_unconfigurable_extension_dirs() {
   done
 }
 
-# StaticPHP's macOS default micro patch list; an SPC_MICRO_PATCHES already in the
-# environment replaces it. Only the CLI is built, but the patches still touch
-# php-src (macos_iconv fixes iconv detection against the bundled libiconv).
-MICRO_PATCHES="${SPC_MICRO_PATCHES-cli_checks,macos_iconv}"
+# StaticPHP's default micro patch list for this platform; an SPC_MICRO_PATCHES
+# already in the environment replaces it. Only the CLI is built, but the patches
+# still touch php-src (macos_iconv fixes iconv detection against the bundled
+# libiconv).
+if [[ "$PLATFORM" == macos-* ]]; then
+  MICRO_PATCHES="${SPC_MICRO_PATCHES-cli_checks,macos_iconv}"
+else
+  MICRO_PATCHES="${SPC_MICRO_PATCHES-cli_checks,disable_huge_page}"
+fi
 IFS=. read -r PHP_MAJOR PHP_MINOR_NUMBER _ <<< "${PHP_VERSION%%[!0-9.]*}"
 # Micro patch files carry the branch they target as <major><minor>, 84 for 8.4.
 PHP_BRANCH_NUMBER="$PHP_MAJOR$PHP_MINOR_NUMBER"
@@ -271,14 +297,127 @@ resolve_micro_patches() {
   (IFS=,; echo "${resolved[*]+"${resolved[*]}"}")
 }
 
+# Install the zig archive install-spc.sh pinned and verified into this build,
+# where StaticPHP looks for its compiler. A zig left by an earlier build, or an
+# archive of another version in downloads/, is replaced, since StaticPHP would
+# otherwise reuse it.
+install_pinned_zig() {
+  local arch="${PLATFORM#linux-}" pin archive expected version
+
+  pin="$(pinned_download "zig-$arch-linux-[0-9.]+\\.tar\\.xz")" || return 1
+  IFS=$'\t' read -r archive expected <<< "$pin"
+  require_file "$PROJECT_ROOT/.spc/$archive" || return 1
+  if [[ "$(sha256_of "$PROJECT_ROOT/.spc/$archive")" != "$expected" ]]; then
+    echo "$PROJECT_ROOT/.spc/$archive does not match its pin; run scripts/install-spc.sh." >&2
+    return 1
+  fi
+  version="${archive##*-linux-}"
+  version="${version%.tar.xz}"
+  rm -rf "pkgroot/$arch-linux/zig" \
+    && find downloads -maxdepth 1 -name "zig-$arch-linux-*" ! -name "$archive" -exec rm -rf {} + 2> /dev/null
+  "$SPC_BIN" install-pkg "zig-$arch-linux" --custom-url "zig-$arch-linux:file://$PROJECT_ROOT/.spc/$archive" \
+    || return 1
+  if [[ "$("pkgroot/$arch-linux/zig/zig" version)" != "$version" ]]; then
+    echo "StaticPHP did not install the pinned zig $version." >&2
+    return 1
+  fi
+  echo "Using pinned zig $version."
+}
+
+# Put a static libcrypt.a in buildroot/lib whose crypt() always fails. imap's
+# c-client links -lcrypt for one caller, the check of a local Unix password when
+# c-client serves IMAP itself, which PHP's client-only imap extension never
+# reaches; PHP's own crypt() is its bundled implementation. glibc 2.17 ships
+# libcrypt.so.1 while Fedora and Arch ship only libxcrypt's libcrypt.so.2, so
+# linking any shared libcrypt would break the binary on one or the other.
+install_crypt_stub() {
+  local arch="${PLATFORM#linux-}" zig="$BUILD_DIR/pkgroot/${PLATFORM#linux-}-linux/zig/zig"
+
+  mkdir -p buildroot/lib "$BUILD_DIR/crypt-stub" || return 1
+  cat > "$BUILD_DIR/crypt-stub/crypt.c" <<'C'
+#include <errno.h>
+#include <stddef.h>
+
+char *crypt(const char *key, const char *salt)
+{
+    (void) key;
+    (void) salt;
+    errno = ENOSYS;
+    return NULL;
+}
+C
+  "$zig" cc -target "$arch-linux-gnu.$LINUX_GLIBC_BASELINE" -fPIC -Os \
+    -c "$BUILD_DIR/crypt-stub/crypt.c" -o "$BUILD_DIR/crypt-stub/crypt.o" \
+    && rm -f buildroot/lib/libcrypt.a \
+    && "$zig" ar rcs buildroot/lib/libcrypt.a "$BUILD_DIR/crypt-stub/crypt.o"
+}
+
+# Replace every symlink in buildroot that resolves into source/ with a copy of
+# its file. StaticPHP installs c-client with `cp -rf c-client/*.h`; c-client's
+# build made those absolute symlinks into source/imap, and GNU cp copies the
+# links where macOS cp copies the files. A discovery retry deletes source/ and
+# StaticPHP then skips imap as installed, since it checks only libc-client.a, so
+# PHP's configure would meet dangling headers. Without a source/ there is
+# nothing to replace: an earlier attempt already did it.
+replace_links_into_source() {
+  local source_dir link target
+
+  [[ -d source ]] || return 0
+  source_dir="$(cd source && pwd -P)" || return 1
+  while IFS= read -r -d '' link; do
+    target="$(readlink -f "$link")" || return 1
+    if [[ "$target" == "$source_dir/"* ]]; then
+      cp --remove-destination "$target" "$link" || return 1
+    fi
+  done < <(find buildroot -type l -print0)
+}
+
+# Build the libraries zig cannot compile as StaticPHP's Linux recipes expect on
+# their own, each with only the allowance it needs, before the main build, which
+# then finds them installed and skips them.
+#
+# imap's c-client calls undeclared functions (safe_flock). GCC, which those
+# recipes were written for, warned; zig's clang rejects the call, and StaticPHP's
+# own macOS imap build gives clang the same allowance. It is scoped to c-client
+# because configure scripts such as PostgreSQL's require the compiler to reject
+# undeclared calls. OpenSSL is built first, without it, so c-client still builds
+# with SSL as it would in the main build.
+#
+# libde265, the HEIC decoder imagick uses, picks AVX2 and AVX-512 kernels with
+# __builtin_cpu_supports, which needs GCC's or LLVM's CPU-detection runtime;
+# zig's runtime has none, so the library cannot link. Defining both builtins away
+# leaves the SSE4.1 kernels in use on every x86_64 CPU and never runs an AVX
+# instruction. The definitions hold no spaces because StaticPHP's zig wrapper
+# splits SPC_COMPILER_EXTRA on them.
+build_libraries_alone() {
+  local extensions=",$EXTENSIONS,${SHARED_EXTENSIONS:+$SHARED_EXTENSIONS,}"
+  local libraries=imap
+
+  if [[ "$extensions" == *",imap,"* ]]; then
+    if [[ "$extensions" == *",openssl,"* ]]; then
+      "$SPC_BIN" build:libs openssl || return 1
+      libraries="openssl,imap"
+    fi
+    SPC_COMPILER_EXTRA="${SPC_COMPILER_EXTRA:+$SPC_COMPILER_EXTRA }-Wno-error=implicit-function-declaration -Wno-error=incompatible-function-pointer-types" \
+      "$SPC_BIN" build:libs "$libraries" || return 1
+    replace_links_into_source || return 1
+  fi
+  if [[ "$PLATFORM" == linux-x86_64 && "$extensions" == *",imagick,"* ]]; then
+    SPC_COMPILER_EXTRA="${SPC_COMPILER_EXTRA:+$SPC_COMPILER_EXTRA }-D__builtin_cpu_init()=(void)0 -D__builtin_cpu_supports(feature)=0" \
+      "$SPC_BIN" build:libs libde265 || return 1
+  fi
+}
+
 # Each step runs on its own: inside `if ! ( ... )` bash ignores `set -e`, so a
 # failed step would otherwise fall through to the next one.
 run_staticphp() {
   local micro_patches
 
   cd "$BUILD_DIR" \
+    && { [[ "$PLATFORM" != linux-* ]] || { install_pinned_zig && install_crypt_stub; }; } \
     && "$SPC_BIN" doctor \
     && "$SPC_BIN" craft craft-download.yml \
+    && { [[ "$PLATFORM" != linux-* ]] || build_libraries_alone; } \
     && "$SPC_BIN" extract php-src,micro \
     && remove_unconfigurable_extension_dirs \
     && micro_patches="$(resolve_micro_patches)" \
@@ -363,16 +502,103 @@ if [[ ! -x "$PHP_BIN" ]]; then
   exit 1
 fi
 
+# Fail unless a Linux binary or shared object is built for this machine's
+# architecture, needs no shared library besides glibc's own, and needs no glibc
+# symbol newer than the baseline, so it runs on every glibc distribution from
+# that version on. A copy of libstdc++, libgcc_s, or any other library a
+# distribution may lack, or ship in another version, fails it.
+verify_linux_elf() {
+  local file="$1" label="$2" machine library version newest
+
+  case "$PLATFORM" in
+    linux-x86_64) machine="Advanced Micro Devices X86-64" ;;
+    linux-aarch64) machine="AArch64" ;;
+  esac
+  if ! readelf -h "$file" | grep -Eq "^[[:space:]]*Machine:[[:space:]]+$machine\$"; then
+    echo "$label is not built for $PLATFORM." >&2
+    return 1
+  fi
+  while IFS= read -r library; do
+    case "$library" in
+      libc.so.6 | libm.so.6 | libdl.so.2 | libpthread.so.0 | librt.so.1 \
+        | libresolv.so.2 | libutil.so.1 | ld-linux-x86-64.so.2 | ld-linux-aarch64.so.1) ;;
+      *)
+        echo "$label needs a shared library outside glibc: $library" >&2
+        return 1
+        ;;
+    esac
+  done < <(readelf -d -W "$file" | sed -n 's/.*(NEEDED).*\[\(.*\)\]$/\1/p')
+  # The version needs section names each library version the file links against.
+  while IFS= read -r version; do
+    if [[ ! "$version" =~ ^GLIBC_[0-9]+(\.[0-9]+)+$ ]]; then
+      echo "$label needs a symbol version outside public glibc: $version" >&2
+      return 1
+    fi
+    newest="$(printf '%s\n' "$LINUX_GLIBC_BASELINE" "${version#GLIBC_}" | sort -V | tail -n 1)"
+    if [[ "$newest" != "$LINUX_GLIBC_BASELINE" ]]; then
+      echo "$label needs $version, newer than the glibc $LINUX_GLIBC_BASELINE baseline." >&2
+      return 1
+    fi
+  done < <(readelf -V -W "$file" | awk '
+    /^Version needs section/ { needs = 1; next }
+    /^Version [a-z]+ section/ { needs = 0 }
+    needs { for (i = 1; i < NF; i++) if ($i == "Name:") print $(i + 1) }
+  ' | LC_ALL=C sort -u)
+}
+
+# Print the dynamic symbols an ELF file defines, one per line, without versions.
+elf_defined_symbols() {
+  readelf --dyn-syms -W "$1" | awk '$7 != "UND" && $8 != "" { sub(/@.*/, "", $8); print $8 }'
+}
+
+# Fail unless every unversioned symbol a Linux shared extension leaves undefined
+# is defined by bin/php or by a shared extension it requires. A shared object may
+# link with undefined symbols, so a call to a glibc function newer than the
+# baseline, which configure found declared in zig's current glibc headers, links
+# cleanly and only fails when an older glibc loads it. Weak references are
+# allowed, since they resolve to null when absent.
+verify_linux_symbols_resolve() {
+  local so_file="$1" label="$2" requires="$3" provided="$4" dependency missing
+
+  for dependency in ${requires//,/ }; do
+    if [[ "$dependency" != "-" ]]; then
+      elf_defined_symbols "$(dirname "$so_file")/$dependency.so" >> "$provided"
+    fi
+  done
+  missing="$(comm -23 \
+    <(readelf --dyn-syms -W "$so_file" \
+      | awk '$7 == "UND" && $5 != "WEAK" && $8 != "" && $8 !~ /@/ { print $8 }' | LC_ALL=C sort -u) \
+    <(LC_ALL=C sort -u "$provided"))"
+  if [[ -n "$missing" ]]; then
+    echo "$label needs symbols neither bin/php nor its required extensions define, such as glibc functions newer than $LINUX_GLIBC_BASELINE:" >&2
+    printf '  %s\n' "${missing//$'\n'/$'\n'  }" >&2
+    return 1
+  fi
+}
+
 "$PHP_BIN" -v
 "$PHP_BIN" -r 'exit(PHP_SAPI === "cli" ? 0 : 1);'
-[ "$(lipo -archs "$PHP_BIN")" = "arm64" ]
+if [[ "$PLATFORM" == macos-* ]]; then
+  [ "$(lipo -archs "$PHP_BIN")" = "arm64" ]
 
-MINIMUM_MACOS_VERSION="$(vtool -show-build "$PHP_BIN" | awk '$1 == "minos" { print $2; exit }')"
-if [[ "$MINIMUM_MACOS_VERSION" != "26.0" ]]; then
-  echo "Expected a macOS 26.0 minimum, got: ${MINIMUM_MACOS_VERSION:-unknown}" >&2
-  exit 1
+  MINIMUM_MACOS_VERSION="$(vtool -show-build "$PHP_BIN" | awk '$1 == "minos" { print $2; exit }')"
+  if [[ "$MINIMUM_MACOS_VERSION" != "26.0" ]]; then
+    echo "Expected a macOS 26.0 minimum, got: ${MINIMUM_MACOS_VERSION:-unknown}" >&2
+    exit 1
+  fi
+  echo "Verified macOS minimum: $MINIMUM_MACOS_VERSION"
+else
+  case "$PLATFORM" in
+    linux-x86_64) INTERPRETER="/lib64/ld-linux-x86-64.so.2" ;;
+    linux-aarch64) INTERPRETER="/lib/ld-linux-aarch64.so.1" ;;
+  esac
+  if ! readelf -l -W "$PHP_BIN" | grep -Fq "[Requesting program interpreter: $INTERPRETER]"; then
+    echo "Expected $PHP_BIN to load through glibc's $INTERPRETER." >&2
+    exit 1
+  fi
+  verify_linux_elf "$PHP_BIN" "$PHP_BIN"
+  echo "Verified glibc $LINUX_GLIBC_BASELINE baseline: $PHP_BIN"
 fi
-echo "Verified macOS minimum: $MINIMUM_MACOS_VERSION"
 
 # A discovered list is exactly what built: the static modules plus every
 # default-on shared extension, and a `!` line for each extension left out. The
@@ -433,7 +659,8 @@ shared_extension_flags() {
 # - every .so loads alone (with only its declared requirements) and cleanly;
 # - declared requirements equal the extension's own required shared dependencies;
 # - every off-by-default extension reports a stable version;
-# - every .so links only system libraries and targets macOS 26.0;
+# - every .so links only system libraries and targets macOS 26.0, or, on Linux,
+#   needs only glibc no newer than the baseline;
 # - the shipped php_config.h does not define HAVE_UNIX_H.
 verify_shared_extensions() {
   local expected_file="$1"
@@ -511,6 +738,13 @@ verify_shared_extensions() {
         return 1
       fi
       echo "Loaded $name $version"
+    fi
+
+    if [[ "$PLATFORM" == linux-* ]]; then
+      verify_linux_elf "$so_file" "$name.so"
+      elf_defined_symbols "$PHP_BIN" > "$gate_dir/provided.txt"
+      verify_linux_symbols_resolve "$so_file" "$name.so" "$requires" "$gate_dir/provided.txt"
+      continue
     fi
 
     install_name="$(otool -D "$so_file" | tail -n +2)"

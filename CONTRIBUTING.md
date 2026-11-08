@@ -11,8 +11,9 @@ Changes are welcome through pull requests.
    ShellCheck, and jq versions pinned in `mise.toml`; run
    `mise trust && mise install` once per clone, then run them in an activated
    shell or through `mise exec --`.
-4. For extension changes, run the earliest affected spike stage on an Apple
-   Silicon Mac and attach the module diff to the pull request.
+4. For extension changes, run the earliest affected spike stage on every
+   platform the README's build section lists and attach the module diff to the
+   pull request.
 5. Do not remove a required module to make a build green. Document the blocker
    and request a maintainer decision.
 

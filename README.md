@@ -100,8 +100,18 @@ and `NOTICE`, with every module compiled in.
 
 ## Build locally
 
-Requirements: an Apple Silicon Mac running macOS 26 or newer, Homebrew, Xcode
-command-line tools, and enough free disk space for a full StaticPHP build.
+Builds run on three platforms, each producing its own archive:
+
+| Platform | Build machine | Archive suffix |
+| --- | --- | --- |
+| macOS arm64 | Apple Silicon Mac on macOS 26 or newer, Homebrew, Xcode command-line tools | `macos-aarch64` |
+| Linux x86_64 | glibc Linux with `apt-get`, `dnf`, or `pacman` and sudo | `linux-x86_64` |
+| Linux aarch64 | glibc Linux with `apt-get`, `dnf`, or `pacman` and sudo | `linux-aarch64` |
+
+Every platform also needs enough free disk space for a full StaticPHP build.
+On Linux, StaticPHP compiles with a pinned zig release against glibc 2.17
+symbols, so the build machine's own glibc version does not matter. The same
+commands work on each:
 
 ```bash
 scripts/install-build-deps.sh
@@ -109,6 +119,9 @@ scripts/install-spc.sh
 scripts/build.sh 8.4 s0
 scripts/compare-modules.sh .build/8.4/s0/buildroot/bin/php stages/s0.txt subset
 ```
+
+`scripts/install-spc.sh` downloads StaticPHP for this platform, and on Linux the
+zig compiler, and checks each against its SHA-256 pin in `.spc-sha256`.
 
 Advance through `s1`, `s2`, `s3`, and `s4`. Stage `s4` also builds the shared
 extensions in `stages/s4-shared.txt` and runs the module gate:
@@ -119,14 +132,31 @@ scripts/build.sh 8.4 s4
 
 The gate requires `php -n -m` to equal the static set, the static set plus every
 default-on extension to equal `expected-modules/8.4.txt` exactly, every shared
-extension to load cleanly with only its declared requirements, every
-off-by-default extension to report a stable version, and every `.so` to link
-only system libraries and target macOS 26.0.
+extension to load cleanly with only its declared requirements, and every
+off-by-default extension to report a stable version. On macOS, every `.so`
+must link only system libraries and target macOS 26.0. On Linux, `bin/php` and
+every `.so` must need no shared library outside glibc (`libc`, `libm`, `libdl`,
+`libpthread`, `librt`, `libresolv`, `libutil`, and the dynamic loader) and no
+glibc symbol newer than 2.17, and every symbol a `.so` leaves undefined must be
+defined by `bin/php` or by an extension it requires.
 
 When the gate is green, package the build with its full PHP patch version:
 
 ```bash
 scripts/package.sh .build/8.4/s4/buildroot/bin/php 8.4.5
+```
+
+On Linux, `scripts/smoke-test-linux.sh` then runs the archive in Docker
+containers of Fedora, Ubuntu 16.04 and current, Debian stable, Gentoo, and, on
+x86_64, Arch Linux. Each checks `php -v`, the exact module list, every shared
+extension, PHP's `crypt()` and `password_hash()`, and HTTPS through OpenSSL
+streams and curl. A last Debian run repeats those checks with PHP under QEMU on
+the architecture's baseline CPU, since every container shares the build
+machine's CPU and could not catch an instruction older CPUs lack. It needs
+Docker; set `DOCKER="sudo docker"` where Docker needs root:
+
+```bash
+scripts/smoke-test-linux.sh .artifacts/php-8.4.5-cli-linux-x86_64.tar.gz expected-modules/8.4.txt
 ```
 
 ## Publishing and recovery policy

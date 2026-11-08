@@ -41,19 +41,34 @@ defaults:
 
 jobs:
   build:
-    name: PHP ${{ inputs.php_version || '8.4' }} ${{ inputs.stage || 's4' }}
-    runs-on: macos-26
-    timeout-minutes: 120
+    name: PHP ${{ inputs.php_version || '8.4' }} ${{ inputs.stage || 's4' }} ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-aarch64
+            runner: macos-26
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
     env:
+      # Read-only, as the workflow permissions above grant; StaticPHP uses it
+      # only to avoid GitHub API rate limits while downloading sources.
       GITHUB_TOKEN: ${{ github.token }}
       PHP_VERSION: ${{ inputs.php_version || '8.4' }}
       SPIKE_STAGE: ${{ inputs.stage || 's4' }}
+      PLATFORM: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Verify runner architecture
-        run: test "$(uname -s)" = Darwin && test "$(uname -m)" = arm64
+      - name: Verify runner platform
+        run: |
+          source scripts/lib.sh
+          test "$(build_platform)" = "$PLATFORM"
       - name: Install build dependencies
         run: scripts/install-build-deps.sh
       - name: Install pinned StaticPHP
@@ -62,7 +77,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .build/${{ env.PHP_VERSION }}/${{ env.SPIKE_STAGE }}/downloads
-          key: spc-${{ runner.os }}-${{ runner.arch }}-${{ env.PHP_VERSION }}-${{ env.SPIKE_STAGE }}-${{ hashFiles('.spc-version', 'stages/*.txt') }}
+          key: spc-${{ runner.os }}-${{ runner.arch }}-${{ env.PHP_VERSION }}-${{ env.SPIKE_STAGE }}-${{ hashFiles('.spc-version', '.spc-sha256', 'stages/*.txt') }}
       - name: Build and verify
         run: scripts/build.sh "$PHP_VERSION" "$SPIKE_STAGE"
       - name: Package exact build
@@ -71,11 +86,17 @@ jobs:
           php_bin=".build/$PHP_VERSION/$SPIKE_STAGE/buildroot/bin/php"
           actual_version="$($php_bin -r 'echo PHP_VERSION;')"
           scripts/package.sh "$php_bin" "$actual_version"
+          echo "ACTUAL_VERSION=$actual_version" >> "$GITHUB_ENV"
+      - name: Smoke test on Linux distributions
+        if: env.SPIKE_STAGE == 's4' && startsWith(matrix.platform, 'linux-')
+        run: |
+          scripts/smoke-test-linux.sh ".artifacts/php-$ACTUAL_VERSION-cli-$PLATFORM.tar.gz" \
+            "expected-modules/${ACTUAL_VERSION%.*}.txt"
       - name: Upload build result
         if: env.SPIKE_STAGE == 's4'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: php-${{ env.PHP_VERSION }}-cli-macos-aarch64
+          name: php-${{ env.PHP_VERSION }}-cli-${{ matrix.platform }}
           path: .artifacts/
           if-no-files-found: error
           include-hidden-files: true

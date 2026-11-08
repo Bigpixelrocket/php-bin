@@ -34,7 +34,8 @@ fi
 # The build and release workflows read .artifacts from the working tree, so that
 # stays the default; the override exists for callers that must not write there.
 ARTIFACT_DIR="${ARTIFACT_DIR:-$PROJECT_ROOT/.artifacts}"
-ARTIFACT_NAME="php-${RELEASE_TAG}-cli-macos-aarch64.tar.gz"
+PLATFORM="$(build_platform)"
+ARTIFACT_NAME="php-${RELEASE_TAG}-cli-${PLATFORM}.tar.gz"
 TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/php-bin-package.XXXXXX")"
 trap 'rm -rf "$TEMP_DIR"' EXIT
 
@@ -159,6 +160,14 @@ regex_escape() {
   printf '%s' "$1" | sed 's/[][\.*^$]/\\&/g'
 }
 
+# phpize runs sed from this path. /usr/bin/sed is missing on Linux systems that
+# keep /bin apart from /usr/bin, while every Linux system has /bin/sed.
+if [[ "$PLATFORM" == macos-* ]]; then
+  SED_PATH="/usr/bin/sed"
+else
+  SED_PATH="/bin/sed"
+fi
+
 # php-config and phpize carry the build machine's paths. Each install's
 # PostInstall hook in mise-php replaces the marker with that install's folder,
 # so PIE and phpize build against the install they run from. extension_dir is
@@ -167,7 +176,7 @@ regex_escape() {
 BUILDROOT_PATTERN="$(regex_escape "$(cd "$BUILDROOT" && pwd -P)")"
 BUILD_DIR_PATTERN="$(regex_escape "$(cd "$BUILD_DIR" && pwd -P)")"
 rewrite "$PACKAGE/bin/php-config" \
-  -e 's|^SED=.*|SED="/usr/bin/sed"|' \
+  -e "s|^SED=.*|SED=\"$SED_PATH\"|" \
   -e "s|^prefix=.*|prefix=\"$MARKER\"|" \
   -e "s|^datarootdir=.*|datarootdir=\"$MARKER/share\"|" \
   -e 's|^ldflags=.*|ldflags=""|' \
@@ -180,7 +189,7 @@ rewrite "$PACKAGE/bin/php-config" \
 rewrite "$PACKAGE/bin/phpize" \
   -e "s|^prefix=.*|prefix='$MARKER'|" \
   -e "s|^datarootdir=.*|datarootdir='$MARKER/share'|" \
-  -e 's|^SED=.*|SED="/usr/bin/sed"|'
+  -e "s|^SED=.*|SED=\"$SED_PATH\"|"
 # build-defs.h records PHP's configure command, and gmp.h the flags GMP was
 # compiled with; both are informational strings that name the build tree.
 for header in main/build-defs.h gmp.h; do
@@ -224,12 +233,13 @@ if [[ -n "$(find "$PACKAGE" -type l)" ]]; then
 fi
 
 COPYFILE_DISABLE=1 tar -czf "$ARTIFACT_DIR/$ARTIFACT_NAME" -C "$PACKAGE" .
-(
-  cd "$ARTIFACT_DIR"
-  shasum -a 256 "$ARTIFACT_NAME" > SHA256SUMS
-)
+printf '%s  %s\n' "$(sha256_of "$ARTIFACT_DIR/$ARTIFACT_NAME")" "$ARTIFACT_NAME" \
+  > "$ARTIFACT_DIR/SHA256SUMS"
 
-tar -tzf "$ARTIFACT_DIR/$ARTIFACT_NAME" | grep -Eq '^\./bin/php$'
-tar -tzf "$ARTIFACT_DIR/$ARTIFACT_NAME" | grep -Eq '^\./share/php-bin/manifest\.json$'
+# grep reads the whole listing: stopping at the first match would leave GNU tar
+# writing to a closed pipe, which it reports as an error.
+tar -tzf "$ARTIFACT_DIR/$ARTIFACT_NAME" > "$TEMP_DIR/members.txt"
+grep -Fqx './bin/php' "$TEMP_DIR/members.txt"
+grep -Fqx './share/php-bin/manifest.json' "$TEMP_DIR/members.txt"
 echo "Created $ARTIFACT_DIR/$ARTIFACT_NAME"
 echo "Created $ARTIFACT_DIR/SHA256SUMS"
