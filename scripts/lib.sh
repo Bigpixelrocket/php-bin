@@ -7,11 +7,66 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC2034
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-require_macos_arm64() {
-  if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
-    echo "This build supports macOS arm64 only." >&2
+# Print the platform this machine builds for, as release archive names spell it:
+# macos-aarch64, linux-x86_64, or linux-aarch64. Linux builds need
+# glibc, since the binary links it dynamically to load shared extensions; any
+# other machine fails.
+build_platform() {
+  case "$(uname -s)/$(uname -m)" in
+    Darwin/arm64)
+      echo macos-aarch64
+      return
+      ;;
+    Linux/x86_64 | Linux/aarch64 | Linux/arm64)
+      if ! getconf GNU_LIBC_VERSION > /dev/null 2>&1; then
+        echo "Linux builds need a glibc system; this one has another C library." >&2
+        return 1
+      fi
+      if [[ "$(uname -m)" == x86_64 ]]; then
+        echo linux-x86_64
+      else
+        echo linux-aarch64
+      fi
+      return
+      ;;
+  esac
+  echo "This build supports macOS arm64, Linux x86_64, and Linux aarch64 only." >&2
+  return 1
+}
+
+require_supported_platform() {
+  build_platform > /dev/null
+}
+
+# Print the SHA-256 digest of a file. Linux has sha256sum and macOS has shasum;
+# both print the digest first.
+sha256_of() {
+  if command -v sha256sum > /dev/null 2>&1; then
+    sha256sum "$1"
+  else
+    shasum -a 256 "$1"
+  fi | awk '{ print $1 }'
+}
+
+# Print the file name and expected SHA-256 digest, tab-separated, of the one
+# pinned download in .spc-sha256 whose name matches an extended regular
+# expression. The file lists every pinned toolchain download as `<sha256>  <name>`,
+# the format sha256sum prints; a missing or ambiguous match fails.
+pinned_download() {
+  local pins="$PROJECT_ROOT/.spc-sha256" matches
+
+  require_file "$pins" || return 1
+  # ENVIRON keeps the backslashes awk -v would treat as escape sequences.
+  matches="$(PIN_PATTERN="^($1)\$" awk '$2 ~ ENVIRON["PIN_PATTERN"] { print $2 "\t" $1 }' "$pins")"
+  if [[ -z "$matches" || "$matches" == *$'\n'* ]]; then
+    echo "Expected exactly one pinned download matching $1 in .spc-sha256." >&2
     return 1
   fi
+  if [[ ! "${matches#*$'\t'}" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "The pinned digest for ${matches%%$'\t'*} is not a SHA-256 digest." >&2
+    return 1
+  fi
+  printf '%s\n' "$matches"
 }
 
 require_file() {

@@ -6,7 +6,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib.sh"
 
-require_macos_arm64
+PLATFORM="$(build_platform)"
+
+# Linux binaries link glibc dynamically, so they can load the shared extensions,
+# and everything else statically. The glibc 2.17 baseline (CentOS 7, Ubuntu
+# 16.04) makes one binary run on every maintained glibc distribution; zig links
+# against that version's symbols whatever glibc the build machine has.
+LINUX_GLIBC_BASELINE="2.17"
+if [[ "$PLATFORM" == linux-* ]]; then
+  export SPC_TARGET="native-native-gnu.$LINUX_GLIBC_BASELINE"
+fi
 
 # The publisher passes the full release tag, 8.4.5-1 for a rebuild; the build
 # folder keeps that tag, and StaticPHP gets the PHP version without it.
@@ -200,9 +209,11 @@ EOF
     fi
     awk -F '\t' 'NF && $5 != "-" { printf "    - \"%s\"\n", $5 }' <<< "$SHARED_ROWS"
   fi
+  echo "extra-env:"
+  if [[ "$PLATFORM" == macos-* ]]; then
+    echo '  MACOSX_DEPLOYMENT_TARGET: "26.0"'
+  fi
   cat <<EOF
-extra-env:
-  MACOSX_DEPLOYMENT_TARGET: "26.0"
   ac_cv_func_memset_s: "no"
   ac_cv_header_unix_h: "no"
 craft-options:
@@ -228,10 +239,15 @@ remove_unconfigurable_extension_dirs() {
   done
 }
 
-# StaticPHP's macOS default micro patch list; an SPC_MICRO_PATCHES already in the
-# environment replaces it. Only the CLI is built, but the patches still touch
-# php-src (macos_iconv fixes iconv detection against the bundled libiconv).
-MICRO_PATCHES="${SPC_MICRO_PATCHES-cli_checks,macos_iconv}"
+# StaticPHP's default micro patch list for this platform; an SPC_MICRO_PATCHES
+# already in the environment replaces it. Only the CLI is built, but the patches
+# still touch php-src (macos_iconv fixes iconv detection against the bundled
+# libiconv).
+if [[ "$PLATFORM" == macos-* ]]; then
+  MICRO_PATCHES="${SPC_MICRO_PATCHES-cli_checks,macos_iconv}"
+else
+  MICRO_PATCHES="${SPC_MICRO_PATCHES-cli_checks,disable_huge_page}"
+fi
 IFS=. read -r PHP_MAJOR PHP_MINOR_NUMBER _ <<< "${PHP_VERSION%%[!0-9.]*}"
 # Micro patch files carry the branch they target as <major><minor>, 84 for 8.4.
 PHP_BRANCH_NUMBER="$PHP_MAJOR$PHP_MINOR_NUMBER"
@@ -271,12 +287,40 @@ resolve_micro_patches() {
   (IFS=,; echo "${resolved[*]+"${resolved[*]}"}")
 }
 
+# Install the zig archive install-spc.sh pinned and verified into this build,
+# where StaticPHP looks for its compiler. A zig left by an earlier build, or an
+# archive of another version in downloads/, is replaced, since StaticPHP would
+# otherwise reuse it.
+install_pinned_zig() {
+  local arch="${PLATFORM#linux-}" pin archive expected version
+
+  pin="$(pinned_download "zig-$arch-linux-[0-9.]+\\.tar\\.xz")" || return 1
+  IFS=$'\t' read -r archive expected <<< "$pin"
+  require_file "$PROJECT_ROOT/.spc/$archive" || return 1
+  if [[ "$(sha256_of "$PROJECT_ROOT/.spc/$archive")" != "$expected" ]]; then
+    echo "$PROJECT_ROOT/.spc/$archive does not match its pin; run scripts/install-spc.sh." >&2
+    return 1
+  fi
+  version="${archive##*-linux-}"
+  version="${version%.tar.xz}"
+  rm -rf "pkgroot/$arch-linux/zig" \
+    && find downloads -maxdepth 1 -name "zig-$arch-linux-*" ! -name "$archive" -exec rm -rf {} + 2> /dev/null
+  "$SPC_BIN" install-pkg "zig-$arch-linux" --custom-url "zig-$arch-linux:file://$PROJECT_ROOT/.spc/$archive" \
+    || return 1
+  if [[ "$("pkgroot/$arch-linux/zig/zig" version)" != "$version" ]]; then
+    echo "StaticPHP did not install the pinned zig $version." >&2
+    return 1
+  fi
+  echo "Using pinned zig $version."
+}
+
 # Each step runs on its own: inside `if ! ( ... )` bash ignores `set -e`, so a
 # failed step would otherwise fall through to the next one.
 run_staticphp() {
   local micro_patches
 
   cd "$BUILD_DIR" \
+    && { [[ "$PLATFORM" != linux-* ]] || install_pinned_zig; } \
     && "$SPC_BIN" doctor \
     && "$SPC_BIN" craft craft-download.yml \
     && "$SPC_BIN" extract php-src,micro \
@@ -363,16 +407,73 @@ if [[ ! -x "$PHP_BIN" ]]; then
   exit 1
 fi
 
+# Fail unless a Linux binary or shared object is built for this machine's
+# architecture, needs no shared library besides glibc's own, and needs no glibc
+# symbol newer than the baseline, so it runs on every glibc distribution from
+# that version on. A copy of libstdc++, libgcc_s, or any other library a
+# distribution may lack, or ship in another version, fails it.
+verify_linux_elf() {
+  local file="$1" label="$2" machine library version newest
+
+  case "$PLATFORM" in
+    linux-x86_64) machine="Advanced Micro Devices X86-64" ;;
+    linux-aarch64) machine="AArch64" ;;
+  esac
+  if ! readelf -h "$file" | grep -Eq "^[[:space:]]*Machine:[[:space:]]+$machine\$"; then
+    echo "$label is not built for $PLATFORM." >&2
+    return 1
+  fi
+  while IFS= read -r library; do
+    case "$library" in
+      libc.so.6 | libm.so.6 | libdl.so.2 | libpthread.so.0 | librt.so.1 \
+        | libresolv.so.2 | libutil.so.1 | ld-linux-x86-64.so.2 | ld-linux-aarch64.so.1) ;;
+      *)
+        echo "$label needs a shared library outside glibc: $library" >&2
+        return 1
+        ;;
+    esac
+  done < <(readelf -d -W "$file" | sed -n 's/.*(NEEDED).*\[\(.*\)\]$/\1/p')
+  # The version needs section names each library version the file links against.
+  while IFS= read -r version; do
+    if [[ ! "$version" =~ ^GLIBC_[0-9]+(\.[0-9]+)+$ ]]; then
+      echo "$label needs a symbol version outside public glibc: $version" >&2
+      return 1
+    fi
+    newest="$(printf '%s\n' "$LINUX_GLIBC_BASELINE" "${version#GLIBC_}" | sort -V | tail -n 1)"
+    if [[ "$newest" != "$LINUX_GLIBC_BASELINE" ]]; then
+      echo "$label needs $version, newer than the glibc $LINUX_GLIBC_BASELINE baseline." >&2
+      return 1
+    fi
+  done < <(readelf -V -W "$file" | awk '
+    /^Version needs section/ { needs = 1; next }
+    /^Version [a-z]+ section/ { needs = 0 }
+    needs { for (i = 1; i < NF; i++) if ($i == "Name:") print $(i + 1) }
+  ' | LC_ALL=C sort -u)
+}
+
 "$PHP_BIN" -v
 "$PHP_BIN" -r 'exit(PHP_SAPI === "cli" ? 0 : 1);'
-[ "$(lipo -archs "$PHP_BIN")" = "arm64" ]
+if [[ "$PLATFORM" == macos-* ]]; then
+  [ "$(lipo -archs "$PHP_BIN")" = "arm64" ]
 
-MINIMUM_MACOS_VERSION="$(vtool -show-build "$PHP_BIN" | awk '$1 == "minos" { print $2; exit }')"
-if [[ "$MINIMUM_MACOS_VERSION" != "26.0" ]]; then
-  echo "Expected a macOS 26.0 minimum, got: ${MINIMUM_MACOS_VERSION:-unknown}" >&2
-  exit 1
+  MINIMUM_MACOS_VERSION="$(vtool -show-build "$PHP_BIN" | awk '$1 == "minos" { print $2; exit }')"
+  if [[ "$MINIMUM_MACOS_VERSION" != "26.0" ]]; then
+    echo "Expected a macOS 26.0 minimum, got: ${MINIMUM_MACOS_VERSION:-unknown}" >&2
+    exit 1
+  fi
+  echo "Verified macOS minimum: $MINIMUM_MACOS_VERSION"
+else
+  case "$PLATFORM" in
+    linux-x86_64) INTERPRETER="/lib64/ld-linux-x86-64.so.2" ;;
+    linux-aarch64) INTERPRETER="/lib/ld-linux-aarch64.so.1" ;;
+  esac
+  if ! readelf -l -W "$PHP_BIN" | grep -Fq "[Requesting program interpreter: $INTERPRETER]"; then
+    echo "Expected $PHP_BIN to load through glibc's $INTERPRETER." >&2
+    exit 1
+  fi
+  verify_linux_elf "$PHP_BIN" "$PHP_BIN"
+  echo "Verified glibc $LINUX_GLIBC_BASELINE baseline: $PHP_BIN"
 fi
-echo "Verified macOS minimum: $MINIMUM_MACOS_VERSION"
 
 # A discovered list is exactly what built: the static modules plus every
 # default-on shared extension, and a `!` line for each extension left out. The
@@ -433,7 +534,8 @@ shared_extension_flags() {
 # - every .so loads alone (with only its declared requirements) and cleanly;
 # - declared requirements equal the extension's own required shared dependencies;
 # - every off-by-default extension reports a stable version;
-# - every .so links only system libraries and targets macOS 26.0;
+# - every .so links only system libraries and targets macOS 26.0, or, on Linux,
+#   needs only glibc no newer than the baseline;
 # - the shipped php_config.h does not define HAVE_UNIX_H.
 verify_shared_extensions() {
   local expected_file="$1"
@@ -511,6 +613,11 @@ verify_shared_extensions() {
         return 1
       fi
       echo "Loaded $name $version"
+    fi
+
+    if [[ "$PLATFORM" == linux-* ]]; then
+      verify_linux_elf "$so_file" "$name.so"
+      continue
     fi
 
     install_name="$(otool -D "$so_file" | tail -n +2)"
