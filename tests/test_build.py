@@ -486,51 +486,185 @@ class NewBranchDiscoveryWorkflowTests(unittest.TestCase):
         from autorelease.verify import load_workflow
 
         self.jobs = load_workflow(ROOT / ".github/workflows/autorelease-implement.yml")["jobs"]
-        self.discover = load_workflow(ROOT / ".github/workflows/autorelease-discover.yml")["jobs"]["discover"]
+        self.discover_jobs = load_workflow(ROOT / ".github/workflows/autorelease-discover.yml")["jobs"]
+        self.discover = self.discover_jobs["discover"]
 
     def step(self, job, name):
         return next(item for item in job["steps"] if item.get("name") == name)
 
-    def test_discovery_runs_in_three_resumable_passes_that_always_run(self):
-        passes = [self.jobs[f"discover-{number}"] for number in (1, 2, 3)]
+    PLATFORMS = ("macos-aarch64", "linux-x86_64", "linux-aarch64")
+
+    def run_step(self, job, name, cwd, env):
+        script = self.step(job, name)["run"].replace("${{ github.run_id }}", "77")
+        return subprocess.run(["bash", "-eo", "pipefail", "-c", script], cwd=cwd,
+                              env={**os.environ, **env}, capture_output=True, text=True, check=False)
+
+    def test_discovery_runs_on_every_platform_in_three_resumable_passes_that_always_run(self):
+        passes = [self.jobs[f"discover-{number}"] for number in (1, 2, 3)] + [self.jobs["discover-reconcile"]]
         for number, job in enumerate(passes, start=1):
             # A skipped job would skip every later job, even through the ones that ran.
             self.assertNotIn("if", job)
             self.assertEqual("./.github/workflows/autorelease-discover.yml", job["uses"])
             self.assertEqual({"contents": "read"}, job["permissions"])
-            self.assertEqual(str(number), job["with"]["pass"])
-            self.assertIs(number == 3, job["with"]["final"])
-        self.assertEqual("${{ needs.discovery-scope.outputs.discover == 'true' }}", passes[0]["with"]["needed"])
-        self.assertEqual("${{ needs.discover-1.outputs.pending == 'true' }}", passes[1]["with"]["needed"])
-        self.assertEqual("${{ needs.discover-2.outputs.pending == 'true' }}", passes[2]["with"]["needed"])
+            self.assertEqual(str(number) if number < 4 else "reconcile", job["with"]["pass"])
+            self.assertIs(number >= 3, job["with"]["final"])
+        self.assertEqual("${{ needs.discovery-scope.outputs.platforms }}", passes[0]["with"]["platforms"])
+        self.assertEqual("${{ needs.discover-1.outputs.pending }}", passes[1]["with"]["platforms"])
+        self.assertEqual("${{ needs.discover-2.outputs.pending }}", passes[2]["with"]["platforms"])
+        self.assertEqual("${{ needs.discovery-union.outputs.reconcile }}", passes[3]["with"]["platforms"])
+        for name in ("discovery-union", "discovery-final"):
+            self.assertNotIn("if", self.jobs[name])
+            self.assertEqual({"contents": "read"}, self.jobs[name]["permissions"])
         decide = self.step(self.jobs["discovery-scope"], "Decide")["run"]
         self.assertIn('if [[ ! -e "expected-modules/${version%.*}.txt" ]]; then', decide)
+        self.assertIn("platforms='[\"macos-aarch64\",\"linux-x86_64\",\"linux-aarch64\"]'", decide)
         self.assertNotIn("if", self.jobs["implement"])
+        self.assertIn("discovery-final", self.jobs["implement"]["needs"])
 
-    def test_a_pass_builds_read_only_and_hands_over_what_it_left_out(self):
+    def test_a_pass_builds_read_only_per_platform_and_hands_over_what_it_left_out(self):
         self.assertNotIn("if", self.discover)
         self.assertEqual({"contents": "read"}, self.discover["permissions"])
-        self.assertIn("'macos-26' || 'ubuntu-latest'", self.discover["runs-on"])
+        self.assertEqual(
+            {"macos-aarch64": "macos-26", "linux-x86_64": "ubuntu-latest", "linux-aarch64": "ubuntu-24.04-arm"},
+            {leg["platform"]: leg["runner"] for leg in self.discover["strategy"]["matrix"]["include"]},
+        )
+        self.assertEqual(
+            "${{ contains(fromJSON(inputs.platforms), matrix.platform) && matrix.runner || 'ubuntu-latest' }}",
+            self.discover["runs-on"],
+        )
         build = self.step(self.discover, "Build, leaving out extensions that do not compile")
-        self.assertEqual("inputs.needed", build["if"])
+        self.assertEqual("env.NEEDED == 'true'", build["if"])
         self.assertIn('DISCOVER_MODULE_LIST="$PWD/discovered/modules.txt"', build["run"])
         self.assertIn('DISCOVER_DEADLINE="$(( $(date +%s) + 290 * 60 ))"', build["run"])
         self.assertIn('if [[ "$status" == "75" && "$FINAL" != "true" ]]; then', build["run"])
         handover = self.step(self.discover, "Hand what this pass left out to the next pass")
         resume = self.step(self.discover, "Download what the previous pass left out")
+        union = self.step(self.discover, "Download what any platform left out")
         self.assertEqual(
-            "discovery-pending-${{ github.run_id }}-${{ inputs.pass == '1' && '2' || '3' }}", handover["with"]["name"]
+            "discovery-pending-${{ github.run_id }}-${{ inputs.pass == '1' && '2' || '3' }}-${{ matrix.platform }}",
+            handover["with"]["name"],
         )
-        self.assertEqual("discovery-pending-${{ github.run_id }}-${{ inputs.pass }}", resume["with"]["name"])
+        self.assertEqual(
+            "discovery-pending-${{ github.run_id }}-${{ inputs.pass }}-${{ matrix.platform }}", resume["with"]["name"]
+        )
+        self.assertEqual("discovery-union-${{ github.run_id }}", union["with"]["name"])
+        retained = self.step(self.discover, "Retain the discovered module list")
+        self.assertEqual(
+            "${{ inputs.pass == 'reconcile' && 'reconciled' || 'discovered' }}-modules-${{ github.run_id }}-${{ matrix.platform }}",
+            retained["with"]["name"],
+        )
+
+    def test_the_pending_platforms_become_the_next_pass_input(self):
+        collect = self.step(self.discover_jobs["collect"], "Collect pending platforms")
+        for flags, expected in (({}, []), ({"LINUX_X86_64": "true"}, ["linux-x86_64"]),
+                                ({"MACOS_AARCH64": "true", "LINUX_AARCH64": "true"}, ["macos-aarch64", "linux-aarch64"])):
+            with tempfile.TemporaryDirectory() as scratch:
+                output = pathlib.Path(scratch) / "output"
+                result = subprocess.run(["bash", "-eo", "pipefail", "-c", collect["run"]],
+                                        env={**os.environ, "GITHUB_OUTPUT": str(output), **flags},
+                                        capture_output=True, text=True, check=False)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual(f"pending={json.dumps(expected, separators=(',', ':'))}\n", output.read_text())
+
+    def unite(self, lists):
+        """Run the union step over each platform's discovered list; return (result, reconcile, union)."""
+        scratch = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, scratch)
+        (scratch / "scripts").mkdir()
+        shutil.copy(ROOT / "scripts/lib.sh", scratch / "scripts/lib.sh")
+        for platform, body in lists.items():
+            directory = scratch / "temp/discovered" / f"discovered-modules-77-{platform}"
+            directory.mkdir(parents=True)
+            (directory / "modules.txt").write_text(body)
+        output = scratch / "output"
+        result = self.run_step(self.jobs["discovery-union"], "Unite the left-out extensions", scratch,
+                               {"DISCOVER": "true", "RUN_ID": "77", "RUNNER_TEMP": str(scratch / "temp"),
+                                "GITHUB_OUTPUT": str(output)})
+        reconcile = None
+        if output.exists():
+            reconcile = json.loads(output.read_text().removeprefix("reconcile="))
+        union = (scratch / "union/pending.txt").read_text() if (scratch / "union/pending.txt").exists() else None
+        return result, reconcile, union
+
+    def test_an_extension_left_out_anywhere_is_left_out_everywhere(self):
+        same = "core\nphar\n!imap\n"
+        result, reconcile, union = self.unite({platform: same for platform in self.PLATFORMS})
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([], reconcile)
+        self.assertEqual("imap\n", union)
+        # Linux x86_64 also left out redis; the other two platforms rebuild without it.
+        result, reconcile, union = self.unite({
+            "macos-aarch64": same, "linux-x86_64": "core\nphar\n!imap\n!redis\n", "linux-aarch64": same,
+        })
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(["macos-aarch64", "linux-aarch64"], reconcile)
+        self.assertEqual("imap\nredis\n", union)
+        # A platform whose list is missing stops the union rather than shrinking it.
+        result, _, _ = self.unite({"macos-aarch64": same, "linux-x86_64": same})
+        self.assertNotEqual(0, result.returncode)
+
+    def compare(self, lists, reconcile):
+        scratch = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, scratch)
+        for name, body in lists.items():
+            directory = scratch / "temp/lists" / name
+            directory.mkdir(parents=True)
+            (directory / "modules.txt").write_text(body)
+        result = self.run_step(self.jobs["discovery-final"], "Compare the platforms' lists", scratch,
+                               {"RECONCILE": json.dumps(reconcile), "RUN_ID": "77",
+                                "RUNNER_TEMP": str(scratch / "temp")})
+        final = scratch / "final/modules.txt"
+        return result, final.read_text() if final.exists() else None
+
+    def test_the_new_branch_gets_one_list_only_when_every_platform_reports_it(self):
+        listed = "core\nphar\n!imap\n!redis\n"
+        # Reconciled platforms are read from the reconcile pass, the rest from their own.
+        result, final = self.compare({
+            "discovered-modules-77-macos-aarch64": "core\nphar\nredis\n!imap\n",
+            "reconciled-modules-77-macos-aarch64": listed,
+            "discovered-modules-77-linux-x86_64": listed,
+            "reconciled-modules-77-linux-aarch64": listed,
+        }, ["macos-aarch64", "linux-aarch64"])
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(listed, final)
+        # A module one platform alone reports cannot be published from one list.
+        result, _ = self.compare({
+            "discovered-modules-77-macos-aarch64": listed,
+            "discovered-modules-77-linux-x86_64": listed,
+            "discovered-modules-77-linux-aarch64": "core\nphar\nposix\n!imap\n!redis\n",
+        }, [])
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("The linux-aarch64 module list differs from the others", result.stderr)
+
+    def test_the_new_branch_must_build_on_every_platform_before_it_merges(self):
+        build = self.jobs["build-new-branch"]
+        self.assertEqual(
+            {"macos-aarch64": "macos-26", "linux-x86_64": "ubuntu-latest", "linux-aarch64": "ubuntu-24.04-arm"},
+            {leg["platform"]: leg["runner"] for leg in build["strategy"]["matrix"]["include"]},
+        )
+        self.assertEqual({"contents": "read"}, build["permissions"])
+        retained = self.step(build, "Retain the module comparison")
+        self.assertEqual("new-branch-build-${{ github.run_id }}-${{ matrix.platform }}", retained["with"]["name"])
+        combine = self.step(self.jobs["notify-failure"], "Combine the platforms' module comparisons")
+        with tempfile.TemporaryDirectory() as scratch:
+            scratch = pathlib.Path(scratch)
+            for platform, diff in (("linux-x86_64", "Missing modules:\n  - imap\n"), ("macos-aarch64", "")):
+                directory = scratch / "new-branch-build" / f"new-branch-build-77-{platform}"
+                directory.mkdir(parents=True)
+                (directory / "module-diff.txt").write_text(diff)
+            script = combine["run"].replace("${{ github.run_id }}", "77")
+            subprocess.run(["bash", "-eo", "pipefail", "-c", script], cwd=scratch, check=True)
+            self.assertEqual("linux-x86_64:\nMissing modules:\n  - imap\n",
+                             (scratch / "new-branch-build/module-diff.txt").read_text())
 
     def test_only_a_discovered_list_reaches_the_edit_and_a_failed_pass_is_reported(self):
         apply = self.step(self.jobs["implement"], "Apply the admitted lifecycle edit")
         self.assertEqual("${{ needs.discovery-scope.outputs.discover }}", apply["env"]["DISCOVERED"])
         self.assertIn('module_list=(--module-list "$RUNNER_TEMP/discovered/modules.txt")', apply["run"])
         notify = self.jobs["notify-failure"]
-        for number in (1, 2, 3):
-            self.assertIn(f"discover-{number}", notify["needs"])
-            self.assertIn(f"needs['discover-{number}'].result == 'failure'", notify["if"])
+        for job in ("discover-1", "discover-2", "discover-3", "discovery-union", "discover-reconcile", "discovery-final"):
+            self.assertIn(job, notify["needs"])
+            self.assertIn(f"needs['{job}'].result == 'failure'", notify["if"])
 
 
 class UpstreamCanaryWorkflowTests(unittest.TestCase):
@@ -589,12 +723,45 @@ class UpstreamCanaryWorkflowTests(unittest.TestCase):
             # imap is static and xdebug off by default; igbinary and redis still fail.
             (scratch / "canary/modules.txt").write_text("core\nimap\nphar\n!igbinary\n!redis\n")
             result = subprocess.run(["bash", "-eo", "pipefail", "-c", step["run"]], cwd=scratch,
-                                    env={**os.environ, "BRANCH": "8.6"}, capture_output=True, text=True, check=False)
+                                    env={**os.environ, "BRANCH": "8.6", "PLATFORM": "linux-x86_64"},
+                                    capture_output=True, text=True, check=False)
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual(
                 "expected-modules/8.6.txt: remove !imap, !xdebug; add imap\n",
-                (scratch / "canary/compiles-again-8.6.txt").read_text(),
+                (scratch / "canary/compiles-again-8.6-linux-x86_64.txt").read_text(),
             )
+
+    def test_a_list_change_is_offered_as_one_line_only_when_every_platform_reports_it(self):
+        step = next(step for step in self.jobs["report"]["steps"]
+                    if step.get("name") == "Report left-out extensions that compile again")
+        # Stop the script where it reaches GitHub: the test reads what it found.
+        script = step["run"].split('number="$(gh issue list')[0] + 'printf "%s" "$found" > found.txt\n'
+        line = "expected-modules/8.6.txt: remove !imap; add imap"
+        cases = (
+            ({"macos-aarch64": line, "linux-x86_64": line, "linux-aarch64": line}, line),
+            ({"macos-aarch64": line, "linux-x86_64": line},
+             f"linux-x86_64 reports: {line}\nmacos-aarch64 reports: {line}"),
+        )
+        for reports, expected in cases:
+            with self.subTest(reports=sorted(reports)), tempfile.TemporaryDirectory() as scratch:
+                scratch = pathlib.Path(scratch)
+                (scratch / "compiles-again").mkdir()
+                for platform, text in reports.items():
+                    (scratch / f"compiles-again/compiles-again-8.6-{platform}.txt").write_text(text + "\n")
+                subprocess.run(["bash", "-eo", "pipefail", "-c", script], cwd=scratch, check=True)
+                self.assertEqual(expected, (scratch / "found.txt").read_text())
+
+    def test_the_canary_builds_every_platform_and_smoke_tests_linux_releases(self):
+        canary = self.jobs["canary"]
+        platforms = canary["strategy"]["matrix"]["platform"]
+        self.assertEqual(
+            {"macos-aarch64": "macos-26", "linux-x86_64": "ubuntu-latest", "linux-aarch64": "ubuntu-24.04-arm"},
+            {platform["name"]: platform["runner"] for platform in platforms},
+        )
+        self.assertEqual("${{ matrix.platform.runner }}", canary["runs-on"])
+        smoke = next(step for step in canary["steps"] if step.get("name") == "Smoke test on Linux distributions")
+        self.assertEqual("matrix.build.mode == 'release' && startsWith(matrix.platform.name, 'linux-')", smoke["if"])
+        self.assertIn("scripts/smoke-test-linux.sh", smoke["run"])
 
     def test_nothing_in_the_canary_starts_or_publishes_a_release(self):
         text = (ROOT / ".github/workflows/upstream-canary.yml").read_text()

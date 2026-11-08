@@ -11,6 +11,6 @@
     "jdx/mise-action": "c2a87611a18de5b3828c5652fe268e992400cb5c"
   },
   "workflows": {
-    ".github/workflows/autorelease-e2e.yml": "sha256:36ffb2d842726be3ce97b1170a7d841b5f28fbdc0f70d3fb580f8082c021d9a7"
+    ".github/workflows/autorelease-e2e.yml": "sha256:1ee048b59ccb6d7bd7a48121c8415e5f00c1a41bad673d4786c6643d66769c3e"
   }
 }

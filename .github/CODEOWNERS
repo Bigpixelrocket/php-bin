@@ -34,5 +34,6 @@
 /scripts/install-spc.sh @loadinglucian
 /scripts/install-build-deps.sh @loadinglucian
 /scripts/attribute-build-failure @loadinglucian
+/scripts/smoke-test-linux.sh @loadinglucian
 /.spc-version @loadinglucian
 /.spc-sha256 @loadinglucian

@@ -756,7 +756,8 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
             return _email(
                 "rebuild_published",
                 f"PHP {version} rebuild published",
-                f"The rebuild revision PHP {version} for macOS arm64 is live and fresh public "
+                f"The rebuild revision PHP {version} for macOS arm64, Linux x86_64, and Linux aarch64 "
+                f"is live and fresh public "
                 f"installs of it were verified: https://github.com/{repository}/releases/tag/{version}. "
                 f"Earlier PHP {base} releases stay published unchanged, and installs of the plain "
                 f"version {base} now resolve to this revision. {EMAIL_NEXT_WATCHER_SENTENCE}",
@@ -766,7 +767,8 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
             return _email(
                 "release_published",
                 f"PHP {version} published",
-                f"The immutable PHP {version} release for macOS arm64 is live and fresh public "
+                f"The immutable PHP {version} release for macOS arm64, Linux x86_64, and Linux aarch64 "
+                f"is live and fresh public "
                 f"installs of it were verified: https://github.com/{repository}/releases/tag/{version}. "
                 f"{EMAIL_NEXT_WATCHER_SENTENCE}",
                 run_url=run_url,

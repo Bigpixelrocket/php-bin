@@ -5,7 +5,7 @@
 ## Verification
 
 - [ ] `scripts/test.sh`
-- [ ] Relevant macOS arm64 build stage
+- [ ] Relevant build stage on every affected platform
 - [ ] Module diff reviewed when the recipe changes
 - [ ] Release contract remains compatible, or the compatibility impact is explained
 

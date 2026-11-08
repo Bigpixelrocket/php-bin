@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "unattendedMutation": "paused",
-  "reason": "Linux build recipe changes have landed, and the publish transaction that builds and publishes all three platforms is still pending; releases resume when it lands.",
-  "changedAt": "2026-11-08T11:39:31+02:00"
+  "unattendedMutation": "enabled",
+  "reason": "The publish transaction now builds, verifies, and publishes the macOS arm64, Linux x86_64, and Linux aarch64 archives together, so unattended releases resume.",
+  "changedAt": "2026-11-08T15:45:08+02:00"
 }

@@ -2,7 +2,8 @@
 
 How this repository detects new upstream PHP releases and lifecycle
 changes, prepares bounded repository work, and publishes immutable,
-verified macOS 26 arm64 CLI binaries without a human in the loop.
+verified PHP CLI binaries for macOS 26 arm64, Linux x86_64, and Linux aarch64
+without a human in the loop.
 
 `PHP autorelease watcher` runs every 12 hours, starts again after every recorded
 release (see [Chained runs](#chained-runs)), and can also be dispatched
@@ -145,24 +146,42 @@ assets with a fresh build, and never overwrites, deletes, or retags a published
 release. A first release on a new PHP branch also requires exact-commit
 `php_bin_ready` and `mise_ready` records.
 
+Every release carries one archive per platform, `php-<tag>-cli-macos-aarch64`,
+`-linux-x86_64`, and `-linux-aarch64` (each `.tar.gz`), and one `SHA256SUMS`
+with a `<sha256>  <filename>` line per archive, sorted by file name, and
+nothing else. A release is published for every platform or for none: a failure
+on any platform stops the transaction before publication.
+
 The build and the built binary never run beside the write token. StaticPHP
 resolves most sources through the GitHub API and runs third-party build
-scripts, so the publish workflow builds, gates, and packages the exact commit
-in a separate job whose token can only read contents; that token authenticates
-StaticPHP's API calls, which anonymous shared runners would lose to rate
-limits. The transaction itself runs in three write-scoped jobs, in order, each
-only after the one before succeeded:
+scripts, so the publish workflow's `build` job builds, gates, and packages the
+exact commit once per platform, each leg on its own native runner (`macos-26`,
+`ubuntu-latest`, `ubuntu-24.04-arm`) with a token that can only read contents;
+that token authenticates StaticPHP's API calls, which anonymous shared runners
+would lose to rate limits. Each Linux leg also runs `scripts/smoke-test-linux.sh`
+on the distributions the archive supports. Each leg reports its artifact ID and
+archive digest under its own platform's output names. The transaction itself
+runs in three write-scoped jobs, in order, each only after the one before
+succeeded:
 
-1. `release` accepts only the build job's artifact, and checks its service
-   digest, exact file set, and the archive and `SHA256SUMS` digests the build
-   reported before any transition. Reconciling an existing release reuses the
-   release's own assets, so it discards the build and still runs when the build
-   failed. It advances to a verified draft, downloads the draft (only the write
+1. `release` accepts only the three build legs' artifacts, by ID and service
+   digest, checks that they hold exactly one archive per platform with the
+   digests each leg reported, writes the one `SHA256SUMS`, and checks the
+   release as a whole (`scripts/validate-autorelease-archive --release-dir`):
+   every archive's `bin/php` is an executable for the platform its name says,
+   every archive carries the same `share/php-bin/manifest.json`, and
+   `SHA256SUMS` is exactly the sorted listing. Reconciling an existing release
+   reuses the release's own assets, which must be such a full release, so it
+   discards the build and still runs when the build failed. It advances to a
+   verified draft titled `PHP <tag>`, downloads the draft (only the write
    token can see one), and hands the draft bytes, the transaction, and the
-   event record to the next jobs as one artifact, by ID and digests.
+   event record to the next jobs as one artifact, by ID and digests; the
+   transaction names every asset's digest.
 2. `verify-draft`, a job whose token can only read contents and that holds no
-   environment, installs the handed-over draft bytes through a temporary local
-   release server.
+   environment, runs once per platform on that platform's native runner. Each
+   leg checks every draft asset against the transaction and the whole-release
+   check, then installs the handed-over draft through a temporary local release
+   server and confirms `mise-php` installed this platform's archive.
 3. `publish` resumes the handed-over transaction. While the release is still a
    draft it recaptures and revalidates the admitted evidence, supersession
    included, because a rerun of the failed jobs reuses the release job's
@@ -180,8 +199,11 @@ only after the one before succeeded:
    published, because the recorded state asks GitHub whether the release is
    public and, only when GitHub cannot answer, keeps an earlier attempt's
    record that it was.
-4. `verify-public`, read-only like `verify-draft`, runs fresh public
-   exact-version and branch-shorthand installs.
+4. `verify-public`, read-only like `verify-draft` and also once per platform,
+   downloads the public release, checks every asset against the transaction,
+   checks each asset against the immutable release's attestation
+   (`gh release verify-asset`), and runs fresh public exact-version and
+   branch-shorthand installs.
 5. `finalize` completes the durable event record through an exact-SHA pull
    request. Rerunning it is safe: a record already on main that completes
    exactly this release, merged by an earlier attempt or recovered by the
@@ -211,7 +233,10 @@ themselves are protected paths: a patch that touched `autorelease/**`,
 validation, so the code under test can never be the code doing the testing.
 
 A published release whose event record is missing is recovered by the watcher
-beside the admitted plan. When that recovery merges, it moves the main the plan
+beside the admitted plan. The recovery accepts the release exactly as it was
+published, a full release or one from before Linux builds with only the macOS
+archive, checks each asset against the release attestation, and records the
+digest of every asset it holds. When that recovery merges, it moves the main the plan
 was admitted against, so a plan that would publish, implement an edit, or write
 a record against that base waits for the next run instead of failing this one.
 
@@ -336,7 +361,9 @@ cascade drains.
 
 `Upstream canary` (`.github/workflows/upstream-canary.yml`, twice a day)
 builds what php-src has tagged but php-bin has not published, straight from
-each tag, with the release recipe and its module gate, in a read-only job. `scripts/select-canary-builds` picks the newest unpublished stable tag of
+each tag, with the release recipe and its module gate, in read-only jobs, once
+per platform on the same native runners a release uses. A Linux build of a
+maintained branch also runs the distribution smoke test the release runs. `scripts/select-canary-builds` picks the newest unpublished stable tag of
 every maintained branch, built exactly as its release would be, and the newest
 tag of any stability for a branch with no module list yet, which covers the
 next PHP branch from its first alpha. That one is built the way its
@@ -349,13 +376,15 @@ its newest stable tag with every extension tried. An extension that compiles
 there again is reported in one owner issue titled
 `Upstream canary: a left-out PHP extension compiles again`, with the exact
 edit to `expected-modules/<branch>.txt`: its `!` line removed and, for a
-static or default-on extension, the modules it adds to `php -m`. That pull
-request changes the branch's recipe identity, so the watcher rebuilds the
+static or default-on extension, the modules it adds to `php -m`. One list
+serves every platform, so the edit is offered as one line only when every
+platform reports the same one; otherwise each platform's report is listed. That
+pull request changes the branch's recipe identity, so the watcher rebuilds the
 branch with it.
 
 A discovery or recheck that does not finish within one job stops itself, as
 `new_branch` discovery passes do, and the next canary run resumes it from what
-it left out (an Actions cache per mode and tag). Until one finishes, that
+it left out (an Actions cache per platform, mode, and tag). Until one finishes, that
 build proves nothing, so the canary issue below stays as it is.
 
 php.net announces a patch days after its tag and a branch months after its
@@ -504,8 +533,8 @@ validators, and policy files all accept any `<major>.<minor>`, so PHP `8.6`,
 
 When upstream evidence first shows a new branch, `autorelease-implement.yml`
 first learns the branch's module list from a discovery build at the admitted
-base (`DISCOVER_MODULE_LIST` in `scripts/build.sh`, read-only like every
-build). Every stage extension is tried. When the build fails and a compiler
+base on every platform, each on its own native runner (`DISCOVER_MODULE_LIST`
+in `scripts/build.sh`, read-only like every build). Every stage extension is tried. When the build fails and a compiler
 error points into an extension's source (`scripts/attribute-build-failure`),
 that extension is left out, with every shared extension that requires it, and
 the build is retried with the libraries already built. An error inside one of
@@ -528,14 +557,24 @@ list is what then built and passed the gate, plus a `!<extension>` line for
 each extension left out. New core modules a branch adds are simply part of
 what built.
 
+One list serves every platform, so an extension left out on any platform is
+left out on all of them. The `discovery-union` job unites what each platform
+left out; a platform that left out less is rebuilt once with that union as its
+starting point (the `reconcile` pass of the same workflow), and the others
+already reported the list for exactly the union. `discovery-final` then
+requires every platform's list to be byte-identical; a module only one
+platform reports stops the run with the owner issue, since one list cannot
+describe it.
+
 `scripts/apply-autorelease-plan` writes that list as
 `expected-modules/<branch>.txt` (the only per-branch recipe input; `stages/`
 and `patches/` are shared by every branch) in its canonical form, and
 regenerates `support-policy.json` with the branch added, bound to the plan's
 evidence digests and action key and accepted at the capture time. The sealed
 edit is validated in a clean checkout, and the branch's first release is then
-built for real at the validated commit, which must pass the exact module
-comparison against the list. Every later build of the branch reads the same
+built for real at the validated commit on every platform, each of which must
+pass the exact module comparison against the list; the owner issue carries
+each failing platform's module diff. Every later build of the branch reads the same
 list: a `!` line keeps the extension out, and the comparison stays exact, so a
 patch release never silently loses an extension the branch shipped. A list
 already on the base, such as one corrected by pull request, is used as it is
@@ -619,7 +658,9 @@ gh workflow run autorelease-e2e.yml \
 
 The other suites are `notification-canary`, which creates, replays, and closes
 one namespaced issue, and `live-canary`, which installs an already published
-version through `mise-php` (`-f live_version=<version>`).
+version through `mise-php` on every platform (`-f live_version=<version>`); for
+a version published before Linux builds, the Linux legs pass without
+installing.
 
 To reproduce a classification offline, run the classifier and admission
 against a retained watcher artifact (`gh run download <run-id> --name
