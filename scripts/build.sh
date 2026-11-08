@@ -386,8 +386,9 @@ replace_links_into_source() {
 # libde265, the HEIC decoder imagick uses, picks AVX2 and AVX-512 kernels with
 # __builtin_cpu_supports, which needs GCC's or LLVM's CPU-detection runtime;
 # zig's runtime has none, so the library cannot link. Defining both builtins away
-# leaves the SSE4.1 kernels in use on every x86_64 CPU and never runs an AVX
-# instruction. The definitions hold no spaces because StaticPHP's zig wrapper
+# means no AVX instruction ever runs. The SSE4.1 kernels are chosen at runtime
+# from cpuid, so a CPU with SSE4.1 uses them and an older x86_64 CPU uses the
+# plain C kernels. The definitions hold no spaces because StaticPHP's zig wrapper
 # splits SPC_COMPILER_EXTRA on them.
 build_libraries_alone() {
   local extensions=",$EXTENSIONS,${SHARED_EXTENSIONS:+$SHARED_EXTENSIONS,}"

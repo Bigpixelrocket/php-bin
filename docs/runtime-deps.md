@@ -49,9 +49,10 @@ assume:
   Unix password when it serves IMAP itself, which PHP's imap extension, a
   client, never does. PHP's own `crypt()` and `password_hash()` use PHP's
   bundled implementation, and the smoke test checks both on every distribution.
-- libde265, the HEIC decoder behind imagick, uses its SSE4.1 kernels on every
-  x86_64 CPU. Its AVX2 and AVX-512 kernels need a CPU-detection runtime zig does
-  not provide, so they are never selected.
+- libde265, the HEIC decoder behind imagick, uses its SSE4.1 kernels on x86_64
+  CPUs that have SSE4.1 and its plain C kernels on older ones. Its AVX2 and
+  AVX-512 kernels need a CPU-detection runtime zig does not provide, so they are
+  never selected.
 
 ## SQL Server
 
