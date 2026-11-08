@@ -198,3 +198,24 @@ read_shared_extensions() {
     }
   ' "$1"
 }
+
+# Print an ELF file's dynamic symbol table as `readelf --dyn-syms -W` does, with
+# every symbol's type in one field. zig's linker leaves the ELF OS/ABI at System V,
+# so readelf names an ifunc's STT_GNU_IFUNC type "<OS specific>: 10", three fields
+# where every other type has one, and the name would be read from the wrong field.
+# PHP 8.2 and 8.3 export their x86_64 base64 functions as ifuncs when built for the
+# baseline CPU.
+elf_dynamic_symbols() {
+  readelf --dyn-syms -W "$1" | sed -E 's/<([A-Za-z]+) specific>: *([0-9]+)/\1_specific_\2/'
+}
+
+# Print the dynamic symbols an ELF file defines, one per line, without versions.
+elf_defined_symbols() {
+  elf_dynamic_symbols "$1" | awk '$7 != "UND" && $8 != "" { sub(/@.*/, "", $8); print $8 }'
+}
+
+# Print the unversioned symbols an ELF file needs from elsewhere, one per line.
+# Weak references are left out, since they resolve to null when absent.
+elf_required_symbols() {
+  elf_dynamic_symbols "$1" | awk '$7 == "UND" && $5 != "WEAK" && $8 != "" && $8 !~ /@/ { print $8 }'
+}

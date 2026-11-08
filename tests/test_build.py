@@ -24,7 +24,7 @@ FAKE_SPC = textwrap.dedent(
     if [[ "$*" == "${FAKE_FAIL:-}" ]]; then exit 1; fi
     if [[ "$1" == "extract" ]]; then
       mkdir -p source/php-src/sapi/micro/patches
-      printf 'new\n' > source/php-src/target.txt
+      printf '%s\n' "${FAKE_TARGET:-new}" > source/php-src/target.txt
       if [[ -n "${FAKE_PATCH_DIR:-}" ]]; then cp "$FAKE_PATCH_DIR"/* source/php-src/sapi/micro/patches/; fi
       for entry in $FAKE_EXT_DIRS; do
         mkdir -p "source/php-src/ext/${entry%%:*}"
@@ -34,6 +34,7 @@ FAKE_SPC = textwrap.dedent(
     if [[ "$1 ${2:-}" == "craft craft-build.yml" ]]; then
       echo "left: $(cd source/php-src/ext && echo *)" >> "$SPC_CALLS"
       echo "micro: ${SPC_MICRO_PATCHES-unset}" >> "$SPC_CALLS"
+      echo "target: $(cat source/php-src/target.txt)" >> "$SPC_CALLS"
       echo "static: $(sed -n 's/^extensions: //p' craft-build.yml)" >> "$SPC_CALLS"
       echo "shared: $(sed -n 's/^shared-extensions: //p' craft-build.yml)" >> "$SPC_CALLS"
       mkdir -p log buildroot/lib
@@ -151,6 +152,39 @@ class BuildScriptTests(unittest.TestCase):
         self.calls.unlink()
         self.build("8.5.12", SPC_MICRO_PATCHES="cli_checks_80", **env)
         self.assertEqual([""], self.calls_with("micro: "))
+
+    def test_a_branch_applies_its_own_php_src_patches_before_the_build(self):
+        branch_patches = self.root / "patches/php-src/8.3"
+        branch_patches.mkdir(parents=True)
+        (branch_patches / "0001-backport.patch").write_text(
+            "--- a/target.txt\n+++ b/target.txt\n@@ -1 +1 @@\n-new\n+patched\n"
+        )
+        result = self.build("8.3.36")
+        self.assertEqual(["patched"], self.calls_with("target: "))
+        self.assertIn("Applied php-src patch patches/php-src/8.3/0001-backport.patch.", result.stdout)
+        # Another branch has no directory and builds its source unchanged.
+        self.calls.unlink()
+        self.build("8.4.27")
+        self.assertEqual(["new"], self.calls_with("target: "))
+        # A source that already carries the patch, as a reused extracted tree does, keeps it.
+        self.calls.unlink()
+        result = self.build("8.3.36", FAKE_TARGET="patched")
+        self.assertEqual(["patched"], self.calls_with("target: "))
+        self.assertIn("patches/php-src/8.3/0001-backport.patch is already applied.", result.stdout)
+        # A patch that does not apply stops the build before StaticPHP builds anything.
+        self.calls.unlink()
+        result = self.build("8.3.36", FAKE_TARGET="other")
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual(["doctor", "craft craft-download.yml", "extract php-src,micro"], self.calls.read_text().splitlines())
+        self.assertIn("patches/php-src/8.3/0001-backport.patch does not apply to PHP 8.3.36.", result.stderr)
+
+    def test_the_php_src_backports_apply_only_to_their_branch(self):
+        directories = sorted(path.name for path in (ROOT / "patches/php-src").iterdir())
+        self.assertEqual(["8.3"], directories)
+        backport = (ROOT / "patches/php-src/8.3/0001-autotools-refactor-avx-512-checks.patch").read_text()
+        self.assertIn("d7ddf83dde6bd0829d991a6c45aa8baa85705ff9", backport)
+        self.assertIn("+[php_cv_have_avx512],", backport)
+        self.assertIn("+[php_cv_have_avx512vbmi],", backport)
 
     def calls_with(self, prefix):
         return [line[len(prefix):] for line in self.calls.read_text().splitlines() if line.startswith(prefix)]
@@ -315,6 +349,78 @@ DEPENDENCY_TABLE = (
     " │ curl       │ curl         │              │             │                │ false     │\n"
     " └────────────┴──────────────┴──────────────┴─────────────┴────────────────┴───────────┘\n"
 )
+
+
+# Dynamic symbol tables as binutils' readelf prints them for zig-linked files, whose
+# ELF OS/ABI stays System V: an ifunc's type is then "<OS specific>: 10".
+FAKE_READELF = textwrap.dedent(
+    """\
+    #!/usr/bin/env bash
+    case "$3" in
+      *php)
+        cat <<'TABLE'
+
+    Symbol table '.dynsym' contains 5 entries:
+       Num:    Value          Size Type    Bind   Vis      Ndx Name
+         0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND
+         1: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND memcpy@GLIBC_2.14 (3)
+         2: 00000000017a0b30   581 FUNC    GLOBAL DEFAULT   15 zend_hash_find
+      8809: 0000000003b502b0    13 <OS specific>: 10 GLOBAL DEFAULT   15 php_base64_encode
+     25993: 0000000003b50523    13 <OS specific>: 10 GLOBAL DEFAULT   15 php_base64_decode_ex
+         5: 0000000004a00000     8 OBJECT  GLOBAL DEFAULT   24 executor_globals
+    TABLE
+        ;;
+      *mongodb.so)
+        cat <<'TABLE'
+
+    Symbol table '.dynsym' contains 6 entries:
+       Num:    Value          Size Type    Bind   Vis      Ndx Name
+         0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND
+         1: 0000000000000000     0 NOTYPE  GLOBAL DEFAULT  UND php_base64_encode
+         2: 0000000000000000     0 NOTYPE  GLOBAL DEFAULT  UND php_base64_decode_ex
+         3: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND memcpy@GLIBC_2.14 (3)
+         4: 0000000000000000     0 NOTYPE  WEAK   DEFAULT  UND __gmon_start__
+         5: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND getrandom
+         6: 00000000000a1000    42 FUNC    GLOBAL DEFAULT   12 get_module
+    TABLE
+        ;;
+    esac
+    """
+)
+
+
+class ElfSymbolTests(unittest.TestCase):
+    def symbols(self, function, file):
+        with tempfile.TemporaryDirectory() as scratch:
+            readelf = pathlib.Path(scratch) / "readelf"
+            readelf.write_text(FAKE_READELF)
+            readelf.chmod(0o755)
+            result = subprocess.run(
+                ["bash", "-c", f'source "$1" && {function} "$2"', "-", str(ROOT / "scripts/lib.sh"), file],
+                env={**os.environ, "PATH": f"{scratch}:{os.environ['PATH']}"},
+                capture_output=True, text=True, check=True,
+            )
+        return set(result.stdout.split())
+
+    def test_an_ifunc_bin_php_exports_counts_as_defined(self):
+        defined = self.symbols("elf_defined_symbols", "buildroot/bin/php")
+        self.assertLessEqual(
+            {"zend_hash_find", "php_base64_encode", "php_base64_decode_ex", "executor_globals"}, defined
+        )
+        self.assertNotIn("memcpy", defined)
+        self.assertNotIn("DEFAULT", defined)
+
+    def test_an_extension_needs_its_unversioned_strong_references(self):
+        self.assertEqual(
+            {"php_base64_encode", "php_base64_decode_ex", "getrandom"},
+            self.symbols("elf_required_symbols", "buildroot/modules/mongodb.so"),
+        )
+        # With bin/php's ifuncs counted, only the glibc call newer than the baseline is left.
+        self.assertEqual(
+            {"getrandom"},
+            self.symbols("elf_required_symbols", "modules/mongodb.so")
+            - self.symbols("elf_defined_symbols", "bin/php"),
+        )
 
 
 class AttributionTests(unittest.TestCase):

@@ -403,7 +403,13 @@ an extension source into it (upstream left `ext/imap/tests` behind after imap
 moved to PECL). It also resolves StaticPHP's micro patches itself: for each
 one, the newest file not newer than the branch that applies cleanly. StaticPHP's
 own table stops at the newest branch it knows and falls back to the oldest
-file, which no longer applies to a newer branch.
+file, which no longer applies to a newer branch. A branch that needs an
+upstream php-src fix it was released without carries the backport in
+`patches/php-src/<branch>/`, applied in name order before StaticPHP runs
+buildconf; a patch that no longer applies stops the build. PHP 8.3 carries
+php-src `d7ddf83`, which lets StaticPHP's `php_cv_have_avx512=no` reach
+configure, so 8.3 leaves out the base64 AVX-512 kernels a baseline x86_64
+build cannot compile, as 8.4 and later do.
 
 ## Branch status
 
