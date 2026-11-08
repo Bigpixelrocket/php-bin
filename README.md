@@ -137,7 +137,8 @@ off-by-default extension to report a stable version. On macOS, every `.so`
 must link only system libraries and target macOS 26.0. On Linux, `bin/php` and
 every `.so` must need no shared library outside glibc (`libc`, `libm`, `libdl`,
 `libpthread`, `librt`, `libresolv`, `libutil`, and the dynamic loader) and no
-glibc symbol newer than 2.17.
+glibc symbol newer than 2.17, and every symbol a `.so` leaves undefined must be
+defined by `bin/php` or by an extension it requires.
 
 When the gate is green, package the build with its full PHP patch version:
 
@@ -148,7 +149,9 @@ scripts/package.sh .build/8.4/s4/buildroot/bin/php 8.4.5
 On Linux, `scripts/smoke-test-linux.sh` then runs the archive in Docker
 containers of Fedora, Ubuntu 16.04 and current, Debian stable, Gentoo, and, on
 x86_64, Arch Linux. Each checks `php -v`, the exact module list, every shared
-extension, and HTTPS through OpenSSL streams and curl:
+extension, PHP's `crypt()` and `password_hash()`, and HTTPS through OpenSSL
+streams and curl. It needs Docker; set `DOCKER="sudo docker"` where Docker needs
+root:
 
 ```bash
 scripts/smoke-test-linux.sh .artifacts/php-8.4.5-cli-linux-x86_64.tar.gz expected-modules/8.4.txt

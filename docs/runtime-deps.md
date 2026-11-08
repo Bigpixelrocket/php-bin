@@ -25,6 +25,20 @@ distribution package besides glibc itself, which every such system has.
 musl distributions such as Alpine, and NixOS, which has no dynamic loader at
 the standard path, cannot run these archives.
 
+### HTTPS certificates on Linux
+
+PHP's OpenSSL streams and its curl extension both look for CA certificates
+where OpenSSL was configured to, `/etc/ssl`: the bundle `/etc/ssl/cert.pem` and
+the hashed certificate folder `/etc/ssl/certs`. curl is built with no CA path
+of its own and uses the same defaults. Without any php.ini setting, HTTPS
+verified on Fedora, Arch Linux, Ubuntu 16.04 and current, Debian stable, and
+Gentoo, each with its CA package installed, but failed on CentOS 7, where
+`/etc/ssl/certs` points into `/etc/pki/tls/certs`, which has neither a hashed
+folder nor `cert.pem`. Setting `openssl.cafile` and `curl.cainfo` to the
+distribution's bundle, `/etc/ssl/certs/ca-certificates.crt` or
+`/etc/pki/tls/certs/ca-bundle.crt`, works on all of them, and that is what
+`mise-php` writes into each install's php.ini on Linux.
+
 Two libraries are built differently on Linux because zig, the compiler the
 Linux build uses, is stricter than the GCC that StaticPHP's Linux recipes
 assume:

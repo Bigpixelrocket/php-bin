@@ -236,7 +236,10 @@ COPYFILE_DISABLE=1 tar -czf "$ARTIFACT_DIR/$ARTIFACT_NAME" -C "$PACKAGE" .
 printf '%s  %s\n' "$(sha256_of "$ARTIFACT_DIR/$ARTIFACT_NAME")" "$ARTIFACT_NAME" \
   > "$ARTIFACT_DIR/SHA256SUMS"
 
-tar -tzf "$ARTIFACT_DIR/$ARTIFACT_NAME" | grep -Eq '^\./bin/php$'
-tar -tzf "$ARTIFACT_DIR/$ARTIFACT_NAME" | grep -Eq '^\./share/php-bin/manifest\.json$'
+# grep reads the whole listing: stopping at the first match would leave GNU tar
+# writing to a closed pipe, which it reports as an error.
+tar -tzf "$ARTIFACT_DIR/$ARTIFACT_NAME" > "$TEMP_DIR/members.txt"
+grep -Fqx './bin/php' "$TEMP_DIR/members.txt"
+grep -Fqx './share/php-bin/manifest.json' "$TEMP_DIR/members.txt"
 echo "Created $ARTIFACT_DIR/$ARTIFACT_NAME"
 echo "Created $ARTIFACT_DIR/SHA256SUMS"
