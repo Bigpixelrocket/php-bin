@@ -2,7 +2,7 @@
 # once per clone. System build libraries come from scripts/install-build-deps.sh
 # and StaticPHP from scripts/install-spc.sh, not from mise.
 [tools]
-python = "3.12"      # matches the ubuntu-24.04 system python3 that CI runs scripts/test.sh on
+python = "3.12"      # matches the system python3 on CI's ubuntu-latest (24.04) runner
 shellcheck = "0.11"  # CI lints shell scripts; 0.9 (CI's apt build) has no macOS arm64 binary
 jq = "1.8"           # used by scripts and contract tests
 
