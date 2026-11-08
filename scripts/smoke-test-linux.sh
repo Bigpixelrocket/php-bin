@@ -4,7 +4,8 @@
 # each in its own container: PHP starts, `php -m` with every default-on shared
 # extension equals the branch's module list, every shared extension loads cleanly
 # on its own, and HTTPS works through both OpenSSL streams and curl once
-# openssl.cafile and curl.cainfo name the distribution's CA bundle.
+# openssl.cafile and curl.cainfo name the distribution's CA bundle. A last Debian
+# run repeats every check with PHP under QEMU on the architecture's baseline CPU.
 #
 # HTTPS with no CA setting at all is measured and reported, never failed: OpenSSL
 # looks under /etc/ssl, which only some distributions fill, and each install's
@@ -47,6 +48,15 @@ IMAGES=(
 if [[ "$PLATFORM" == linux-x86_64 ]]; then
   IMAGES+=(archlinux:latest)
 fi
+# Every container shares the build machine's CPU, so none would catch an
+# instruction older CPUs lack. One more Debian run checks the same things with
+# PHP running under QEMU on the architecture's baseline CPU: qemu64 has nothing
+# past SSE3, and the Cortex-A53 is ARMv8.0.
+case "$PLATFORM" in
+  linux-x86_64) BASELINE_CPU="qemu-x86_64 -cpu qemu64" ;;
+  linux-aarch64) BASELINE_CPU="qemu-aarch64 -cpu cortex-a53" ;;
+esac
+RUNS=("${IMAGES[@]}" "debian:stable+qemu")
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/php-bin-smoke.XXXXXX")"
 CONTAINERS=()
@@ -100,6 +110,16 @@ elif command -v dnf > /dev/null; then
   dnf install -y -q ca-certificates > /dev/null 2>&1
 elif command -v pacman > /dev/null; then
   pacman -Sy --noconfirm --needed ca-certificates > /dev/null 2>&1
+fi
+
+# QEMU, set only for the Debian run, names the emulator command PHP runs under.
+if [ -n "${QEMU:-}" ]; then
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq qemu-user > /dev/null 2>&1; then
+    echo "FAIL could not install qemu-user"
+    exit 1
+  fi
+  PHP="$QEMU $PHP"
+  echo "cpu $QEMU"
 fi
 
 echo "glibc $(getconf GNU_LIBC_VERSION | cut -d' ' -f2)"
@@ -216,19 +236,24 @@ SH
 
 FAILED=()
 index=0
-for image in "${IMAGES[@]}"; do
+for run in "${RUNS[@]}"; do
   index=$((index + 1))
   name="php-bin-smoke-$$-$index"
   log="$WORK_DIR/$index.log"
-  echo "=== $image"
+  image="${run%+qemu}"
+  qemu=""
+  if [[ "$run" == *+qemu ]]; then
+    qemu="$BASELINE_CPU"
+  fi
+  echo "=== $run"
   CONTAINERS+=("$name")
   if ! "${DOCKER[@]}" pull -q "$image" > /dev/null; then
     echo "FAIL could not pull $image"
-    FAILED+=("$image")
+    FAILED+=("$run")
     continue
   fi
   result=0
-  "${DOCKER[@]}" run --rm --name "$name" \
+  "${DOCKER[@]}" run --rm --name "$name" -e "QEMU=$qemu" \
     -v "$WORK_DIR/php:/opt/php-bin:ro" \
     -v "$WORK_DIR/inside.sh:/in/inside.sh:ro" \
     -v "$WORK_DIR/flags.txt:/in/flags.txt:ro" \
@@ -242,7 +267,7 @@ for image in "${IMAGES[@]}"; do
     result=1
   fi
   if ((result != 0)); then
-    FAILED+=("$image")
+    FAILED+=("$run")
   fi
 done
 
@@ -250,4 +275,4 @@ if ((${#FAILED[@]})); then
   echo "Smoke test failed on: ${FAILED[*]}" >&2
   exit 1
 fi
-echo "Smoke test passed on: ${IMAGES[*]}"
+echo "Smoke test passed on: ${RUNS[*]}"
