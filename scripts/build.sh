@@ -11,10 +11,14 @@ PLATFORM="$(build_platform)"
 # Linux binaries link glibc dynamically, so they can load the shared extensions,
 # and everything else statically. The glibc 2.17 baseline (CentOS 7, Ubuntu
 # 16.04) makes one binary run on every maintained glibc distribution; zig links
-# against that version's symbols whatever glibc the build machine has.
+# against that version's symbols whatever glibc the build machine has. The target
+# names the architecture rather than `native`, which would let zig use every
+# instruction the build machine's CPU has (AVX2 or AVX-512 on CI runners) and
+# crash older CPUs; a named architecture compiles for its baseline CPU (x86-64,
+# ARMv8-A).
 LINUX_GLIBC_BASELINE="2.17"
 if [[ "$PLATFORM" == linux-* ]]; then
-  export SPC_TARGET="native-native-gnu.$LINUX_GLIBC_BASELINE"
+  export SPC_TARGET="${PLATFORM#linux-}-linux-gnu.$LINUX_GLIBC_BASELINE"
 fi
 
 # The publisher passes the full release tag, 8.4.5-1 for a rebuild; the build
@@ -348,6 +352,26 @@ C
     && "$zig" ar rcs buildroot/lib/libcrypt.a "$BUILD_DIR/crypt-stub/crypt.o"
 }
 
+# Replace every symlink in buildroot that resolves into source/ with a copy of
+# its file. StaticPHP installs c-client with `cp -rf c-client/*.h`; c-client's
+# build made those absolute symlinks into source/imap, and GNU cp copies the
+# links where macOS cp copies the files. A discovery retry deletes source/ and
+# StaticPHP then skips imap as installed, since it checks only libc-client.a, so
+# PHP's configure would meet dangling headers. Without a source/ there is
+# nothing to replace: an earlier attempt already did it.
+replace_links_into_source() {
+  local source_dir link target
+
+  [[ -d source ]] || return 0
+  source_dir="$(cd source && pwd -P)" || return 1
+  while IFS= read -r -d '' link; do
+    target="$(readlink -f "$link")" || return 1
+    if [[ "$target" == "$source_dir/"* ]]; then
+      cp --remove-destination "$target" "$link" || return 1
+    fi
+  done < <(find buildroot -type l -print0)
+}
+
 # Build the libraries zig cannot compile as StaticPHP's Linux recipes expect on
 # their own, each with only the allowance it needs, before the main build, which
 # then finds them installed and skips them.
@@ -376,6 +400,7 @@ build_libraries_alone() {
     fi
     SPC_COMPILER_EXTRA="${SPC_COMPILER_EXTRA:+$SPC_COMPILER_EXTRA }-Wno-error=implicit-function-declaration -Wno-error=incompatible-function-pointer-types" \
       "$SPC_BIN" build:libs "$libraries" || return 1
+    replace_links_into_source || return 1
   fi
   if [[ "$PLATFORM" == linux-x86_64 && "$extensions" == *",imagick,"* ]]; then
     SPC_COMPILER_EXTRA="${SPC_COMPILER_EXTRA:+$SPC_COMPILER_EXTRA }-D__builtin_cpu_init()=(void)0 -D__builtin_cpu_supports(feature)=0" \

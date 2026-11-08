@@ -168,8 +168,10 @@ On Linux, `scripts/smoke-test-linux.sh` then runs the archive in Docker
 containers of Fedora, Ubuntu 16.04 and current, Debian stable, Gentoo, and, on
 x86_64, Arch Linux. Each checks `php -v`, the exact module list, every shared
 extension, PHP's `crypt()` and `password_hash()`, and HTTPS through OpenSSL
-streams and curl. It needs Docker; set `DOCKER="sudo docker"` where Docker needs
-root:
+streams and curl. A last Debian run repeats those checks with PHP under QEMU on
+the architecture's baseline CPU, since every container shares the build
+machine's CPU and could not catch an instruction older CPUs lack. It needs
+Docker; set `DOCKER="sudo docker"` where Docker needs root:
 
 ```bash
 scripts/smoke-test-linux.sh .artifacts/php-8.4.5-cli-linux-x86_64.tar.gz expected-modules/8.4.txt
