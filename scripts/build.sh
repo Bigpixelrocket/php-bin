@@ -11,10 +11,14 @@ PLATFORM="$(build_platform)"
 # Linux binaries link glibc dynamically, so they can load the shared extensions,
 # and everything else statically. The glibc 2.17 baseline (CentOS 7, Ubuntu
 # 16.04) makes one binary run on every maintained glibc distribution; zig links
-# against that version's symbols whatever glibc the build machine has.
+# against that version's symbols whatever glibc the build machine has. The target
+# names the architecture rather than `native`, which would let zig use every
+# instruction the build machine's CPU has (AVX2 or AVX-512 on CI runners) and
+# crash older CPUs; a named architecture compiles for its baseline CPU (x86-64,
+# ARMv8-A).
 LINUX_GLIBC_BASELINE="2.17"
 if [[ "$PLATFORM" == linux-* ]]; then
-  export SPC_TARGET="native-native-gnu.$LINUX_GLIBC_BASELINE"
+  export SPC_TARGET="${PLATFORM#linux-}-linux-gnu.$LINUX_GLIBC_BASELINE"
 fi
 
 # The publisher passes the full release tag, 8.4.5-1 for a rebuild; the build
