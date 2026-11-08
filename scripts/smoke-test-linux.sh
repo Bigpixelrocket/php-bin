@@ -148,6 +148,23 @@ else
   status=1
 fi
 
+# The build links a libcrypt whose crypt() always fails, for imap's c-client
+# alone; PHP's crypt() and password functions must still use PHP's bundled
+# implementation. The expected hash is what `openssl passwd -6 -salt saltsalt x`
+# prints.
+if $PHP -n -r '
+  $hash = password_hash("secret", PASSWORD_DEFAULT);
+  $sha512 = crypt("x", "\$6\$saltsalt\$");
+  exit(password_verify("secret", $hash) && !password_verify("other", $hash)
+    && $sha512 === "\$6\$saltsalt\$8RWsOfwR6M6PpnoeQiEiWzNTPo1f0HjVYjDnLZhGx16aBFRkeqiHAzfXP/LgrOWMBMXqiU2pLrXsSOHNUyUm91"
+    ? 0 : 1);
+'; then
+  echo "ok crypt and password_hash use PHP's implementation"
+else
+  echo "FAIL crypt or password_hash"
+  status=1
+fi
+
 bundle=""
 for candidate in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt \
   /etc/ssl/cert.pem /etc/ssl/ca-bundle.pem; do

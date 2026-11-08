@@ -25,6 +25,20 @@ distribution package besides glibc itself, which every such system has.
 musl distributions such as Alpine, and NixOS, which has no dynamic loader at
 the standard path, cannot run these archives.
 
+Two libraries are built differently on Linux because zig, the compiler the
+Linux build uses, is stricter than the GCC that StaticPHP's Linux recipes
+assume:
+
+- imap's c-client library links a `crypt()` that always fails instead of the
+  system libcrypt, which glibc 2.17 ships as `libcrypt.so.1` while Fedora and
+  Arch ship only `libcrypt.so.2`. c-client calls `crypt()` only to check a local
+  Unix password when it serves IMAP itself, which PHP's imap extension, a
+  client, never does. PHP's own `crypt()` and `password_hash()` use PHP's
+  bundled implementation, and the smoke test checks both on every distribution.
+- libde265, the HEIC decoder behind imagick, uses its SSE4.1 kernels on every
+  x86_64 CPU. Its AVX2 and AVX-512 kernels need a CPU-detection runtime zig does
+  not provide, so they are never selected.
+
 ## SQL Server
 
 `sqlsrv` and `pdo_sqlsrv` require a compatible ODBC driver at runtime. On an

@@ -212,6 +212,12 @@ EOF
   echo "extra-env:"
   if [[ "$PLATFORM" == macos-* ]]; then
     echo '  MACOSX_DEPLOYMENT_TARGET: "26.0"'
+  else
+    # zig carries current glibc headers whatever version it links against, so a
+    # configure check for a declaration finds functions glibc 2.17 lacks. These
+    # are the ones a shipped extension uses (excimer); it has fallbacks for both.
+    echo '  ac_cv_have_decl_gettid: "no"'
+    echo '  ac_cv_have_decl_pthread_attr_setsigmask_np: "no"'
   fi
   cat <<EOF
   ac_cv_func_memset_s: "no"
@@ -515,6 +521,36 @@ verify_linux_elf() {
   ' | LC_ALL=C sort -u)
 }
 
+# Print the dynamic symbols an ELF file defines, one per line, without versions.
+elf_defined_symbols() {
+  readelf --dyn-syms -W "$1" | awk '$7 != "UND" && $8 != "" { sub(/@.*/, "", $8); print $8 }'
+}
+
+# Fail unless every unversioned symbol a Linux shared extension leaves undefined
+# is defined by bin/php or by a shared extension it requires. A shared object may
+# link with undefined symbols, so a call to a glibc function newer than the
+# baseline, which configure found declared in zig's current glibc headers, links
+# cleanly and only fails when an older glibc loads it. Weak references are
+# allowed, since they resolve to null when absent.
+verify_linux_symbols_resolve() {
+  local so_file="$1" label="$2" requires="$3" provided="$4" dependency missing
+
+  for dependency in ${requires//,/ }; do
+    if [[ "$dependency" != "-" ]]; then
+      elf_defined_symbols "$(dirname "$so_file")/$dependency.so" >> "$provided"
+    fi
+  done
+  missing="$(comm -23 \
+    <(readelf --dyn-syms -W "$so_file" \
+      | awk '$7 == "UND" && $5 != "WEAK" && $8 != "" && $8 !~ /@/ { print $8 }' | LC_ALL=C sort -u) \
+    <(LC_ALL=C sort -u "$provided"))"
+  if [[ -n "$missing" ]]; then
+    echo "$label needs symbols neither bin/php nor its required extensions define, such as glibc functions newer than $LINUX_GLIBC_BASELINE:" >&2
+    printf '  %s\n' "${missing//$'\n'/$'\n'  }" >&2
+    return 1
+  fi
+}
+
 "$PHP_BIN" -v
 "$PHP_BIN" -r 'exit(PHP_SAPI === "cli" ? 0 : 1);'
 if [[ "$PLATFORM" == macos-* ]]; then
@@ -681,6 +717,8 @@ verify_shared_extensions() {
 
     if [[ "$PLATFORM" == linux-* ]]; then
       verify_linux_elf "$so_file" "$name.so"
+      elf_defined_symbols "$PHP_BIN" > "$gate_dir/provided.txt"
+      verify_linux_symbols_resolve "$so_file" "$name.so" "$requires" "$gate_dir/provided.txt"
       continue
     fi
 
