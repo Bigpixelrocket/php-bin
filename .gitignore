@@ -11,3 +11,6 @@ autorelease-run/
 pkgroot/
 source/
 verification-results/
+mise.local.toml
+mise.*.local.toml
+mise.local.lock

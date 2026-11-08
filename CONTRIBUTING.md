@@ -6,7 +6,10 @@ Changes are welcome through pull requests.
 
 1. Open an issue describing recipe, dependency, or release-contract changes.
 2. Keep the pinned StaticPHP version and checksum together.
-3. Run `scripts/test.sh` and `scripts/check-public-language.sh`.
+3. Run `scripts/test.sh` and `scripts/check-public-language.sh`. The checks
+   need the Python, ShellCheck, and jq versions pinned in `mise.toml`; run
+   `mise trust && mise install` once per clone, then run them in an activated
+   shell or through `mise exec --`.
 4. For extension changes, run the earliest affected spike stage on an Apple
    Silicon Mac and attach the module diff to the pull request.
 5. Do not remove a required module to make a build green. Document the blocker
