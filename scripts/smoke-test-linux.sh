@@ -74,8 +74,10 @@ require_file "$WORK_DIR/php/share/php-bin/manifest.json"
 
 # Turn the manifest into the loader flags the containers use: one line with
 # every default-on extension, then one line per extension with its requirements
-# first, as mise-php writes php.ini.
-python3 -I - "$WORK_DIR/php/share/php-bin/manifest.json" > "$WORK_DIR/flags.txt" <<'PY'
+# first, as mise-php writes php.ini. A second file loads each zend extension the
+# archive ships by its absolute path instead, as a php.ini line written with the
+# full path does; a branch whose list leaves every zend extension out ships none.
+python3 -I - "$WORK_DIR/php/share/php-bin/manifest.json" "$WORK_DIR/flags.txt" "$WORK_DIR/absolute.txt" <<'PY'
 import json
 import sys
 
@@ -83,15 +85,22 @@ extensions = json.load(open(sys.argv[1]))["extensions"]
 by_name = {extension["name"]: extension for extension in extensions}
 
 
-def flag(extension):
+def flag(extension, path=False):
     loader = "zend_extension" if extension["zend"] else "extension"
-    return f"-d {loader}={extension['name']}"
+    target = f"/opt/php-bin/lib/php/extensions/{extension['name']}.so" if path else extension["name"]
+    return f"-d {loader}={target}"
 
 
-print("default", " ".join(flag(e) for e in extensions if e["default"]))
-for extension in extensions:
-    chain = [by_name[name] for name in extension["requires"]] + [extension]
-    print(extension["name"], " ".join(flag(e) for e in chain))
+with open(sys.argv[2], "w") as flags:
+    print("default", " ".join(flag(e) for e in extensions if e["default"]), file=flags)
+    for extension in extensions:
+        chain = [by_name[name] for name in extension["requires"]] + [extension]
+        print(extension["name"], " ".join(flag(e) for e in chain), file=flags)
+with open(sys.argv[3], "w") as absolute:
+    for extension in extensions:
+        if extension["zend"]:
+            requires = [flag(by_name[name]) for name in extension["requires"]]
+            print(extension["name"], " ".join([*requires, flag(extension, path=True)]), file=absolute)
 PY
 
 # Runs inside each container with POSIX sh, since not every image has bash.
@@ -160,13 +169,18 @@ while read -r name flags; do
   fi
 done < /in/flags.txt
 echo "ok loaded $loaded shared extensions one by one"
-if quiet -d zend_extension=/opt/php-bin/lib/php/extensions/xdebug.so \
-  -r 'exit(extension_loaded("xdebug") ? 0 : 1);'; then
-  echo "ok xdebug by absolute path"
-else
-  echo "FAIL xdebug by absolute path: $output"
-  status=1
+if [ ! -s /in/absolute.txt ]; then
+  echo "skip zend extension by absolute path: the archive ships none"
 fi
+while read -r name flags; do
+  # shellcheck disable=SC2086
+  if quiet $flags -r 'exit(extension_loaded($argv[1]) ? 0 : 1);' -- "$name"; then
+    echo "ok $name by absolute path"
+  else
+    echo "FAIL $name by absolute path: $output"
+    status=1
+  fi
+done < /in/absolute.txt
 
 # The build links a libcrypt whose crypt() always fails, for imap's c-client
 # alone; PHP's crypt() and password functions must still use PHP's bundled
@@ -257,6 +271,7 @@ for run in "${RUNS[@]}"; do
     -v "$WORK_DIR/php:/opt/php-bin:ro" \
     -v "$WORK_DIR/inside.sh:/in/inside.sh:ro" \
     -v "$WORK_DIR/flags.txt:/in/flags.txt:ro" \
+    -v "$WORK_DIR/absolute.txt:/in/absolute.txt:ro" \
     "$image" sh /in/inside.sh > "$log" 2>&1 || result=$?
   sed '/^--- modules$/,/^--- end$/d' "$log"
   sed -n '/^--- modules$/,/^--- end$/{/^---/d;p;}' "$log" > "$WORK_DIR/$index.modules"
