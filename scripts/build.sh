@@ -321,13 +321,41 @@ install_pinned_zig() {
   echo "Using pinned zig $version."
 }
 
+# Put a static libcrypt.a in buildroot/lib whose crypt() always fails. imap's
+# c-client links -lcrypt for one caller, the check of a local Unix password when
+# c-client serves IMAP itself, which PHP's client-only imap extension never
+# reaches; PHP's own crypt() is its bundled implementation. glibc 2.17 ships
+# libcrypt.so.1 while Fedora and Arch ship only libxcrypt's libcrypt.so.2, so
+# linking any shared libcrypt would break the binary on one or the other.
+install_crypt_stub() {
+  local arch="${PLATFORM#linux-}" zig="$BUILD_DIR/pkgroot/${PLATFORM#linux-}-linux/zig/zig"
+
+  mkdir -p buildroot/lib "$BUILD_DIR/crypt-stub" || return 1
+  cat > "$BUILD_DIR/crypt-stub/crypt.c" <<'C'
+#include <errno.h>
+#include <stddef.h>
+
+char *crypt(const char *key, const char *salt)
+{
+    (void) key;
+    (void) salt;
+    errno = ENOSYS;
+    return NULL;
+}
+C
+  "$zig" cc -target "$arch-linux-gnu.$LINUX_GLIBC_BASELINE" -fPIC -Os \
+    -c "$BUILD_DIR/crypt-stub/crypt.c" -o "$BUILD_DIR/crypt-stub/crypt.o" \
+    && rm -f buildroot/lib/libcrypt.a \
+    && "$zig" ar rcs buildroot/lib/libcrypt.a "$BUILD_DIR/crypt-stub/crypt.o"
+}
+
 # Each step runs on its own: inside `if ! ( ... )` bash ignores `set -e`, so a
 # failed step would otherwise fall through to the next one.
 run_staticphp() {
   local micro_patches
 
   cd "$BUILD_DIR" \
-    && { [[ "$PLATFORM" != linux-* ]] || install_pinned_zig; } \
+    && { [[ "$PLATFORM" != linux-* ]] || { install_pinned_zig && install_crypt_stub; }; } \
     && "$SPC_BIN" doctor \
     && "$SPC_BIN" craft craft-download.yml \
     && "$SPC_BIN" extract php-src,micro \
