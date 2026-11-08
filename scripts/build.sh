@@ -342,27 +342,39 @@ C
     && "$zig" ar rcs buildroot/lib/libcrypt.a "$BUILD_DIR/crypt-stub/crypt.o"
 }
 
-# Build imap's c-client library on its own before the main build, which then
-# finds it installed and skips it. zig compiles with clang, which rejects a call
-# to an undeclared function where GCC, which StaticPHP's Linux recipes were
-# written for, only warned; c-client makes such calls (safe_flock), and
-# StaticPHP's own macOS imap build gives clang the same allowance. It applies to
-# c-client alone: configure scripts such as PostgreSQL's require the compiler to
-# reject undeclared calls. OpenSSL is built first, without the allowance, so
-# c-client still builds with SSL as it does in the main build.
-build_imap_library() {
-  local allowance="-Wno-error=implicit-function-declaration -Wno-error=incompatible-function-pointer-types"
+# Build the libraries zig cannot compile as StaticPHP's Linux recipes expect on
+# their own, each with only the allowance it needs, before the main build, which
+# then finds them installed and skips them.
+#
+# imap's c-client calls undeclared functions (safe_flock). GCC, which those
+# recipes were written for, warned; zig's clang rejects the call, and StaticPHP's
+# own macOS imap build gives clang the same allowance. It is scoped to c-client
+# because configure scripts such as PostgreSQL's require the compiler to reject
+# undeclared calls. OpenSSL is built first, without it, so c-client still builds
+# with SSL as it would in the main build.
+#
+# libde265, the HEIC decoder imagick uses, picks AVX2 and AVX-512 kernels with
+# __builtin_cpu_supports, which needs GCC's or LLVM's CPU-detection runtime;
+# zig's runtime has none, so the library cannot link. Defining both builtins away
+# leaves the SSE4.1 kernels in use on every x86_64 CPU and never runs an AVX
+# instruction. The definitions hold no spaces because StaticPHP's zig wrapper
+# splits SPC_COMPILER_EXTRA on them.
+build_libraries_alone() {
+  local extensions=",$EXTENSIONS,${SHARED_EXTENSIONS:+$SHARED_EXTENSIONS,}"
   local libraries=imap
 
-  if [[ ",$EXTENSIONS," != *",imap,"* ]]; then
-    return 0
+  if [[ "$extensions" == *",imap,"* ]]; then
+    if [[ "$extensions" == *",openssl,"* ]]; then
+      "$SPC_BIN" build:libs openssl || return 1
+      libraries="openssl,imap"
+    fi
+    SPC_COMPILER_EXTRA="${SPC_COMPILER_EXTRA:+$SPC_COMPILER_EXTRA }-Wno-error=implicit-function-declaration -Wno-error=incompatible-function-pointer-types" \
+      "$SPC_BIN" build:libs "$libraries" || return 1
   fi
-  if [[ ",$EXTENSIONS," == *",openssl,"* ]]; then
-    "$SPC_BIN" build:libs openssl || return 1
-    libraries="openssl,imap"
+  if [[ "$PLATFORM" == linux-x86_64 && "$extensions" == *",imagick,"* ]]; then
+    SPC_COMPILER_EXTRA="${SPC_COMPILER_EXTRA:+$SPC_COMPILER_EXTRA }-D__builtin_cpu_init()=(void)0 -D__builtin_cpu_supports(feature)=0" \
+      "$SPC_BIN" build:libs libde265 || return 1
   fi
-  SPC_COMPILER_EXTRA="${SPC_COMPILER_EXTRA:+$SPC_COMPILER_EXTRA }$allowance" \
-    "$SPC_BIN" build:libs "$libraries"
 }
 
 # Each step runs on its own: inside `if ! ( ... )` bash ignores `set -e`, so a
@@ -374,7 +386,7 @@ run_staticphp() {
     && { [[ "$PLATFORM" != linux-* ]] || { install_pinned_zig && install_crypt_stub; }; } \
     && "$SPC_BIN" doctor \
     && "$SPC_BIN" craft craft-download.yml \
-    && { [[ "$PLATFORM" != linux-* ]] || build_imap_library; } \
+    && { [[ "$PLATFORM" != linux-* ]] || build_libraries_alone; } \
     && "$SPC_BIN" extract php-src,micro \
     && remove_unconfigurable_extension_dirs \
     && micro_patches="$(resolve_micro_patches)" \
