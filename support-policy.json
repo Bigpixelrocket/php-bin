@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "policyInvariantsDigest": "sha256:2d8dd3f372f5f409ad0e4badf7cc68f8c2ed3d49fa73ab88153152efeeff57b9",
+  "policyInvariantsDigest": "sha256:c2fc006288a73e4b9f1634cdfe1b7b48c3133de5b0c8612b02eb272417ad0c6d",
   "maintainedBranches": ["8.2", "8.3", "8.4", "8.5"],
   "sourceEvidenceDigests": [],
   "actionKey": "bootstrap",

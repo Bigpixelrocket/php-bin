@@ -218,6 +218,18 @@ def validate_recipe_rebuild_evidence(
     )
 
 
+# The platforms every release publishes, in `RELEASE_PLATFORMS` order: macOS
+# arm64 on macOS 26.0 or newer, and Linux x86_64 and aarch64 against glibc 2.17
+# or newer. `autorelease/policy-invariants.json` must state exactly this list, and
+# mise-php's consumer asserts the same list, so changing it is a reviewed edit in
+# both repositories.
+REVIEWED_POLICY_TARGETS = [
+    {"os": "macOS", "minimumVersion": "26.0", "architecture": "arm64", "sapi": "cli"},
+    {"os": "Linux", "minimumGlibcVersion": "2.17", "architecture": "x86_64", "sapi": "cli"},
+    {"os": "Linux", "minimumGlibcVersion": "2.17", "architecture": "aarch64", "sapi": "cli"},
+]
+
+
 def _validate_support_policy_document(
     policy: Any,
     invariants_path: pathlib.Path,
@@ -272,19 +284,15 @@ def validate_support_policy(root: pathlib.Path = ROOT) -> dict[str, Any]:
         set(invariants)
         == {
             "schemaVersion",
-            "target",
+            "targets",
             "allowPrereleases",
             "historicalExactVersionsRemainInstallable",
             "immutablePublishedAssets",
         },
         "policy invariants contain unknown or missing fields",
     )
-    require(invariants.get("schemaVersion") == 1, "unsupported policy invariants version")
-    require(
-        invariants.get("target")
-        == {"os": "macOS", "minimumVersion": "26.0", "architecture": "arm64", "sapi": "cli"},
-        "reviewed target invariant changed",
-    )
+    require(invariants.get("schemaVersion") == 2, "unsupported policy invariants version")
+    require(invariants.get("targets") == REVIEWED_POLICY_TARGETS, "reviewed target invariant changed")
     require(invariants.get("allowPrereleases") is False, "prereleases must remain forbidden")
     require(
         invariants.get("historicalExactVersionsRemainInstallable") is True,
