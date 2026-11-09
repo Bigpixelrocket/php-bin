@@ -117,6 +117,24 @@ built, never what decides whether the build was correct, so the protected
 tests are the standing control on every product change. `mise-php` draws the
 same line over its own paths; its `AUTORELEASE.md` owns that list.
 
+The reviewed `autorelease/policy-invariants.json` (shape in
+`schemas/policy-invariants.schema.json`) states what every release must be:
+its `targets` list names macOS arm64 on macOS 26.0 or newer, and Linux x86_64
+and aarch64 against glibc 2.17 or newer, in release platform order; prereleases
+stay forbidden, historical exact versions stay installable, and published
+assets stay immutable. Admission asserts that list exactly. `support-policy.json`
+binds to the file's digest (`policyInvariantsDigest`), and so do mise-php's
+`support-snapshot.json` and its readiness records, while mise-php's consumer
+asserts the same target list. Changing the invariants is therefore a
+coordinated pair of reviewed pull requests: php-bin changes the file and
+rebinds `support-policy.json` by hand (a `bootstrap` policy, which no lifecycle
+action rewrites), and mise-php changes its consumer check and rebinds
+`support-snapshot.json`. The consumer refuses to synchronize a `bootstrap`
+policy on its own, so mise-php merges second, after its snapshot names
+php-bin's merge commit; until then its daily run fails closed. Land the pair
+while no `new_branch` or `branch_eol` event is in flight, since that event's
+readiness records carry the old digest.
+
 ```mermaid
 flowchart TD
   capture["Capture fixed raw evidence"] --> changed{"Digest or health changed?"}
