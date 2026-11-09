@@ -1,14 +1,25 @@
 #!/usr/bin/env bash
+# Validates a pull request that automation opened with GITHUB_TOKEN, whose own
+# pull_request events GitHub suppresses, so the caller can merge it unattended.
+#
+# It dispatches ci.yml and protected-controls.yml at the exact PR head and waits
+# for a new successful run of every required check: each --check, Protected
+# controls, and every status check the rules on the base branch require, read
+# from the branch rules API at run time. The unattended merge then waits for
+# exactly what GitHub enforces, without call sites repeating the repository
+# settings, while each caller's --check stays required even if the rules lose
+# it. Any required check that fails, or has no new run before the timeout, stops
+# the run before anything is published.
 
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 --pr <number> --check <required-check> --output <path>" >&2
+  echo "Usage: $0 --pr <number> --check <required-check> [--check <required-check>...] --output <path>" >&2
   exit 2
 }
 
 pr_number=""
-primary_check=""
+caller_checks=()
 output=""
 
 while (($#)); do
@@ -18,7 +29,8 @@ while (($#)); do
       shift 2
       ;;
     --check)
-      primary_check="${2:-}"
+      [[ -n "${2:-}" ]] || usage
+      caller_checks+=("$2")
       shift 2
       ;;
     --output)
@@ -32,8 +44,11 @@ while (($#)); do
 done
 
 [[ "$pr_number" =~ ^[1-9][0-9]*$ ]] || usage
-[[ -n "$primary_check" && -n "$output" ]] || usage
+[[ ${#caller_checks[@]} -gt 0 && -n "$output" ]] || usage
 repository="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
+# Only a test shortens the wait; a shorter wait can only fail sooner.
+timeout_seconds="${DISPATCH_PR_CHECKS_TIMEOUT:-900}"
+[[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]] || usage
 
 pr="$(gh api "repos/$repository/pulls/$pr_number")"
 state="$(jq -r .state <<<"$pr")"
@@ -48,10 +63,26 @@ head_repository="$(jq -r .head.repo.full_name <<<"$pr")"
 [[ "$head_ref" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]
 [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]
 
+# Rules for a branch are readable with the metadata scope every workflow token
+# holds. A response that is not a list of rules, or names a check without a
+# context, stops the run rather than shrinking what it waits for.
+rules="$(gh api "repos/$repository/rules/branches/$base_ref?per_page=100")"
+ruleset_checks="$(jq -ce '
+  if type == "array" then
+    [.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context]
+    | if all(.[]; type == "string" and length > 0) then unique else error("unnamed required check") end
+  else error("unreadable branch rules") end' <<<"$rules")"
+required="$(jq -cn --argjson ruleset "$ruleset_checks" '$ARGS.positional + ["Protected controls"] + $ruleset | unique' \
+  --args "${caller_checks[@]}")"
+echo "Required checks for $head_sha: $(jq -r 'join(", ")' <<<"$required")"
+
 checks_url="repos/$repository/commits/$head_sha/check-runs?per_page=100&filter=latest"
 before="$(gh api -H "Accept: application/vnd.github+json" "$checks_url")"
-primary_before="$(jq --arg name "$primary_check" '[.check_runs[] | select(.name==$name) | .id] | max // 0' <<<"$before")"
-protected_before="$(jq '[.check_runs[] | select(.name=="Protected controls") | .id] | max // 0' <<<"$before")"
+# Only runs created after this snapshot count, so an earlier run (or an earlier
+# published gate) at the same head never stands in for the dispatched validators.
+floors="$(jq -c --argjson required "$required" \
+  '. as $runs | [$required[] as $name | {key:$name, value:([$runs.check_runs[] | select(.name==$name) | .id] | max // 0)}] | from_entries' \
+  <<<"$before")"
 
 # Events created with GITHUB_TOKEN do not recursively start pull_request
 # workflows. workflow_dispatch is the supported exception, so run the two
@@ -60,80 +91,90 @@ gh workflow run ci.yml --repo "$repository" --ref "$head_ref"
 gh workflow run protected-controls.yml --repo "$repository" --ref "$head_ref" \
   -f "pr_number=$pr_number"
 
-deadline=$((SECONDS + 900))
-latest=""
+publish_gate() {
+  local validator="$1"
+  local name details request
+  name="$(jq -r .name <<<"$validator")"
+  details="$(jq -r .details_url <<<"$validator")"
+  request="$(mktemp)"
+  jq -n \
+    --arg name "$name" \
+    --arg head "$head_sha" \
+    --arg details "$details" \
+    --arg summary "Exact-head validator passed: $details" \
+    '{name:$name,head_sha:$head,status:"completed",conclusion:"success",details_url:$details,output:{title:"Dispatched validator passed",summary:$summary}}' \
+    > "$request"
+  gh api --method POST -H "Accept: application/vnd.github+json" \
+    "repos/$repository/check-runs" --input "$request"
+  rm -f "$request"
+}
+
+# True once the PR's required-check rollup shows every check the rules require,
+# and every other check it lists as required, as passing in its latest entry.
+rollup_passes() {
+  jq -e --argjson required "$ruleset_checks" \
+    '. as $rollup | all(($required + [$rollup[].name] | unique)[]; . as $name | ([$rollup[] | select(.name==$name) | .bucket] | last) == "pass")' \
+    <<<"$1" >/dev/null 2>&1
+}
+
+deadline=$((SECONDS + timeout_seconds))
+validators="[]"
 while ((SECONDS < deadline)); do
   latest="$(gh api -H "Accept: application/vnd.github+json" "$checks_url")"
-  primary="$(jq -c --arg name "$primary_check" --argjson floor "$primary_before" \
-    '[.check_runs[] | select(.name==$name and .id>$floor)] | max_by(.id) // empty' <<<"$latest")"
-  protected="$(jq -c --argjson floor "$protected_before" \
-    '[.check_runs[] | select(.name=="Protected controls" and .id>$floor)] | max_by(.id) // empty' <<<"$latest")"
+  validators="$(jq -c --argjson required "$required" --argjson floors "$floors" \
+    '. as $runs | [$required[] as $name | [$runs.check_runs[] | select(.name==$name and .id>$floors[$name])] | max_by(.id) // empty]' \
+    <<<"$latest")"
 
-  if [[ -n "$primary" && -n "$protected" ]]; then
-    failed="$(jq -r -s '[.[] | select(.status=="completed" and .conclusion!="success") | .details_url] | join("\n")' \
-      <<<"$primary"$'\n'"$protected")"
-    if [[ -n "$failed" ]]; then
-      echo "A dispatched required check failed:" >&2
-      echo "$failed" >&2
+  failed="$(jq -r '[.[] | select(.status=="completed" and .conclusion!="success") | "\(.name): \(.details_url)"] | join("\n")' \
+    <<<"$validators")"
+  if [[ -n "$failed" ]]; then
+    echo "A dispatched required check failed:" >&2
+    echo "$failed" >&2
+    exit 1
+  fi
+
+  if jq -e --argjson required "$required" \
+    'length == ($required | length) and all(.[]; .status=="completed" and .conclusion=="success")' \
+    <<<"$validators" >/dev/null; then
+    # workflow_dispatch runs validate the exact commit but GitHub does not
+    # attach them to a PR rollup. Publish Actions-owned gate check runs only
+    # after every new validator run passes, retaining their URLs as evidence.
+    gates=""
+    count="$(jq length <<<"$validators")"
+    for ((index = 0; index < count; index++)); do
+      validator="$(jq -c ".[$index]" <<<"$validators")"
+      gates+="$(publish_gate "$validator")"$'\n'
+      gh api --method POST -H "Accept: application/vnd.github+json" \
+        "repos/$repository/statuses/$head_sha" \
+        -f state=success \
+        -f "context=$(jq -r .name <<<"$validator")" \
+        -f "target_url=$(jq -r .details_url <<<"$validator")" \
+        -f description="Exact-head dispatched validator passed" >/dev/null
+    done
+    rollup="[]"
+    for _ in {1..24}; do
+      rollup="$(gh pr checks "$pr_number" --repo "$repository" --required \
+        --json name,bucket,link 2>/dev/null || true)"
+      if rollup_passes "$rollup"; then
+        break
+      fi
+      sleep 5
+    done
+    if ! rollup_passes "$rollup"; then
+      echo "The pull request does not show every required check as passing at $head_sha." >&2
       exit 1
     fi
-    if jq -e -s 'all(.[]; .status=="completed" and .conclusion=="success")' \
-      <<<"$primary"$'\n'"$protected" >/dev/null; then
-      publish_gate() {
-        local validator="$1"
-        local name details request
-        name="$(jq -r .name <<<"$validator")"
-        details="$(jq -r .details_url <<<"$validator")"
-        request="$(mktemp)"
-        jq -n \
-          --arg name "$name" \
-          --arg head "$head_sha" \
-          --arg details "$details" \
-          --arg summary "Exact-head validator passed: $details" \
-          '{name:$name,head_sha:$head,status:"completed",conclusion:"success",details_url:$details,output:{title:"Dispatched validator passed",summary:$summary}}' \
-          > "$request"
-        gh api --method POST -H "Accept: application/vnd.github+json" \
-          "repos/$repository/check-runs" --input "$request"
-        rm -f "$request"
-      }
-
-      # workflow_dispatch runs validate the exact commit but GitHub does not
-      # attach them to a PR rollup. Publish Actions-owned gate check runs only
-      # after both new validator runs pass, retaining their URLs as evidence.
-      primary_gate="$(publish_gate "$primary")"
-      protected_gate="$(publish_gate "$protected")"
-      for validator in "$primary" "$protected"; do
-        name="$(jq -r .name <<<"$validator")"
-        details="$(jq -r .details_url <<<"$validator")"
-        gh api --method POST -H "Accept: application/vnd.github+json" \
-          "repos/$repository/statuses/$head_sha" \
-          -f state=success \
-          -f "context=$name" \
-          -f "target_url=$details" \
-          -f description="Exact-head dispatched validator passed" >/dev/null
-      done
-      for _ in {1..24}; do
-        rollup="$(gh pr checks "$pr_number" --repo "$repository" --required \
-          --json name,bucket,link 2>/dev/null || true)"
-        if jq -e --arg primary "$primary_check" \
-          '([.[] | select(.name==$primary) | .bucket] | last) == "pass" and ([.[] | select(.name=="Protected controls") | .bucket] | last) == "pass"' \
-          <<<"$rollup" >/dev/null 2>&1; then
-          break
-        fi
-        sleep 5
-      done
-      jq -e --arg primary "$primary_check" \
-        '([.[] | select(.name==$primary) | .bucket] | last) == "pass" and ([.[] | select(.name=="Protected controls") | .bucket] | last) == "pass"' \
-        <<<"${rollup:-[]}" >/dev/null
-      mkdir -p "$(dirname "$output")"
-      jq -s --arg head "$head_sha" \
-        'map({name, bucket:"pass", link:.details_url, headSha:$head, checkRunId:.id})' \
-        <<<"$primary_gate"$'\n'"$protected_gate" > "$output"
-      exit 0
-    fi
+    mkdir -p "$(dirname "$output")"
+    jq -s --arg head "$head_sha" \
+      'map({name, bucket:"pass", link:.details_url, headSha:$head, checkRunId:.id})' \
+      <<<"$gates" > "$output"
+    exit 0
   fi
   sleep 5
 done
 
 echo "Timed out waiting for newly dispatched required checks at $head_sha." >&2
+jq -r --argjson required "$required" \
+  '"Missing or unfinished: " + ([$required[] as $name | select(all(.[]; .name != $name or .status != "completed")) | $name] | join(", "))' \
+  <<<"$validators" >&2
 exit 1
