@@ -437,10 +437,10 @@ def is_lifecycle_resume(plan: dict[str, Any]) -> bool:
     )
 
 
-def recorded_action_keys(directory: pathlib.Path) -> set[str]:
-    """Return the action key of every durable event record in `directory`, failing closed."""
+def _event_records(directory: pathlib.Path) -> list[tuple[str, dict[str, Any]]]:
+    """Return each durable event record in `directory` with its action key, failing closed."""
     require(directory.is_dir(), f"events directory is missing: {directory}")
-    keys = set()
+    records = []
     for path in sorted(directory.glob("*.json")):
         record = load_json(path)
         key = record.get("actionKey") if isinstance(record, dict) else None
@@ -448,8 +448,26 @@ def recorded_action_keys(directory: pathlib.Path) -> set[str]:
             isinstance(key, str) and bool(ACTION_KEY_RE.fullmatch(key)),
             f"event record carries no valid action key: {path.name}",
         )
-        keys.add(key)
-    return keys
+        records.append((key, record))
+    return records
+
+
+def recorded_action_keys(directory: pathlib.Path) -> set[str]:
+    """Return the action key of every durable event record in `directory`, failing closed."""
+    return {key for key, _record in _event_records(directory)}
+
+
+# Event record states a watcher run never resumes: done, or stopped for an operator.
+UNRESUMABLE_EVENT_STATES = frozenset({"complete", "blocked", "needs_human"})
+
+
+def resumable_action_keys(directory: pathlib.Path) -> set[str]:
+    """Return the action key of every event record in `directory` a watcher run resumes.
+
+    A record resumes unless its state is in `UNRESUMABLE_EVENT_STATES`. Admission reads
+    these states itself, so a rebuild resumed alone is re-derived, never trusted.
+    """
+    return {key for key, record in _event_records(directory) if record.get("state") not in UNRESUMABLE_EVENT_STATES}
 
 
 def validate_lifecycle_on_base(
@@ -537,6 +555,7 @@ def _validate_plan_shape(
     manifest_path: pathlib.Path,
     completed_actions: set[str] | None,
     pending_rebuilds: list[str] | str | None = None,
+    resumable_keys: set[str] | None = None,
 ) -> str:
     """Reject a plan whose identity is wrong, and return the action key it claims.
 
@@ -551,6 +570,12 @@ def _validate_plan_shape(
     more are due and is absent when one is. No plan may record the evidence as
     unchanged while one is due, so a pending rebuild can neither be invented, dropped,
     nor silenced by the classifier.
+
+    `resumable_keys` are the action keys of the event records a watcher run resumes
+    (`resumable_action_keys`), or None when the records were not supplied. When two or
+    more rebuilds are due and the first has a resumable record, the classifier resumes
+    that key alone, so the plan must be the single rebuild of it, and any batch is
+    rejected. A single plan with two or more due is admitted only against the records.
     """
     if isinstance(pending_rebuilds, str):
         pending_rebuilds = [pending_rebuilds]
@@ -591,11 +616,26 @@ def _validate_plan_shape(
                 "rebuildActionKeys" not in plan,
                 f"recipe rebuild batch is not the selected rebuild: only {pending[0]} is due",
             )
+        elif "rebuildActionKeys" not in plan:
+            require(
+                resumable_keys is not None,
+                "a resumed recipe rebuild is admitted only against the event records",
+            )
+            require(
+                pending[0] in resumable_keys,
+                f"recipe rebuild batch is not the selected rebuilds: {', '.join(pending)}",
+            )
         else:
+            require(
+                resumable_keys is None or pending[0] not in resumable_keys,
+                f"recipe rebuild {pending[0]} resumes its incomplete record alone, not in a batch",
+            )
             require(
                 plan.get("rebuildActionKeys") == pending,
                 f"recipe rebuild batch is not the selected rebuilds: {', '.join(pending)}",
             )
+            for key in pending[1:]:
+                require(key not in (completed_actions or set()), f"action key already completed: {key}")
         require(plan.get("editsRequired") is False, "recipe rebuild plan cannot require edits")
         allowed_paths = plan.get("allowedPaths")
         require(
@@ -607,8 +647,6 @@ def _validate_plan_shape(
             isinstance(release_intent, dict) and release_intent.get("version") == rebuild_revision(action_key),
             "recipe rebuild release intent is not the selected revision",
         )
-        for key in pending[1:]:
-            require(key not in (completed_actions or set()), f"action key already completed: {key}")
     require(
         action_key not in (completed_actions or set()),
         "action key already completed",
@@ -723,6 +761,7 @@ def validate_plan(
     pending_rebuilds: list[str] | str | None = None,
     repo: pathlib.Path | None = None,
     recorded_keys: set[str] | None = None,
+    resumable_keys: set[str] | None = None,
 ) -> dict[str, Any]:
     """Admit one classified plan, or reject it.
 
@@ -738,8 +777,12 @@ def validate_plan(
     policy there must be the one the plan was classified against and already hold the
     lifecycle edit, no record may exist for the key, and a resumed new branch must not
     have shipped. Without both inputs a resume is rejected.
+
+    `resumable_keys` are the keys of the event records a watcher run resumes. With two
+    or more rebuilds due they decide whether the plan is the batch or the first key's
+    resume alone (see `_validate_plan_shape`); without them that resume is rejected.
     """
-    action_key = _validate_plan_shape(plan, manifest_path, completed_actions, pending_rebuilds)
+    action_key = _validate_plan_shape(plan, manifest_path, completed_actions, pending_rebuilds, resumable_keys)
     declared = _validate_plan_preconditions(plan, repo_heads, policy_digest)
     _validate_plan_actions(plan, manifest_path)
     validate_patch_extends_shipped_branch(

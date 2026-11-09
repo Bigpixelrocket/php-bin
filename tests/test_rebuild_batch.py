@@ -27,6 +27,7 @@ from autorelease.control import (
     plan_releases,
     recipe_identity_note,
     require_plan_release,
+    resumable_action_keys,
     validate_plan,
     validate_publish_recapture,
     validate_recaptured_evidence,
@@ -152,8 +153,20 @@ class BatchClassificationTests(unittest.TestCase):
     def classify(self, manifest, events=()):
         return classify_evidence(manifest, PRECONDITIONS, list(events), BRANCHES)
 
-    def admit(self, plan, manifest, pending, completed=()):
-        return validate_plan(plan, manifest, FIXTURE_HEADS, FIXTURE_POLICY_DIGEST, set(completed), pending)
+    def admit(self, plan, manifest, pending, completed=(), resumable=None):
+        return validate_plan(
+            plan, manifest, FIXTURE_HEADS, FIXTURE_POLICY_DIGEST, set(completed), pending,
+            resumable_keys=resumable,
+        )
+
+    def records(self, *records):
+        """Write durable event records to a fresh directory, as admission reads them."""
+        self.count += 1
+        directory = self.tmp / f"events-{self.count}"
+        directory.mkdir()
+        for position, record in enumerate(records):
+            (directory / f"{position}.json").write_bytes(canonical_json(record))
+        return directory
 
     def test_all_due_rebuilds_classify_and_admit_as_one_batch(self):
         manifest = self.capture(CASCADE)
@@ -200,7 +213,7 @@ class BatchClassificationTests(unittest.TestCase):
             {key: value for key, value in plan.items() if key != "rebuildActionKeys"},
         ):
             with self.assertRaisesRegex(ControlError, "selected rebuild"):
-                self.admit(forged, manifest, CASCADE)
+                self.admit(forged, manifest, CASCADE, resumable=set())
         # Every listed key must cite the release it supersedes.
         with self.assertRaisesRegex(ControlError, "supersedes"):
             self.admit({**plan, "evidence": plan["evidence"][:3]}, manifest, CASCADE)
@@ -249,6 +262,11 @@ class BatchClassificationTests(unittest.TestCase):
         incomplete = self.capture(CASCADE, incomplete=[CASCADE[1]])
         resumed = self.classify(incomplete, events=[{"actionKey": CASCADE[1], "state": "release_requested"}])
         self.assertEqual(("needs_human", CASCADE[1]), (resumed["action"], resumed["actionKey"]))
+        # One the selection leads with but an operator must resolve stops the same way.
+        for state in ("blocked", "needs_human"):
+            stopped = self.capture(CASCADE, incomplete=[CASCADE[0]])
+            plan = self.classify(stopped, events=[{"actionKey": CASCADE[0], "state": state}])
+            self.assertEqual(("needs_human", CASCADE[0]), (plan["action"], plan["actionKey"]), state)
         # An unhealthy capture blocks before anything is selected.
         unhealthy = self.capture(CASCADE)
         manifest = json.loads(unhealthy.read_text())
@@ -261,6 +279,59 @@ class BatchClassificationTests(unittest.TestCase):
         self.assertEqual("no_change", no_change["action"])
         with self.assertRaisesRegex(ControlError, "due rebuild pending"):
             self.admit(no_change, quiet, CASCADE[2:])
+
+
+    def test_an_incomplete_first_rebuild_resumes_alone_ahead_of_a_due_patch(self):
+        key = CASCADE[0]
+        record = {"actionKey": key, "state": "release_requested"}
+        # PHP 8.4's feed names 8.4.28, so new_patch:8.4.28 is due behind the resume.
+        manifest = self.capture(CASCADE, feeds={**FEEDS, "8.4": "8.4.28"}, incomplete=[key])
+        plan = self.classify(manifest, events=[record])
+        # The resumed key alone, byte for byte the plan a fresh single rebuild of it gets,
+        # so the other three rebuilds never jump ahead of the due patch.
+        fresh = self.classify(self.capture([key]))
+        self.assertNotIn("rebuildActionKeys", plan)
+        self.assertEqual(canonical_json(fresh), canonical_json(plan))
+        self.assertEqual([{"actionKey": key, "version": "8.5.12-2"}], plan_releases(plan))
+        resumable = resumable_action_keys(self.records(record))
+        self.assertEqual({key}, resumable)
+        self.assertEqual(key, self.admit(plan, manifest, CASCADE, resumable=resumable)["actionKey"])
+        # The resumed plan keeps the whole-capture recapture binding at publish time.
+        result = validate_publish_recapture(plan, manifest, manifest, key, "8.5.12-2")
+        self.assertIn("php_bin_releases", result["verifiedCaptureIds"])
+        self.assertNotIn("branchScopedCaptureIds", result)
+
+    def test_admission_re_derives_a_resumed_rebuild_from_the_event_records(self):
+        key = CASCADE[0]
+        resumed = self.classify(
+            self.capture(CASCADE, incomplete=[key]), events=[{"actionKey": key, "state": "release_requested"}]
+        )
+        manifest = self.capture(CASCADE)
+        batch = self.classify(manifest)
+        self.assertEqual(CASCADE, batch["rebuildActionKeys"])
+        # While the first due key has a resumable record, the batch around it never admits.
+        for state in ("detected", "release_requested", "released"):
+            resumable = resumable_action_keys(self.records({"actionKey": key, "state": state}))
+            with self.assertRaisesRegex(ControlError, "resumes its incomplete record alone", msg=state):
+                self.admit(batch, manifest, CASCADE, resumable=resumable)
+            self.admit(resumed, manifest, CASCADE, resumable=resumable)
+        # Without such a record the single plan never admits, and the batch does.
+        for records in (
+            (),
+            ({"actionKey": key, "state": "complete"},),
+            ({"actionKey": key, "state": "blocked"},),
+            ({"actionKey": key, "state": "needs_human"},),
+            ({"actionKey": CASCADE[1], "state": "release_requested"},),
+        ):
+            resumable = resumable_action_keys(self.records(*records))
+            with self.assertRaisesRegex(ControlError, "selected rebuild", msg=records):
+                self.admit(resumed, manifest, CASCADE, resumable=resumable)
+            self.admit(batch, manifest, CASCADE, resumable=resumable)
+        # Without the records the resume cannot be re-derived, so it is rejected.
+        with self.assertRaisesRegex(ControlError, "only against the event records"):
+            self.admit(resumed, manifest, CASCADE)
+        # With one rebuild due the single plan needs no records, exactly as before.
+        self.admit(resumed, self.capture([key]), [key])
 
 
 class BatchPublicationTests(unittest.TestCase):

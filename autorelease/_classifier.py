@@ -7,8 +7,9 @@ fixed order and returns one plan in `schemas/autorelease-plan.schema.json`, with
 evidence digest computed from the bytes it cites:
 
 1. Unhealthy evidence stops the run as `blocked`: nothing else can be proven from it.
-2. An incomplete event record is resumed under its own action key. A lifecycle record
-   that is only waiting for mise-php readiness lets a due patch go first.
+2. An incomplete event record is resumed under its own action key; a resumed rebuild
+   is that one key alone, never the batch it was selected in. A lifecycle record that
+   is only waiting for mise-php readiness lets a due patch go first.
 3. A `new_patch` per maintained branch, oldest branch first, for the newest stable
    version that branch's own feed names when it is neither published nor superseded.
    A maintained branch that never shipped a release is never a patch: its first
@@ -537,7 +538,9 @@ class _Classifier:
                     f"The {key} event record is incomplete, but the watcher selected "
                     f"'{self.capture.decision.get('rebuildActionKey') or 'no rebuild'}' as due.",
                 )
-            return self.recipe_rebuild()
+            # Only the resumed key, never the batch around it: the other due rebuilds
+            # wait their turn behind every higher-priority rule, as before batches.
+            return self.rebuild_plan([key])
         if family in {"new_patch", "new_branch"}:
             if family == "new_patch":
                 version = rest
@@ -873,8 +876,14 @@ class _Classifier:
 
     def recipe_rebuild(self) -> dict[str, Any] | None:
         keys = self.selected_rebuilds()
-        if not keys:
-            return None
+        return self.rebuild_plan(keys) if keys else None
+
+    def rebuild_plan(self, keys: list[str]) -> dict[str, Any]:
+        """Build the plan that rebuilds `keys`, newest version first.
+
+        One key yields the single-rebuild plan, byte for byte the plan that preceded
+        batches; two or more yield one batch plan that lists them as `rebuildActionKeys`.
+        """
         releases = self.capture.json_body("php_bin_releases")
         evidence = []
         revisions = []

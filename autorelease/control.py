@@ -62,6 +62,7 @@ from autorelease._admission import (  # noqa: E402
     recipe_identity,
     recorded_action_keys,
     require_plan_release,
+    resumable_action_keys,
     seal_patch,
     validate_branch_scoped_releases,
     validate_lifecycle_on_base,

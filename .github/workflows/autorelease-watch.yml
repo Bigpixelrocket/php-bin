@@ -550,7 +550,7 @@ jobs:
                 -f action_key="$release_key" \
                 -f investigation_run_id="${{ github.run_id }}" \
                 -f version="$version" \
-                -f exact_commit="$BASE_SHA"; then
+                -f exact_commit="$BASE_SHA" </dev/null; then
                 echo "::error::Dispatching the publish run for $release_key failed."
                 failed=1
               fi

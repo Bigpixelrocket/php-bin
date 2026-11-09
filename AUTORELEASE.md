@@ -56,7 +56,8 @@ stops at the first that applies:
    health check, produces a `blocked` plan: nothing can be proven from it.
 2. **An incomplete event record** in `autorelease-events/` is resumed under its
    own action key: a `new_branch` release, a `branch_eol` completion, a
-   `new_patch`, or the selected `recipe_rebuild`. A record stopped at
+   `new_patch`, or the first selected `recipe_rebuild`, alone as a single
+   rebuild plan even when other rebuilds are due. A record stopped at
    `blocked` or `needs_human`, or one no deterministic path resumes, produces
    `needs_human`. One exception keeps patches moving: when the only incomplete
    record is a `new_branch` or `branch_eol` at `php_bin_ready`, waiting for
@@ -364,7 +365,8 @@ the watcher by hand stays safe but is no longer how a cascade drains.
 - A rebuild batch starts one watcher run per recorded release. The concurrency
   group below keeps at most one of them running and one pending, and every run
   that starts while a sibling has not recorded its release yet is held back by
-  the publish-in-flight rule below. The run the last recorded sibling started
+  the publish-in-flight rule below. Whichever watcher run starts first after
+  the last sibling records its release, scheduled or chained by any sibling,
   takes the next work, so a batch never has two watcher runs admitting work.
 - Chained runs share the `php-autorelease-watcher` concurrency group with
   scheduled and dispatched runs, and none cancels a run in progress. GitHub
@@ -565,9 +567,12 @@ watcher decides which ones are due:
   policy. A `recipe_rebuild` plan must name exactly that set, in that order,
   set `releaseIntent.version` to the first key's `<version>-<n>`, require no
   edits, allow no paths, and cite every superseded tag; a plan naming a wrong,
-  missing, extra, or completed version therefore never admits. A `no_change`
-  plan is rejected while a rebuild is due, so recorded evidence can never leave
-  one pending.
+  missing, extra, or completed version therefore never admits. The one
+  exception is a resume: when the first due key has an event record in
+  `autorelease-events/` that is not `complete`, `blocked`, or `needs_human`,
+  admission reads that state itself and accepts only the single rebuild of that
+  key, never the batch. A `no_change` plan is rejected while a rebuild is due,
+  so recorded evidence can never leave one pending.
 - The watcher dispatches one publish run per key (`control.py plan-releases`),
   all bound to the one admitted commit, and they run concurrently, so a
   cascade across four branches takes about one publication instead of four.
