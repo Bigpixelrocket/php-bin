@@ -150,7 +150,7 @@ jobs:
             "expected-modules/$branch.txt"
       - name: Hand the staged archive to the release job
         id: upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-build-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: release-build/
@@ -316,7 +316,7 @@ jobs:
           done
       - name: Download the isolated build
         if: steps.existing.outputs.reuse != 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           artifact-ids: ${{ needs.build.outputs.artifact_id_macos_aarch64 }},${{ needs.build.outputs.artifact_id_linux_x86_64 }},${{ needs.build.outputs.artifact_id_linux_aarch64 }}
           path: .artifacts
@@ -416,7 +416,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
       - name: Hand the verified draft to the next jobs
         id: handoff
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-draft-${{ github.run_id }}-${{ github.run_attempt }}
           path: release-handoff/
@@ -437,7 +437,7 @@ jobs:
             > release-run/failure.json
       - name: Retain transaction and exact staging bytes
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-transaction-${{ needs.preflight.outputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -493,12 +493,12 @@ jobs:
       # on the Python 3.12 that CI tests. The install step then points mise at empty
       # folders, so the draft PHP installs on its own. Without the cache, no mise
       # binary or tool comes from a cache another job could have saved.
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
           github_token: ${{ github.token }}
           cache: false
       - name: Download the draft bytes
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           artifact-ids: ${{ needs.release.outputs.handoff_artifact_id }}
           path: release-handoff
@@ -581,7 +581,7 @@ jobs:
           ref: ${{ needs.preflight.outputs.exact_commit }}
           persist-credentials: false
       - name: Download the verified draft transaction
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           artifact-ids: ${{ needs.release.outputs.handoff_artifact_id }}
           path: release-handoff
@@ -714,7 +714,7 @@ jobs:
             '{schemaVersion:1,released:$released,recorded:false,version:$version}' > release-run/transaction-state.json
       - name: Retain the transaction state for triage
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-transaction-state-${{ github.run_id }}-${{ github.run_attempt }}
           path: release-run/transaction-state.json
@@ -732,7 +732,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
       - name: Hand the published transaction to the next jobs
         id: handoff
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-published-${{ github.run_id }}-${{ github.run_attempt }}
           path: release-published/
@@ -740,7 +740,7 @@ jobs:
           retention-days: 90
       - name: Retain the publication record
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-publication-${{ needs.preflight.outputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: release-run/
@@ -784,12 +784,12 @@ jobs:
           ref: ${{ needs.release.outputs.mise_commit }}
           path: mise-php
           persist-credentials: false
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
           github_token: ${{ github.token }}
           cache: false
       - name: Download the published transaction
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           artifact-ids: ${{ needs.publish.outputs.handoff_artifact_id }}
           path: release-published
@@ -848,7 +848,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Download the published transaction
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           artifact-ids: ${{ needs.publish.outputs.handoff_artifact_id }}
           path: release-published
@@ -1011,7 +1011,7 @@ jobs:
             '{schemaVersion:1,released:true,recorded:$recorded,version:$version}' > release-run/transaction-state.json
       - name: Retain the transaction state for triage
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-transaction-state-${{ github.run_id }}-${{ github.run_attempt }}
           path: release-run/transaction-state.json
@@ -1020,7 +1020,7 @@ jobs:
           overwrite: true
       - name: Retain the event record
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-record-${{ needs.preflight.outputs.version }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: release-run/

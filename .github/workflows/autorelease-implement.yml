@@ -166,7 +166,7 @@ jobs:
           persist-credentials: false
       - name: Download every platform's discovered list
         if: env.DISCOVER == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: discovered-modules-${{ github.run_id }}-*
           path: ${{ runner.temp }}/discovered
@@ -198,7 +198,7 @@ jobs:
           echo "reconcile=$json" >> "$GITHUB_OUTPUT"
       - name: Hand the union to the reconcile pass
         if: steps.union.outputs.reconcile != '[]'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: discovery-union-${{ github.run_id }}
           path: union/pending.txt
@@ -235,7 +235,7 @@ jobs:
     steps:
       - name: Download every platform's final list
         if: env.DISCOVER == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: "*-modules-${{ github.run_id }}-*"
           path: ${{ runner.temp }}/lists
@@ -262,7 +262,7 @@ jobs:
           done
       - name: Retain the discovered module list
         if: env.DISCOVER == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: discovered-modules-${{ github.run_id }}
           path: final/modules.txt
@@ -317,7 +317,7 @@ jobs:
           test "$(jq -r .preconditions.phpBinHead autorelease-run/autorelease-plan.json)" = "$BASE_SHA"
       - name: Download the discovered module list
         if: needs.discovery-scope.outputs.discover == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: discovered-modules-${{ github.run_id }}
           path: ${{ runner.temp }}/discovered
@@ -349,7 +349,7 @@ jobs:
           # nothing is merged except the readiness record.
           echo "already_applied=$(jq -r '.alreadyApplied == true' autorelease-run/sealed/patch-manifest.json)" >> "$GITHUB_OUTPUT"
       - name: Retain sealed patch
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: sealed-autorelease-patch-${{ github.run_id }}
           path: autorelease-run/
@@ -370,7 +370,7 @@ jobs:
           ref: ${{ needs.preflight.outputs.base_sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: sealed-autorelease-patch-${{ github.run_id }}
           path: autorelease-run
@@ -418,7 +418,7 @@ jobs:
             git bundle create autorelease-run/validated.bundle HEAD "^$BASE_SHA"
           fi
           jq -n --arg headSha "$(git rev-parse HEAD)" --arg tree "$(git rev-parse "HEAD^{tree}")" '{headSha:$headSha,tree:$tree,checks:{"Script checks":"success"}}' > autorelease-run/validation.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: steps.run-checks.outputs.status == 'passed'
         with:
           name: validated-autorelease-patch-${{ github.run_id }}
@@ -426,7 +426,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
           include-hidden-files: true
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: steps.run-checks.outputs.status != 'passed'
         with:
           name: failed-autorelease-validation-${{ github.run_id }}
@@ -479,7 +479,7 @@ jobs:
           ref: ${{ needs.preflight.outputs.base_sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: validated-autorelease-patch-${{ github.run_id }}
           path: autorelease-run
@@ -538,7 +538,7 @@ jobs:
           ./scripts/smoke-test-linux.sh "$archive" "expected-modules/${VERSION%.*}.txt"
       - name: Retain the module comparison
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: new-branch-build-${{ github.run_id }}-${{ matrix.platform }}
           path: new-branch-build/
@@ -566,7 +566,7 @@ jobs:
           ref: ${{ needs.preflight.outputs.base_sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: validated-autorelease-patch-${{ github.run_id }}
           path: autorelease-run
@@ -797,7 +797,7 @@ jobs:
       - name: Download the module comparison
         if: needs['build-new-branch'].result == 'failure'
         continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: new-branch-build-${{ github.run_id }}-*
           path: new-branch-build
