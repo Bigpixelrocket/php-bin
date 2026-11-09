@@ -7,8 +7,9 @@ fixed order and returns one plan in `schemas/autorelease-plan.schema.json`, with
 evidence digest computed from the bytes it cites:
 
 1. Unhealthy evidence stops the run as `blocked`: nothing else can be proven from it.
-2. An incomplete event record is resumed under its own action key. A lifecycle record
-   that is only waiting for mise-php readiness lets a due patch go first.
+2. An incomplete event record is resumed under its own action key; a resumed rebuild
+   is that one key alone, never the batch it was selected in. A lifecycle record that
+   is only waiting for mise-php readiness lets a due patch go first.
 3. A `new_patch` per maintained branch, oldest branch first, for the newest stable
    version that branch's own feed names when it is neither published nor superseded.
    A maintained branch that never shipped a release is never a patch: its first
@@ -21,7 +22,7 @@ evidence digest computed from the bytes it cites:
    No fresh edit starts while a merged `new_branch` edit still waits to resume.
    Patches never read that page, so an unreadable page blocks only a run with no patch
    due.
-5. The one `recipe_rebuild` the watch decision selected.
+5. One `recipe_rebuild` for every rebuild the watch decision selected, as one batch.
 6. `no_change`, keyed on the manifest's embedded `manifestDigest`.
 
 It never admits its own output. `_admission.validate_plan` re-checks every plan
@@ -537,7 +538,9 @@ class _Classifier:
                     f"The {key} event record is incomplete, but the watcher selected "
                     f"'{self.capture.decision.get('rebuildActionKey') or 'no rebuild'}' as due.",
                 )
-            return self.recipe_rebuild()
+            # Only the resumed key, never the batch around it: the other due rebuilds
+            # wait their turn behind every higher-priority rule, as before batches.
+            return self.rebuild_plan([key])
         if family in {"new_patch", "new_branch"}:
             if family == "new_patch":
                 version = rest
@@ -854,33 +857,74 @@ class _Classifier:
             )
         return None
 
+    def selected_rebuilds(self) -> list[str]:
+        """Return the rebuild keys the watch decision selected, newest version first.
+
+        A decision taken before batches carries only `rebuildActionKey`, which then
+        stands for a selection of that one key.
+        """
+        single = self.capture.decision.get("rebuildActionKey") or ""
+        keys = self.capture.decision.get("rebuildActionKeys", [single] if single else [])
+        require(
+            isinstance(keys, list)
+            and all(isinstance(key, str) for key in keys)
+            and len(keys) == len(set(keys))
+            and (keys[0] if keys else "") == single,
+            "watch decision rebuild keys are invalid",
+        )
+        return keys
+
     def recipe_rebuild(self) -> dict[str, Any] | None:
-        key = self.capture.decision.get("rebuildActionKey") or ""
-        if not key:
-            return None
-        match = re.fullmatch(r"recipe_rebuild:(\d+\.\d+\.\d+):([1-9]\d*)", key)
-        require(bool(match), f"watch decision names an invalid rebuild: {key}")
-        version, revision = match.group(1), int(match.group(2))
-        superseded = version if revision == 1 else f"{version}-{revision - 1}"
+        keys = self.selected_rebuilds()
+        return self.rebuild_plan(keys) if keys else None
+
+    def rebuild_plan(self, keys: list[str]) -> dict[str, Any]:
+        """Build the plan that rebuilds `keys`, newest version first.
+
+        One key yields the single-rebuild plan, byte for byte the plan that preceded
+        batches; two or more yield one batch plan that lists them as `rebuildActionKeys`.
+        """
         releases = self.capture.json_body("php_bin_releases")
-        positions = [
-            position
-            for position, release in enumerate(releases if isinstance(releases, list) else [])
-            if isinstance(release, dict) and release.get("tag_name") == superseded
-        ]
-        require(len(positions) == 1, f"rebuild source release {superseded} is not captured exactly once")
-        item, _value = self.capture.pointer(
-            "php_bin_releases",
-            f"/{positions[0]}/tag_name",
-            f"The published release {superseded} was built from a different recipe.",
-        )
-        return self.plan(
+        evidence = []
+        revisions = []
+        for key in keys:
+            match = re.fullmatch(r"recipe_rebuild:(\d+\.\d+\.\d+):([1-9]\d*)", key)
+            require(bool(match), f"watch decision names an invalid rebuild: {key}")
+            version, revision = match.group(1), int(match.group(2))
+            superseded = version if revision == 1 else f"{version}-{revision - 1}"
+            positions = [
+                position
+                for position, release in enumerate(releases if isinstance(releases, list) else [])
+                if isinstance(release, dict) and release.get("tag_name") == superseded
+            ]
+            require(len(positions) == 1, f"rebuild source release {superseded} is not captured exactly once")
+            item, _value = self.capture.pointer(
+                "php_bin_releases",
+                f"/{positions[0]}/tag_name",
+                f"The published release {superseded} was built from a different recipe.",
+            )
+            evidence.append(item)
+            revisions.append((version, f"{version}-{revision}"))
+        version, revision = revisions[0]
+        if len(keys) == 1:
+            # Exactly the plan a single due rebuild has always produced, byte for byte.
+            return self.plan(
+                action="recipe_rebuild",
+                action_key=keys[0],
+                evidence=evidence,
+                release_intent={"version": revision, "sourceIdentifier": "php_bin_releases"},
+                summary=f"PHP {version} is rebuilt from the current recipe as revision {revision}.",
+            )
+        listed = ", ".join(f"PHP {item_version} as {item_revision}" for item_version, item_revision in revisions)
+        plan = self.plan(
             action="recipe_rebuild",
-            action_key=key,
-            evidence=[item],
-            release_intent={"version": f"{version}-{revision}", "sourceIdentifier": "php_bin_releases"},
-            summary=f"PHP {version} is rebuilt from the current recipe as revision {version}-{revision}.",
+            action_key=keys[0],
+            evidence=evidence,
+            release_intent={"version": revision, "sourceIdentifier": "php_bin_releases"},
+            summary=f"{len(keys)} maintained branches are rebuilt from the current recipe in one batch: {listed}.",
         )
+        plan["rebuildActionKeys"] = list(keys)
+        return plan
 
     def no_change(self) -> dict[str, Any]:
         digest = str(self.capture.manifest.get("manifestDigest", ""))

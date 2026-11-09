@@ -44,6 +44,7 @@ from autorelease.control import (
     load_plan_evidence,
     PLAN_ACTIONS,
     PLAN_FIELDS,
+    OPTIONAL_PLAN_FIELDS,
     REQUIRED_PLAN_CHECKS,
     main as control_main,
     manifest_digest,
@@ -1071,7 +1072,7 @@ class AutoreleaseControlTests(unittest.TestCase):
 
     def test_plan_schema_matches_admission(self):
         schema = json.loads((ROOT / "schemas/autorelease-plan.schema.json").read_text())
-        self.assertEqual(set(schema["required"]), set(schema["properties"]))
+        self.assertEqual(set(schema["required"]) | OPTIONAL_PLAN_FIELDS, set(schema["properties"]))
         self.assertEqual(PLAN_FIELDS, set(schema["required"]))
         self.assertEqual(ACTION_KEY_RE.pattern, schema["properties"]["actionKey"]["pattern"])
         self.assertEqual(sorted(PLAN_ACTIONS), sorted(schema["properties"]["action"]["enum"]))
@@ -2280,7 +2281,7 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertIn("Notify actionable release failure", release)
         self.assertIn("release-run/failure.json", release)
         self.assertLess(
-            release.index("Validate and merge final event record"),
+            release.index("Commit and merge final event record through a checked PR"),
             release.index("Notify owner of completed release"),
         )
 
@@ -2331,12 +2332,11 @@ class AutoreleaseControlTests(unittest.TestCase):
         root = pathlib.Path(__file__).resolve().parents[1]
         jobs = load_workflow(root / ".github/workflows/autorelease-publish.yml")["jobs"]
         steps = {step.get("name"): step for step in jobs["finalize"]["steps"]}
-        commit_step = steps["Commit final event record through a checked PR"]
-        merge_step = steps["Validate and merge final event record"]
+        commit_step = steps["Commit and merge final event record through a checked PR"]
         state_step = steps["Record whether the event record merged"]
-        self.assertEqual("steps.event_pr.outputs.already_recorded == 'false'", merge_step["if"])
-        self.assertIn("--require-protected-controls", merge_step["run"])
+        self.assertIn("--require-protected-controls", commit_step["run"])
         self.assertEqual("always()", state_step["if"])
+        self.assertEqual("${{ steps.event_pr.outcome }}", state_step["env"]["MERGE_OUTCOME"])
         self.assertEqual("autorelease/event-${{ github.run_id }}", commit_step["env"]["BRANCH"])
 
         key, version = "recipe_rebuild:8.5.11:3", "8.5.11-3"
@@ -2392,6 +2392,30 @@ class AutoreleaseControlTests(unittest.TestCase):
                 "esac\n"
             )
             (work / "bin/gh").chmod(0o755)
+            # The merge gate: "ok" merges, "fail" refuses with main unchanged, and "move"
+            # first lands a sibling's record on main and refuses, then merges.
+            (clone / "scripts").mkdir()
+            (clone / "scripts/merge-record-pr").write_text(
+                "#!/usr/bin/env bash\n"
+                'echo "merge $*" >> "$FAKE_LOG"\n'
+                'case "$FAKE_MERGE" in\n'
+                "  ok) exit 0 ;;\n"
+                "  fail) exit 1 ;;\n"
+                "  move)\n"
+                '    if [[ ! -e "$FAKE_LOG.moved" ]]; then\n'
+                '      touch "$FAKE_LOG.moved"\n'
+                '      sibling="$(mktemp -d)"\n'
+                '      git clone -q "$FAKE_ORIGIN" "$sibling/c"\n'
+                '      echo sibling > "$sibling/c/autorelease-events/sibling.json"\n'
+                '      git -C "$sibling/c" add -A\n'
+                '      git -C "$sibling/c" -c user.name=F -c user.email=f@invalid commit -q -m sibling\n'
+                '      git -C "$sibling/c" push -q origin HEAD:main\n'
+                "      exit 1\n"
+                "    fi\n"
+                "    exit 0 ;;\n"
+                "esac\n"
+            )
+            (clone / "scripts/merge-record-pr").chmod(0o755)
             return clone, origin
 
         def run_step(work, clone, origin, script, open_prs="", extra=None):
@@ -2408,6 +2432,7 @@ class AutoreleaseControlTests(unittest.TestCase):
                 "FAKE_LOG": str(work / "gh.log"),
                 "FAKE_OPEN": open_prs,
                 "FAKE_ORIGIN": str(origin),
+                "FAKE_MERGE": "ok",
                 "GIT_AUTHOR_NAME": "Fixture",
                 "GIT_AUTHOR_EMAIL": "fixture@invalid",
                 "GIT_COMMITTER_NAME": "Fixture",
@@ -2446,6 +2471,32 @@ class AutoreleaseControlTests(unittest.TestCase):
                 self.assertEqual(outputs["head_sha"], head)
                 self.assertEqual(f"{head} {outputs['base_sha']}", git_in(origin, "rev-list", "--parents", "-n", "1", head))
                 self.assertEqual(record_path, git_in(origin, "diff", "--name-only", outputs["base_sha"], head))
+
+        # A batch sibling's record landing first moves main; the record is withdrawn and
+        # filed again on the new main, and merges there.
+        with tempfile.TemporaryDirectory() as temporary:
+            work = pathlib.Path(temporary)
+            clone, origin = fixture(work)
+            first_base = git_in(origin, "rev-parse", "main")
+            result, outputs, calls = run_step(work, clone, origin, commit_script, extra={"FAKE_MERGE": "move"})
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn("filing it again on the new main", result.stdout)
+            self.assertEqual(2, calls.count("merge --pr"), calls)
+            self.assertEqual(2, calls.count("pr create"), calls)
+            moved = git_in(origin, "rev-parse", "main")
+            self.assertNotEqual(first_base, moved)
+            self.assertEqual(moved, outputs["base_sha"])
+            self.assertEqual(f"{outputs['head_sha']} {moved}", git_in(origin, "rev-list", "--parents", "-n", "1", outputs["head_sha"]))
+
+        # A refusal while main stays put is real and stops at once.
+        with tempfile.TemporaryDirectory() as temporary:
+            work = pathlib.Path(temporary)
+            clone, origin = fixture(work)
+            result, outputs, calls = run_step(work, clone, origin, commit_script, extra={"FAKE_MERGE": "fail"})
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("refused while main stayed", result.stderr)
+            self.assertEqual(1, calls.count("merge --pr"), calls)
+            self.assertNotIn("already_recorded", outputs)
 
         # A new branch's incomplete record on main is completed through the PR.
         with tempfile.TemporaryDirectory() as temporary:
@@ -3360,8 +3411,8 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertIn('test "$is_draft" = "false"', recapture["run"])
         # The re-downloaded plan is bound to the dispatched transaction, as in `release`.
         for bound in (
-            'test "$(jq -r .actionKey admitted-run/autorelease-plan.json)" = "$ACTION_KEY"',
-            'test "$(jq -r .releaseIntent.version admitted-run/autorelease-plan.json)" = "$VERSION"',
+            "./autorelease/control.py require-plan-release --plan admitted-run/autorelease-plan.json",
+            '--action-key "$ACTION_KEY" --version "$VERSION"',
             'test "$(jq -r .preconditions.phpBinHead admitted-run/autorelease-plan.json)" = "$EXACT_COMMIT"',
         ):
             self.assertLess(recapture["run"].index(bound), recapture["run"].index("capture-autorelease-evidence"))

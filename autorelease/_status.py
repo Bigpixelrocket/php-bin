@@ -102,7 +102,23 @@ def _decision(run_dir: pathlib.Path, manifest: dict[str, Any]) -> dict[str, Any]
         rebuild == "" or (isinstance(rebuild, str) and bool(ACTION_KEY_RE.fullmatch(rebuild))),
         "watch decision rebuild action key is invalid",
     )
+    # A decision taken before batches names only its one selected rebuild.
+    rebuilds = decision.get("rebuildActionKeys", [rebuild] if rebuild else [])
+    require(
+        isinstance(rebuilds, list)
+        and all(isinstance(key, str) and bool(ACTION_KEY_RE.fullmatch(key)) for key in rebuilds)
+        and (rebuilds[0] if rebuilds else "") == rebuild,
+        "watch decision rebuild action keys are invalid",
+    )
     return decision
+
+
+def _decision_rebuilds(decision: dict[str, Any] | None) -> list[str]:
+    """Return every rebuild a validated watch decision selected, newest version first."""
+    if not decision:
+        return []
+    single = decision.get("rebuildActionKey") or ""
+    return list(decision.get("rebuildActionKeys", [single] if single else []))
 
 
 def _changed_captures(manifest: dict[str, Any], previous_path: pathlib.Path) -> list[str] | None:
@@ -260,6 +276,9 @@ def status_document(
     in_progress = set(decision.get("incompleteActions", [])) if decision else set()
     if plan and plan.get("action") in STATUS_WORK_ACTIONS:
         in_progress.add(plan["actionKey"])
+        # A batch rebuild plan publishes every key it lists in the same run.
+        if plan.get("action") == "recipe_rebuild":
+            in_progress.update(key for key in plan.get("rebuildActionKeys", []) if isinstance(key, str))
     releasing = {branch for branch in map(_released_branch, in_progress) if branch}
 
     unhealthy = sorted(capture_id for capture_id, status in reader.status.items() if status != 200)
@@ -324,6 +343,7 @@ def status_document(
         "actionKey": plan.get("actionKey") if plan else None,
         "inProgressActionKeys": sorted(in_progress),
         "rebuildDueActionKey": (decision.get("rebuildActionKey") or None) if decision else None,
+        "rebuildDueActionKeys": _decision_rebuilds(decision),
         "changedCaptures": _changed_captures(manifest, previous_path),
         "captureHealth": health,
         "branches": rows,

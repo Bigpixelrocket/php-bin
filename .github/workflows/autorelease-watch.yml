@@ -536,14 +536,26 @@ jobs:
                 exit 0
               fi
             fi
-            version="$(jq -r .releaseIntent.version autorelease-plan-download/autorelease-plan.json)"
-            gh workflow run autorelease-publish.yml \
-              --repo "${{ github.repository }}" \
-              --ref main \
-              -f action_key="$ACTION_KEY" \
-              -f investigation_run_id="${{ github.run_id }}" \
-              -f version="$version" \
-              -f exact_commit="$BASE_SHA"
+            # One publish run per release the plan admits: a batch rebuild plan lists
+            # every due rebuild, and each publishes concurrently in its own run, all at
+            # the one admitted commit. Every release is dispatched even when another's
+            # dispatch fails, so a transient error holds back only that release; the
+            # step still fails, and the next watcher run admits whatever is still due.
+            releases="$(./autorelease/control.py plan-releases --plan autorelease-plan-download/autorelease-plan.json)"
+            failed=0
+            while read -r release_key version; do
+              if ! gh workflow run autorelease-publish.yml \
+                --repo "${{ github.repository }}" \
+                --ref main \
+                -f action_key="$release_key" \
+                -f investigation_run_id="${{ github.run_id }}" \
+                -f version="$version" \
+                -f exact_commit="$BASE_SHA" </dev/null; then
+                echo "::error::Dispatching the publish run for $release_key failed."
+                failed=1
+              fi
+            done <<< "$releases"
+            exit "$failed"
             ;;
           complete_branch_eol)
             filename="$(./autorelease/control.py action-filename "$ACTION_KEY")"

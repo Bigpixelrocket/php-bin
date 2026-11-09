@@ -56,7 +56,8 @@ stops at the first that applies:
    health check, produces a `blocked` plan: nothing can be proven from it.
 2. **An incomplete event record** in `autorelease-events/` is resumed under its
    own action key: a `new_branch` release, a `branch_eol` completion, a
-   `new_patch`, or the selected `recipe_rebuild`. A record stopped at
+   `new_patch`, or the first selected `recipe_rebuild`, alone as a single
+   rebuild plan even when other rebuilds are due. A record stopped at
    `blocked` or `needs_human`, or one no deterministic path resumes, produces
    `needs_human`. One exception keeps patches moving: when the only incomplete
    record is a `new_branch` or `branch_eol` at `php_bin_ready`, waiting for
@@ -88,7 +89,8 @@ stops at the first that applies:
    row (for example, one whose window the watcher missed), or an older
    supported branch the policy does not maintain, contradicts the policy and
    produces `needs_human`.
-5. **Rebuilds.** The one `rebuildActionKey` the watch decision selected.
+5. **Rebuilds.** Every rebuild the watch decision selected (`rebuildActionKeys`),
+   as one batch plan.
 6. **No change**, keyed on the manifest's embedded `manifestDigest`.
 
 A body that does not have its reviewed shape (a redesigned lifecycle page, a
@@ -245,6 +247,10 @@ succeeded:
    record while the run is still in progress and started on current main or
    an ancestor of it, so a rerun files the record even after main has moved
    on; the watcher's record recovery remains the path once the run has ended.
+   A rebuild batch's sibling records merging first move main under this one,
+   so when a merge fails with main moved off the record's base, the job
+   withdraws the record pull request and files it again on the new main, a
+   bounded number of times.
 
 Both install jobs pass their read-only token to `mise-php`, whose GitHub API
 reads would otherwise be rate limited, and restore no mise cache. Every
@@ -329,9 +335,10 @@ flowchart TD
 ## Chained runs
 
 The classifier admits one action per watcher run, but one upstream release day
-brings a patch on every maintained branch, oldest first, and a recipe change
-makes the newest version of every maintained branch rebuild-due (older patch
-versions are never rebuilt; see [Recipe rebuilds](#recipe-rebuilds)). A
+brings a patch on every maintained branch, oldest first. (A recipe change is
+different: it makes the newest version of every maintained branch rebuild-due,
+and one run admits all of those rebuilds together; see [Recipe
+rebuilds](#recipe-rebuilds).) A
 publish run whose `finalize` job succeeded therefore ends with `Start the next
 watcher run`: the release is live, fresh public installs of it passed, and its
 event record is complete on main, merged by that job or found already there. The job holds only
@@ -339,9 +346,8 @@ event record is complete on main, merged by that job or found already there. The
 `autorelease-watch.yml` on main with `GITHUB_TOKEN`, which GitHub allows to
 start `workflow_dispatch` runs. The new run captures fresh evidence and admits
 the next due action through the unchanged classification and admission, so a
-release day across four branches, or a recipe rebuild, finishes in hours instead
-of days. Dispatching the watcher by hand stays safe but is no longer how a
-cascade drains.
+release day across four branches finishes in hours instead of days. Dispatching
+the watcher by hand stays safe but is no longer how a cascade drains.
 
 - Only that outcome chains. A failed release, a run that stops after
   publication with the release possibly live, and a release whose record did
@@ -356,6 +362,12 @@ cascade drains.
   Every link publishes a version or revision that did not exist before, and a
   revision that records the current recipe identity is no longer due, so a
   chain is never longer than the list of due actions.
+- A rebuild batch starts one watcher run per recorded release. The concurrency
+  group below keeps at most one of them running and one pending, and every run
+  that starts while a sibling has not recorded its release yet is held back by
+  the publish-in-flight rule below. Whichever watcher run starts first after
+  the last sibling records its release, scheduled or chained by any sibling,
+  takes the next work, so a batch never has two watcher runs admitting work.
 - Chained runs share the `php-autorelease-watcher` concurrency group with
   scheduled and dispatched runs, and none cancels a run in progress. GitHub
   keeps one pending run per group and cancels the older pending one when
@@ -377,7 +389,9 @@ cascade drains.
   it succeeds, and a failed one leaves the work and any missing record to the
   next scheduled run. Only watcher runs dispatch publish runs, and they never
   overlap, so the investigation reads this before it captures and retains the
-  answer in `publish-in-flight.json`. Classification, admission, and
+  answer in `publish-in-flight.json`. One watcher run may dispatch several
+  publish runs at once, the members of one rebuild batch; the set the next run
+  reads still only shrinks. Classification, admission, and
   notifications still run as usual, and the digest of such a run says it held
   the admitted action back.
 - `autorelease-implement.yml` does not chain. After its edit, a new branch or
@@ -511,7 +525,7 @@ git show <run-commit>:autorelease-state/last-evidence.json > last-evidence.json
 
 A published release is immutable, so a recipe change reaches an existing PHP
 version only as a new rebuild revision: `8.5.9-1`, then `8.5.9-2`. The
-watcher decides which one is due:
+watcher decides which ones are due:
 
 - The *recipe identity* of a branch is a SHA-256 over the committed tree
   entries of `.spc-sha256`, `.spc-version`, `LICENSE`, `NOTICE`, `patches/`,
@@ -537,29 +551,59 @@ watcher decides which one is due:
   revision records a different identity, or none. A branch whose newest
   release was published before identities were recorded is therefore due
   once.
-- `pending_recipe_rebuild` in `autorelease/_state.py` picks one due branch
-  per run, newest version first, so a recipe change costs one rebuild per
-  maintained branch. Its revision is one past the highest published revision.
-  `watch-decision.json` reports it as `rebuildActionKey`, and the `rebuild_due`
-  trigger runs the classifier even on an otherwise quiet day.
+- `pending_recipe_rebuilds` in `autorelease/_state.py` selects every due
+  branch, newest version first, so a recipe change costs one rebuild per
+  maintained branch. Each revision is one past the highest published revision
+  of its version. `watch-decision.json` reports the list as
+  `rebuildActionKeys`, and its first key as `rebuildActionKey`; the
+  `rebuild_due` trigger runs the classifier even on an otherwise quiet day.
+- The classifier proposes every selected rebuild as one plan. Its `actionKey`
+  and `releaseIntent` name the first, newest key. When two or more are due the
+  plan also lists them all as `rebuildActionKeys` and cites the
+  `php_bin_releases` tag each one supersedes. With exactly one due the plan
+  carries no such field and is byte for byte the plan a single rebuild always
+  produced.
 - Admission re-derives the same selection from the same capture, commit, and
-  policy. A `recipe_rebuild` plan must name exactly that key, set
-  `releaseIntent.version` to `<version>-<n>`, require no edits, allow no paths,
-  and cite the `php_bin_releases` tag it supersedes; a plan naming an older
-  version therefore never admits. A `no_change` plan is
-  rejected while a rebuild is due, so recorded evidence can never leave one
-  pending.
-- The admitted rebuild goes straight to the publish transaction. Each
-  recorded publication changes `php_bin_releases` and starts the next watcher
-  run (see [Chained runs](#chained-runs)), which selects the next rebuild,
-  until none is due. Incomplete records, new branches, EOL, and new
-  patches take priority in the classifier.
+  policy. A `recipe_rebuild` plan must name exactly that set, in that order,
+  set `releaseIntent.version` to the first key's `<version>-<n>`, require no
+  edits, allow no paths, and cite every superseded tag; a plan naming a wrong,
+  missing, extra, or completed version therefore never admits. The one
+  exception is a resume: when the first due key has an event record in
+  `autorelease-events/` that is not `complete`, `blocked`, or `needs_human`,
+  admission reads that state itself and accepts only the single rebuild of that
+  key, never the batch. A `no_change` plan is rejected while a rebuild is due,
+  so recorded evidence can never leave one pending.
+- The watcher dispatches one publish run per key (`control.py plan-releases`),
+  all bound to the one admitted commit, and they run concurrently, so a
+  cascade across four branches takes about one publication instead of four.
+  Each run is the ordinary per-version transaction and first checks that its
+  key and tag are a release the plan admits (`control.py
+  require-plan-release`). Its recaptures bind `php_bin_releases` only to the
+  releases on its own branch, because its siblings publish on the other
+  branches meanwhile. Any change on its own branch, or to an entry whose tag
+  is not a release tag, still stops it, and every other cited capture stays
+  bound. A single rebuild stays bound to the whole capture, as before.
+- Each run files its own event record. When a sibling's record lands first and
+  moves main, `finalize` withdraws its record pull request and files it again
+  on the new main; a refusal while main stays put still fails the job.
+- A failure on any platform still publishes nothing for that version and
+  leaves its siblings to publish. The failed version can be rerun on its own
+  ("Re-run failed jobs"; its recapture tolerates the siblings' releases), or
+  the next watcher run admits only the versions still due, as a smaller batch
+  at the newer main, where `--discard-stale-draft` replaces any draft the
+  failed attempt left. Incomplete records, new branches, EOL, and new patches
+  take priority in the classifier.
 - Selection has no skip: a version whose rebuild keeps failing is selected
-  again on every run and holds back the rebuilds ordered after it until the
-  recipe is fixed. A failed rebuild starts no next run, so it is retried by
-  the next scheduled run rather than in a loop. The `php_bin_releases`
-  capture reads every page of the releases list, up to 20 pages of 100, and
-  fails as unhealthy rather than truncate a longer list.
+  again on every run until the recipe is fixed, while the rest of its batch
+  publishes. A failed rebuild starts no next run itself, so it is retried by a
+  later sibling's chained run or the next scheduled run rather than in a loop.
+  The `php_bin_releases` capture reads every page of the releases list, up to
+  20 pages of 100, and fails as unhealthy rather than truncate a longer list.
+- A batch of N versions runs 3N build jobs at once, one of them macOS per
+  version. GitHub's free plan allows 20 concurrent jobs and 5 concurrent macOS
+  jobs, and each version holds at most one macOS runner at a time, so four or
+  five maintained branches fit. A larger batch queues rather than stalls,
+  because no job waits on another run's job.
 
 ## Unattended lifecycle
 
