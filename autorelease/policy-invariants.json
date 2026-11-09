@@ -1,11 +1,10 @@
 {
-  "schemaVersion": 1,
-  "target": {
-    "os": "macOS",
-    "minimumVersion": "26.0",
-    "architecture": "arm64",
-    "sapi": "cli"
-  },
+  "schemaVersion": 2,
+  "targets": [
+    {"os": "macOS", "minimumVersion": "26.0", "architecture": "arm64", "sapi": "cli"},
+    {"os": "Linux", "minimumGlibcVersion": "2.17", "architecture": "x86_64", "sapi": "cli"},
+    {"os": "Linux", "minimumGlibcVersion": "2.17", "architecture": "aarch64", "sapi": "cli"}
+  ],
   "allowPrereleases": false,
   "historicalExactVersionsRemainInstallable": true,
   "immutablePublishedAssets": true
