@@ -63,14 +63,21 @@ FAKE_GH = textwrap.dedent(
             reply([[{key: value for key, value in release.items() if key != "assets"}
                     for release in state["releases"]]])
         if method == "GET" and path.startswith("git/matching-refs/tags/"):
+            if state.get("refsUnavailable"):
+                fail("HTTP 502: Server Error")
             prefix = path[len("git/matching-refs/tags/"):]
             reply([{"ref": f"refs/tags/{name}", "object": target}
                    for name, target in sorted(state["refs"].items()) if name.startswith(prefix)])
         if method == "GET" and path.startswith("git/tags/"):
             reply({"object": {"type": "commit", "sha": state["tagObjects"][path[len("git/tags/"):]]}})
+        if method == "GET" and path.startswith("compare/"):
+            reply({"status": state.get("ancestry", {}).get(path[len("compare/"):], "diverged")})
         if method == "GET" and path.startswith("releases/"):
             release_id = int(path[len("releases/"):])
-            release = state.get("flipOnRead", {}).get(str(release_id)) or next(
+            # flipOnRead answers with a changed release from the given read onwards.
+            flip = state.get("flipOnRead", {}).get(str(release_id))
+            state["reads"] = state.get("reads", 0) + 1
+            release = (flip["release"] if flip and state["reads"] >= flip["fromRead"] else None) or next(
                 (item for item in state["releases"] if item["id"] == release_id), None)
             reply({key: value for key, value in release.items() if key != "assets"}) if release else fail("HTTP 404")
         if method == "POST" and path == "git/tags":
@@ -99,6 +106,8 @@ FAKE_GH = textwrap.dedent(
             reply({})
         if method == "DELETE" and path.startswith("releases/"):
             release_id = int(path[len("releases/"):])
+            if state.get("staleReads"):
+                reply({})
             state["releases"] = [item for item in state["releases"] if item["id"] != release_id]
             reply({})
     if args[:2] == ["release", "view"]:
@@ -155,6 +164,8 @@ class StaleDraftRecoveryTests(unittest.TestCase):
         self.identity = recipe_identity(ROOT, self.commit, "8.5")
 
     def given(self, releases=(), refs=None, tag_objects=None, **extra):
+        # Main moved forward from the old commit to the admitted one unless a test says otherwise.
+        extra.setdefault("ancestry", {f"{OLD_COMMIT}...{self.commit}": "ahead"})
         self.state_path.write_text(json.dumps({
             "releases": list(releases), "refs": refs or {}, "tagObjects": tag_objects or {}, "log": [], **extra,
         }))
@@ -268,12 +279,45 @@ class StaleDraftRecoveryTests(unittest.TestCase):
         self.assertEqual([["api", "--method", "DELETE", f"repos/{REPO}/releases/7"]], self.mutations())
 
     def test_a_draft_published_while_it_is_discarded_is_left_alone(self):
+        # Published before the tag's deletion (read 1) or before the draft's (read 2).
         ref, objects = tagged(OLD_COMMIT)
-        self.given([self.draft()], {VERSION: ref}, objects, flipOnRead={"7": self.draft(draft=False)})
+        delete_tag = ["api", "--method", "DELETE", f"repos/{REPO}/git/refs/tags/{VERSION}"]
+        for from_read, deleted in ((1, []), (2, [delete_tag])):
+            with self.subTest(from_read=from_read):
+                self.given([self.draft()], {VERSION: ref}, objects,
+                           flipOnRead={"7": {"fromRead": from_read, "release": self.draft(draft=False)}})
+                discarded = self.discard()
+                self.assertEqual(1, discarded.returncode)
+                self.assertIn("stopped being an unpublished draft", discarded.stderr)
+                self.assertEqual(deleted, self.mutations())
+
+    def test_a_draft_tagged_at_a_newer_or_unrelated_commit_is_not_replaced_by_an_older_run(self):
+        ref, objects = tagged(OLD_COMMIT)
+        for ancestry in ("behind", "diverged"):
+            with self.subTest(ancestry=ancestry):
+                self.given([self.draft()], {VERSION: ref}, objects,
+                           ancestry={f"{OLD_COMMIT}...{self.commit}": ancestry})
+                discarded = self.discard()
+                self.assertEqual(1, discarded.returncode)
+                self.assertIn("not an ancestor of the admitted commit", discarded.stderr)
+                self.assertEqual([], self.mutations())
+                self.assertEqual(1, len(self.state()["releases"]))
+
+    def test_a_failed_tag_lookup_is_an_error_not_a_missing_tag(self):
+        # Read as "no tag", the draft would look stale and be deleted.
+        ref, objects = tagged(self.commit)
+        self.given([self.draft(self.identity)], {VERSION: ref}, objects, refsUnavailable=True)
         discarded = self.discard()
         self.assertEqual(1, discarded.returncode)
-        self.assertIn("stopped being an unpublished draft", discarded.stderr)
+        self.assertIn("HTTP 502", discarded.stderr)
         self.assertEqual([], self.mutations())
+
+    def test_a_discard_that_github_still_reports_present_fails(self):
+        ref, objects = tagged(OLD_COMMIT)
+        self.given([self.draft()], {VERSION: ref}, objects, staleReads=True)
+        discarded = self.discard()
+        self.assertEqual(1, discarded.returncode)
+        self.assertIn("still present after it was discarded", discarded.stderr)
 
     def test_publication_refuses_a_draft_whose_tag_does_not_name_the_admitted_commit(self):
         # A discard that stopped after deleting the tag leaves an older run's own draft,

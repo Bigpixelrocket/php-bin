@@ -84,8 +84,10 @@ def discard_stale_draft(repo: str, version: str, commit: str) -> bool:
 
     Only positive evidence of a stale draft acts. No release, a published release,
     or a draft whose tag names the admitted commit is left untouched, so a published
-    release with a mismatched tag still fails at `draft_created`. Returns whether a
-    draft was discarded.
+    release with a mismatched tag still fails at `draft_created`. A draft tagged at
+    a commit that is not an ancestor of the admitted one fails instead: that is a
+    rerun of an older run, which must not replace a newer attempt's draft. Returns
+    whether a draft was discarded.
     """
     if PUBLISHED_RELEASE_TAG_RE.fullmatch(version) is None:
         raise ControlError(f"release version is not a PHP version: {version}")
@@ -102,6 +104,10 @@ def discard_stale_draft(repo: str, version: str, commit: str) -> bool:
     tagged = tag_commit(repo, version)
     if tagged == commit:
         return False
+    if tagged is not None:
+        ancestry = json.loads(gh("api", f"repos/{repo}/compare/{tagged}...{commit}"))["status"]
+        if ancestry != "ahead":
+            raise ControlError(f"draft {version} is tagged at a commit that is not an ancestor of the admitted commit")
     release_id = int(release["id"])
 
     def require_unpublished_draft() -> None:
