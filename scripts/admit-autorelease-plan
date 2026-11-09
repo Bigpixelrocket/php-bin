@@ -11,7 +11,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from autorelease.control import (  # noqa: E402
     ROOT,
     ControlError,
-    due_recipe_rebuild,
+    due_recipe_rebuilds,
     load_json,
     recorded_action_keys,
     validate_plan,
@@ -41,15 +41,15 @@ try:
         raise ControlError("completed actions must be an array of strings")
     completed = set(completed_document)
     # Re-derived from the same capture, recipe commit, and policy the watcher used,
-    # so the classifier can only confirm the rebuild the watcher selected.
-    pending_rebuild = due_recipe_rebuild(args.manifest, ROOT, args.php_bin_head)
+    # so the classifier can only confirm the exact rebuild set the watcher selected.
+    pending_rebuilds = due_recipe_rebuilds(args.manifest, ROOT, args.php_bin_head)
     admission = validate_plan(
         load_json(args.plan),
         args.manifest,
         heads,
         args.policy_digest,
         completed,
-        pending_rebuild,
+        pending_rebuilds,
         ROOT,
         recorded_action_keys(args.events) if args.events else None,
     )

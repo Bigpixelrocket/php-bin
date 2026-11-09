@@ -5,7 +5,7 @@
   "description": "Per maintained branch, php.net's newest release against php-bin's newest published release, derived from one watcher capture. Published at https://bigpixelrocket.github.io/php-bin/status.json; treat a checkedAt older than 24 hours as a stopped watcher.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "checkedAt", "runUrl", "summary", "badges", "trigger", "action", "actionKey", "inProgressActionKeys", "rebuildDueActionKey", "changedCaptures", "captureHealth", "branches"],
+  "required": ["schemaVersion", "checkedAt", "runUrl", "summary", "badges", "trigger", "action", "actionKey", "inProgressActionKeys", "rebuildDueActionKey", "rebuildDueActionKeys", "changedCaptures", "captureHealth", "branches"],
   "properties": {
     "schemaVersion": {"type": "integer", "const": 1},
     "checkedAt": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$", "description": "When the watcher captured the evidence."},
@@ -16,7 +16,8 @@
     "action": {"type": ["string", "null"], "enum": ["no_change", "new_patch", "new_branch", "branch_eol", "recipe_rebuild", "blocked", "needs_human", null], "description": "The admitted plan's action; null when nothing was classified or admitted."},
     "actionKey": {"$ref": "#/$defs/nullableActionKey"},
     "inProgressActionKeys": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/actionKey"}, "description": "Incomplete event records plus admitted release or lifecycle work."},
-    "rebuildDueActionKey": {"$ref": "#/$defs/nullableActionKey", "description": "The one rebuild the watch decision selected."},
+    "rebuildDueActionKey": {"$ref": "#/$defs/nullableActionKey", "description": "The first rebuild the watch decision selected, the newest due version."},
+    "rebuildDueActionKeys": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^recipe_rebuild:\\d+\\.\\d+\\.\\d+:[1-9]\\d*$"}, "description": "Every rebuild the watch decision selected, newest version first; one watcher run admits them as one batch."},
     "changedCaptures": {"type": ["array", "null"], "uniqueItems": true, "items": {"$ref": "#/$defs/captureId"}, "description": "Captures whose status or digest differs from the reviewed evidence snapshot; null when that snapshot is unreadable."},
     "captureHealth": {
       "type": "object",

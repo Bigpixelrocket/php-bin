@@ -129,10 +129,17 @@ def manifest_digest(captures: Iterable[dict[str, Any]]) -> str:
     return sha256_bytes(canonical_json(comparable))
 
 
+# The one capture a batch rebuild may bind through a branch projection rather than its
+# digest: its sibling rebuilds publish on other branches while it is in flight.
+BRANCH_SCOPED_CAPTURE_IDS = frozenset({"php_bin_releases"})
+
+
 def validate_recaptured_evidence(
     plan: dict[str, Any],
     admitted_manifest: dict[str, Any],
     current_manifest: dict[str, Any],
+    *,
+    branch_scoped: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Verify that the upstream truth a plan was admitted on still holds at publication.
 
@@ -148,7 +155,18 @@ def validate_recaptured_evidence(
     stays bound for every action. Runtime-only evidence is never recaptured. The
     publish command also reruns the supersession check on the recaptured feeds, so
     an exempt feed that names a later patch on the branch still stops the release.
+
+    `branch_scoped` names captures the caller binds through a reviewed branch
+    projection instead of the digest. Only a batch rebuild plan may pass it, and only
+    for `php_bin_releases`: the batch's sibling releases publish on other branches
+    while this one is in flight. The caller (`control.validate_publish_recapture`)
+    compares that projection itself; this module stays blind to body formats.
     """
+    require(branch_scoped <= BRANCH_SCOPED_CAPTURE_IDS, "only the php-bin releases capture may be branch scoped")
+    require(
+        not branch_scoped or (plan.get("action") == "recipe_rebuild" and "rebuildActionKeys" in plan),
+        "only a batch rebuild binds a capture by branch",
+    )
 
     def indexed_captures(manifest: dict[str, Any], label: str) -> dict[str, dict[str, Any]]:
         require(isinstance(manifest, dict), f"{label} evidence manifest must be an object")
@@ -213,12 +231,17 @@ def validate_recaptured_evidence(
         # The own branch feed is bound even when uncited: the aggregate feed is not
         # branch-scoped, so it alone cannot show that the branch has moved on.
         verified = (cited - unrelated) | (own_branch_feed & set(admitted))
+    scoped = verified & branch_scoped
+    verified = verified - scoped
     for capture_id in sorted(verified):
         require(
             current[capture_id]["digest"] == admitted[capture_id]["digest"],
             f"recaptured evidence changed: {capture_id}",
         )
-    return {"valid": True, "verifiedCaptureIds": sorted(verified)}
+    result: dict[str, Any] = {"valid": True, "verifiedCaptureIds": sorted(verified)}
+    if branch_scoped:
+        result["branchScopedCaptureIds"] = sorted(scoped)
+    return result
 
 
 def validate_evidence_state_record(record: dict[str, Any]) -> None:

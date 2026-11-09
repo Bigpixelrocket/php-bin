@@ -345,6 +345,7 @@ STATUS_FIELDS = frozenset(
         "actionKey",
         "inProgressActionKeys",
         "rebuildDueActionKey",
+        "rebuildDueActionKeys",
         "changedCaptures",
         "captureHealth",
         "branches",
@@ -584,6 +585,17 @@ def validate_status_document(document: Any) -> dict[str, Any]:
         or (isinstance(rebuild, str) and rebuild.startswith("recipe_rebuild:") and bool(ACTION_KEY_RE.fullmatch(rebuild))),
         "status rebuild action key is invalid",
     )
+    rebuilds = document["rebuildDueActionKeys"]
+    require(
+        isinstance(rebuilds, list)
+        and all(
+            isinstance(key, str) and key.startswith("recipe_rebuild:") and bool(ACTION_KEY_RE.fullmatch(key))
+            for key in rebuilds
+        )
+        and len(rebuilds) == len(set(rebuilds))
+        and (rebuilds[0] if rebuilds else None) == rebuild,
+        "status rebuild action keys are invalid",
+    )
     if document["changedCaptures"] is not None:
         _status_capture_ids(document["changedCaptures"], "status changed captures")
     health = document["captureHealth"]
@@ -621,7 +633,7 @@ def status_block(document: dict[str, Any]) -> str:
     """Render a validated status document as the fixed-format plain-text table.
 
     The email digest and the published page show exactly this block: one row per
-    maintained branch, then one line naming in-progress work, the selected rebuild,
+    maintained branch, then one line naming in-progress work, the selected rebuilds,
     and the captures whose digest changed, then capture health when it failed. A
     value the capture could not establish reads `unknown`; a branch with no php-bin
     release yet reads `none`.
@@ -665,7 +677,7 @@ def status_block(document: dict[str, Any]) -> str:
         *table,
         "",
         f"In progress: {', '.join(document['inProgressActionKeys']) or 'none'}   "
-        f"Rebuilds due: {document['rebuildDueActionKey'] or 'none'}   "
+        f"Rebuilds due: {', '.join(document['rebuildDueActionKeys']) or 'none'}   "
         f"Changed inputs: {'unknown' if changed is None else ', '.join(changed) or 'none'}",
     ]
     if health["unhealthyCaptures"]:
@@ -872,6 +884,30 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
             status_paragraph,
             run_url=run_url,
         )
+    if action == "recipe_rebuild" and "rebuildActionKeys" in plan:
+        keys = plan["rebuildActionKeys"]
+        require(
+            isinstance(keys, list)
+            and len(keys) >= 2
+            and keys[0] == action_key
+            and all(
+                isinstance(key, str) and key.startswith("recipe_rebuild:") and bool(ACTION_KEY_RE.fullmatch(key))
+                for key in keys
+            ),
+            "admitted plan rebuild keys are invalid",
+        )
+        revisions = [f"{key.split(':')[1]}-{key.split(':')[2]}" for key in keys]
+        return _email(
+            "recipe_rebuilds_started",
+            f"Watcher: {len(keys)} PHP rebuilds started ({', '.join(revisions)})",
+            f"The build recipe changed since the newest release of {len(keys)} maintained branches "
+            f"was published, so the watcher admitted their rebuild revisions in one batch: "
+            f"{', '.join(keys)}. One publish run was dispatched for each, and they run "
+            "concurrently; a separate email per revision confirms publication or reports the "
+            "failure. Every existing release stays published and unchanged.",
+            status_paragraph,
+            run_url=run_url,
+        )
     if action == "recipe_rebuild":
         revision = f"{version}-{action_key.split(':')[2]}"
         return _email(
@@ -1065,11 +1101,11 @@ def release_recipe_identity(release: dict[str, Any]) -> str | None:
     return match.group(1) if match else None
 
 
-def pending_recipe_rebuild(
+def pending_recipe_rebuilds(
     releases: Iterable[dict[str, Any]],
     recipe_identities: Mapping[str, str],
-) -> str | None:
-    """Return the action key of the one rebuild revision that is due, or None.
+) -> list[str]:
+    """Return the action keys of every rebuild revision that is due, newest version first.
 
     Only the newest published version of each maintained branch is ever rebuilt. Older
     patch versions keep the binaries they were published with forever, whatever recipe
@@ -1077,7 +1113,7 @@ def pending_recipe_rebuild(
     every rebuild costs a full build and its own publication, so rebuilding history
     would make CI time grow with the number of published versions, while someone pinned
     to an older patch already lacks that branch's later PHP fixes, so a refreshed recipe
-    buys them little.
+    buys them little. The list therefore holds at most one key per maintained branch.
 
     `recipe_identities` maps every maintained branch to the identity of the recipe it
     would be built from now. A branch's newest version is due when its newest revision
@@ -1089,8 +1125,8 @@ def pending_recipe_rebuild(
     and resumes that draft.
 
     Selection is deterministic so the classifier confirms rather than invents it: due
-    branches go newest version first. One key is returned per run; later runs rebuild
-    the rest.
+    branches go newest version first. One watcher run admits the whole list as one batch
+    and publishes every key in its own concurrent transaction.
     """
     require(
         all(SHA256_RE.fullmatch(identity or "") for identity in recipe_identities.values()),
@@ -1116,15 +1152,29 @@ def pending_recipe_rebuild(
         branch = version.rsplit(".", 1)[0]
         if branch not in latest_of_branch or version_key(version) > version_key(latest_of_branch[branch]):
             latest_of_branch[branch] = version
-    due = [
-        version
-        for branch, version in latest_of_branch.items()
-        if release_recipe_identity(newest[version][1]) != recipe_identities[branch]
-    ]
-    if not due:
-        return None
-    selected = max(due, key=version_key)
-    return f"recipe_rebuild:{selected}:{newest[selected][0] + 1}"
+    due = sorted(
+        (
+            version
+            for branch, version in latest_of_branch.items()
+            if release_recipe_identity(newest[version][1]) != recipe_identities[branch]
+        ),
+        key=version_key,
+        reverse=True,
+    )
+    return [f"recipe_rebuild:{version}:{newest[version][0] + 1}" for version in due]
+
+
+def pending_recipe_rebuild(
+    releases: Iterable[dict[str, Any]],
+    recipe_identities: Mapping[str, str],
+) -> str | None:
+    """Return the first key `pending_recipe_rebuilds` selects, or None when none is due.
+
+    The first key is the newest due version, which is also the batch plan's own
+    `actionKey`, so a run with exactly one due rebuild names it exactly as before.
+    """
+    keys = pending_recipe_rebuilds(releases, recipe_identities)
+    return keys[0] if keys else None
 
 
 def watch_decision(
@@ -1144,8 +1194,9 @@ def watch_decision(
     recipe for it. When it is supplied, a branch whose newest published version was
     built from any other recipe keeps the watcher awake: the `rebuild_due` trigger runs the classifier even on a day
     whose evidence matches the last reviewed snapshot, so a recorded `no_change` can
-    never leave a rebuild pending quietly. The selected key is reported as
-    `rebuildActionKey`, and admission accepts no other rebuild.
+    never leave a rebuild pending quietly. Every due key is reported, newest version
+    first, as `rebuildActionKeys`, and the first of them also as `rebuildActionKey`;
+    admission accepts no other rebuild set.
     """
     releases = list(releases)
     events = list(events)
@@ -1185,12 +1236,12 @@ def watch_decision(
         trigger = "quiet"
     # An untrustworthy snapshot cannot prove which releases exist, so a rebuild is only
     # selected once the health guards have passed, exactly like a missing record.
-    rebuild = (
-        pending_recipe_rebuild(releases, recipe_identities)
+    rebuilds = (
+        pending_recipe_rebuilds(releases, recipe_identities)
         if recipe_identities is not None and trigger not in {"health_failed", "source_unhealthy"}
-        else None
+        else []
     )
-    if rebuild and trigger == "quiet":
+    if rebuilds and trigger == "quiet":
         trigger = "rebuild_due"
     # A missing record outranks every trigger that a trustworthy snapshot can raise, so
     # it is repaired before new work starts. It never changes whether the classifier
@@ -1213,7 +1264,8 @@ def watch_decision(
         "incompleteActions": incomplete,
         "action": "record_completed_event" if trigger == "record_missing" else "none",
         "actionKey": unrecorded if trigger == "record_missing" else "",
-        "rebuildActionKey": rebuild or "",
+        "rebuildActionKey": rebuilds[0] if rebuilds else "",
+        "rebuildActionKeys": rebuilds,
         "classify": classify,
     }
 

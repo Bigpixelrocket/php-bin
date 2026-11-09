@@ -66,20 +66,20 @@ A human changes what gets built, never how it gets released:
 6. Open a pull request with the build log and module diff.
 
 After that merges, the watcher sees which maintained branches have a newest
-version built from a different recipe and rebuilds those versions one per run
-as revisions such as `8.4.5-1`. Older patch versions are never rebuilt: that
-would make CI time grow with every published version, and anyone pinned to an
-older patch already lacks the branch's later PHP fixes. Each recorded rebuild
-starts the next watcher run, so the whole set drains without anyone
-dispatching it, and a rebuild that fails waits for the next scheduled run. A
-change to one branch's `expected-modules/<branch>.txt` rebuilds only that
-branch; a change to a shared recipe input rebuilds the newest version of every
-maintained branch. Each release records the identity of the recipe it was
-built from in its notes, and a branch's newest version is rebuilt when its
-newest revision records a different identity or none. The watcher selects the version and revision
-deterministically, the classifier confirms it as a
-`recipe_rebuild:<version>:<n>` plan, and admission accepts only that key, so a
-revision is never chosen by hand. See "Recipe rebuilds" in
+version built from a different recipe and rebuilds all of them in one run, as
+revisions such as `8.4.5-1`, each in its own concurrent publish run. Older
+patch versions are never rebuilt: that would make CI time grow with every
+published version, and anyone pinned to an older patch already lacks the
+branch's later PHP fixes. A rebuild that fails leaves its siblings published;
+it is retried by the next watcher run, which admits only the versions still
+due. A change to one branch's `expected-modules/<branch>.txt` rebuilds only
+that branch; a change to a shared recipe input rebuilds the newest version of
+every maintained branch. Each release records the identity of the recipe it
+was built from in its notes, and a branch's newest version is rebuilt when its
+newest revision records a different identity or none. The watcher selects the
+versions and revisions deterministically, the classifier confirms them as one
+`recipe_rebuild` plan, and admission accepts only that exact set, so a revision
+is never chosen by hand. See "Recipe rebuilds" in
 [`AUTORELEASE.md`](../AUTORELEASE.md).
 
 Never upload a locally built replacement over an existing release asset. A
