@@ -26,16 +26,20 @@ fi
 # traffic. With GITHUB_TOKEN set, git sends it to github.com and nowhere else, the
 # way actions/checkout does. It is the read-only token every build job holds and
 # StaticPHP already sends to the GitHub API; a git configuration in the
-# environment keeps it out of every process listing.
+# environment keeps it out of every process listing. git follows no redirect from
+# github.com: after one it would add the header to its next requests to the new
+# host, so a redirected clone fails instead.
 if [[ -n "${GITHUB_TOKEN:-}" ]]; then
   if [[ ! "${GIT_CONFIG_COUNT:-0}" =~ ^[0-9]+$ ]]; then
     echo "GIT_CONFIG_COUNT must be a number, got: $GIT_CONFIG_COUNT" >&2
     exit 1
   fi
   git_config_index="${GIT_CONFIG_COUNT:-0}"
-  export GIT_CONFIG_COUNT=$((git_config_index + 1))
+  export GIT_CONFIG_COUNT=$((git_config_index + 2))
   export "GIT_CONFIG_KEY_$git_config_index=http.https://github.com/.extraheader"
   export "GIT_CONFIG_VALUE_$git_config_index=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+  export "GIT_CONFIG_KEY_$((git_config_index + 1))=http.https://github.com/.followRedirects"
+  export "GIT_CONFIG_VALUE_$((git_config_index + 1))=false"
 fi
 
 # The publisher passes the full release tag, 8.4.5-1 for a rebuild; the build

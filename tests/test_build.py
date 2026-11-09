@@ -407,17 +407,39 @@ class BuildScriptTests(unittest.TestCase):
             return sorted({line for line in self.calls.read_text().splitlines() if line.startswith("GIT_CONFIG_")})
 
         token = base64.b64encode(b"x-access-token:read-only-token").decode()
+        config = git_config(GITHUB_TOKEN="read-only-token")
         self.assertEqual([
-            "GIT_CONFIG_COUNT=1",
+            "GIT_CONFIG_COUNT=2",
             "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader",
+            "GIT_CONFIG_KEY_1=http.https://github.com/.followRedirects",
             f"GIT_CONFIG_VALUE_0=AUTHORIZATION: basic {token}",
-        ], git_config(GITHUB_TOKEN="read-only-token"))
+            "GIT_CONFIG_VALUE_1=false",
+        ], config)
+
+        # git itself applies the header, and the refusal to follow a redirect, which
+        # would carry the header on to the new host, to github.com and nothing else.
+        def urlmatch(key, url):
+            env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_CONFIG_")}
+            env.update(dict(line.split("=", 1) for line in config), GIT_CONFIG_NOSYSTEM="1",
+                       GIT_CONFIG_GLOBAL=os.devnull)
+            return subprocess.run(["git", "config", "--get-urlmatch", key, url],
+                                  env=env, capture_output=True, text=True).stdout.strip()
+
+        for url in ("https://github.com/static-php/phpmicro", "https://github.com/libjxl/libjxl.git"):
+            self.assertEqual(f"AUTHORIZATION: basic {token}", urlmatch("http.extraheader", url))
+            self.assertEqual("false", urlmatch("http.followRedirects", url))
+        for url in ("https://codeload.github.com/o/r", "https://api.github.com/repos/o/r",
+                    "https://github.com.example.org/o/r", "http://github.com/o/r",
+                    "https://aomedia.googlesource.com/aom"):
+            self.assertEqual("", urlmatch("http.extraheader", url))
+
         # An existing environment configuration is kept, and the header added after it.
-        self.assertIn(
-            "GIT_CONFIG_KEY_1=http.https://github.com/.extraheader",
-            git_config(GITHUB_TOKEN="read-only-token", GIT_CONFIG_COUNT="1",
-                       GIT_CONFIG_KEY_0="core.autocrlf", GIT_CONFIG_VALUE_0="false"),
-        )
+        kept = git_config(GITHUB_TOKEN="read-only-token", GIT_CONFIG_COUNT="1",
+                          GIT_CONFIG_KEY_0="core.autocrlf", GIT_CONFIG_VALUE_0="false")
+        self.assertIn("GIT_CONFIG_COUNT=3", kept)
+        self.assertIn("GIT_CONFIG_KEY_0=core.autocrlf", kept)
+        self.assertIn("GIT_CONFIG_KEY_1=http.https://github.com/.extraheader", kept)
+        self.assertIn("GIT_CONFIG_KEY_2=http.https://github.com/.followRedirects", kept)
         self.assertEqual([], git_config())
 
     def test_a_tag_build_pins_php_src_to_the_exact_tag(self):
