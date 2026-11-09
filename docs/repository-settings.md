@@ -15,7 +15,9 @@ Required repository state:
   owner can merge a pull request past a failing rule but can never push,
   force-push, or delete `main` directly. Classic branch protection (and its
   `enforce_admins` toggle) is retired; the configure script removes it.
-- Require the `Script checks` status check.
+- Require the `Script checks` status check. The configure command takes one
+  `--required-check` per check and refuses to drop a check the ruleset
+  already requires unless `--drop-required-check` names it.
 - Require the base-controlled `Protected controls` status check. It passes
   automatically for unprotected generated paths and for owner-authored pull
   requests (a solo owner cannot approve their own PR, so an owner review
@@ -42,10 +44,13 @@ Required repository state:
   remains owner-only except for the deterministic evidence-state proof above.
 - Because GitHub suppresses ordinary PR events created by `GITHUB_TOKEN`, each
   deterministic PR coordinator explicitly dispatches `ci.yml` and
-  `protected-controls.yml` at the exact PR branch, accepts only newly created
-  successful validator runs for that head SHA, and only then publishes the
-  Actions-owned check evidence plus PR-visible commit statuses with the exact
-  validator URLs.
+  `protected-controls.yml` at the exact PR branch through
+  `scripts/dispatch-pr-checks`. It waits for every status check the rules on
+  `main` require (read from the branch rules API at run time, plus the checks
+  the caller names), accepts only newly created successful validator runs for
+  that head SHA, and only then publishes the Actions-owned check evidence plus
+  PR-visible commit statuses with the exact validator URLs. A required check
+  that fails or never runs stops the merge.
 - Allow GitHub-owned Actions plus only `jdx/mise-action`, and require every
   Action reference to use a full commit SHA.
 - Create the protected `php-autorelease-publish` environment, limited to
