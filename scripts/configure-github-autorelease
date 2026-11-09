@@ -45,7 +45,24 @@ def ensure_label(repo: str, name: str, color: str, description: str) -> None:
 parser = argparse.ArgumentParser()
 parser.add_argument("--repo", required=True)
 parser.add_argument("--owner", required=True)
-parser.add_argument("--required-check", required=True)
+# The ruleset is written whole, so every status check it should require is
+# named here; Protected controls is always added. Re-running with fewer checks
+# than the ruleset already requires stops unless each dropped check is named,
+# so a stale invocation cannot quietly remove a required check.
+parser.add_argument(
+    "--required-check",
+    action="append",
+    required=True,
+    metavar="NAME",
+    help="Status check the protect_main ruleset requires. Repeat once per check.",
+)
+parser.add_argument(
+    "--drop-required-check",
+    action="append",
+    default=[],
+    metavar="NAME",
+    help="Required check the ruleset may stop requiring. Repeat once per check.",
+)
 # Environments are GitHub configuration rather than repository files, so a
 # source-only rename cannot move them. Naming each one at the call site keeps
 # the provisioned set and the reviewed docs/admin-state snapshot in step.
@@ -57,8 +74,31 @@ parser.add_argument(
     help="Protected environment to create. Repeat once per environment.",
 )
 args = parser.parse_args()
+required_checks = list(dict.fromkeys([*args.required_check, "Protected controls"]))
+if not all(required_checks) or set(args.drop_required_check) & set(required_checks):
+    parser.error("required checks must be named, and a dropped check cannot also be required")
 
 try:
+    # Read before any change, so a refused drop leaves the repository untouched.
+    existing = json.loads(gh("api", f"repos/{args.repo}/rulesets") or "[]")
+    matched = [item for item in existing if item.get("name") == "protect_main"]
+    if len(matched) > 1:
+        raise RuntimeError("multiple protect_main rulesets exist; resolve by hand")
+    if matched:
+        current = json.loads(gh("api", f"repos/{args.repo}/rulesets/{matched[0]['id']}"))
+        current_checks = {
+            check["context"]
+            for rule in current.get("rules", [])
+            if rule.get("type") == "required_status_checks"
+            for check in rule["parameters"]["required_status_checks"]
+        }
+        dropped = sorted(current_checks - set(required_checks) - set(args.drop_required_check))
+        if dropped:
+            raise RuntimeError(
+                "the protect_main ruleset requires checks this run would drop: "
+                + ", ".join(dropped)
+                + "; pass each as --required-check to keep it or --drop-required-check to remove it"
+            )
     repository = json.loads(gh(
         "api",
         f"repos/{args.repo}",
@@ -206,17 +246,12 @@ try:
                     "strict_required_status_checks_policy": True,
                     "do_not_enforce_on_create": False,
                     "required_status_checks": [
-                        {"context": args.required_check, "integration_id": 15368},
-                        {"context": "Protected controls", "integration_id": 15368},
+                        {"context": context, "integration_id": 15368} for context in required_checks
                     ],
                 },
             },
         ],
     }
-    existing = json.loads(gh("api", f"repos/{args.repo}/rulesets") or "[]")
-    matched = [item for item in existing if item.get("name") == ruleset["name"]]
-    if len(matched) > 1:
-        raise RuntimeError("multiple protect_main rulesets exist; resolve by hand")
     if matched:
         gh(
             "api",
@@ -246,7 +281,7 @@ try:
                 "configured": True,
                 "repo": args.repo,
                 "owner": args.owner,
-                "requiredCheck": args.required_check,
+                "requiredChecks": required_checks,
                 "environments": args.environment,
                 "unavailableSecurityFeatures": unavailable_security,
             }
