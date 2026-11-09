@@ -699,18 +699,18 @@ class AutoreleaseControlTests(unittest.TestCase):
         github_effect = namespace["github_effect"]
         identity = "sha256:" + "a" * 64
         commit = "c" * 40
-        tag_ref = json.dumps({"object": {"type": "commit", "sha": commit}})
+        tag_refs = json.dumps([{"ref": "refs/tags/8.5.9-1", "object": {"type": "commit", "sha": commit}}])
 
         def effect(existing):
             calls = []
 
             def gh(*arguments, capture=True):
+                if arguments == ("api", "repos/o/r/git/matching-refs/tags/8.5.9-1"):
+                    return tag_refs
                 calls.append(arguments)
                 return ""
 
             def run(argv, **_kwargs):
-                if argv[:3] == ["gh", "api", "repos/o/r/git/ref/tags/8.5.9-1"]:
-                    return mock.Mock(returncode=0, stdout=tag_ref)
                 if existing is None:
                     return mock.Mock(returncode=1, stdout="")
                 return mock.Mock(returncode=0, stdout=json.dumps(existing))
@@ -4003,7 +4003,11 @@ class AutoreleaseControlTests(unittest.TestCase):
         # The server validates the whole release before listening; the old 5-second
         # budget expired while the x86_64 runner was still validating.
         wait = run[run.index("ready=false"):run.index("\n", run.index('"$ready" ||'))]
-        self.assertIn("deadline=$((SECONDS + 120))", wait)
+        # One variable sets both the budget and the message that reports it.
+        self.assertIn("ready_timeout=120\n", wait)
+        self.assertIn("deadline=$((SECONDS + ready_timeout))", wait)
+        self.assertIn("within $ready_timeout seconds", wait)
+        self.assertEqual(1, wait.count("120"))
         version = "8.5.12-1"
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
@@ -4025,16 +4029,20 @@ class AutoreleaseControlTests(unittest.TestCase):
                 )
                 return result, time.monotonic() - started
 
-            # A server still busy before it listens is waited for.
+            # A server still busy before it listens is waited for. It starts listening
+            # after 6 seconds: past the old 5-second budget, whose whole-second clock
+            # could end the wait anywhere from 4 to 5 seconds in, while adding as
+            # little as possible to the suite.
             site = root / "site"
             site.mkdir()
             (site / "health").write_text("ok\n")
-            slow, _ = readiness([
-                "sh", "-c", 'sleep 1; exec "$0" -m http.server --bind 127.0.0.1 --directory "$1" "$port"',
+            slow, waited = readiness([
+                "sh", "-c", 'sleep 6; exec "$0" -m http.server --bind 127.0.0.1 --directory "$1" "$port"',
                 sys.executable, str(site),
             ])
             self.assertEqual(0, slow.returncode, slow.stderr)
             self.assertTrue(slow.stdout.endswith("serving\n"))
+            self.assertGreater(waited, 6)
             # A server that refuses the release ends the wait at once with its own error.
             staged = release_directory(root / "staged", version)
             (staged / "extra").write_text("x")
@@ -4089,6 +4097,41 @@ class AutoreleaseControlTests(unittest.TestCase):
             for checks in ({"Other check": "success"}, {"Script checks": "failure"}, {}):
                 with self.subTest(checks=checks), self.assertRaises(ControlError):
                     verify_merge(repo, head, manifest, checks, {}, {})
+
+    def test_sealing_ignores_the_umask_s_write_bits_and_still_checks_the_executable_bit(self):
+        # Debian and Ubuntu give new users umask 002, GitHub runners 022. Git records
+        # only whether a file is executable, so group and other write bits never
+        # reach the patch and must not decide whether it seals.
+        with tempfile.TemporaryDirectory() as temporary:
+            repo = pathlib.Path(temporary) / "repo"
+            repo.mkdir()
+            for arguments in (("init", "-q"), ("config", "user.name", "Fixture"),
+                              ("config", "user.email", "fixture@invalid")):
+                subprocess.run(["git", *arguments], cwd=repo, check=True)
+            (repo / "allowed.txt").write_text("before\n")
+            subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "baseline"], cwd=repo, check=True)
+            base = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+            ).stdout.strip()
+            (repo / "allowed.txt").write_text("after\n")
+            (repo / "scripts").mkdir()
+            (repo / "scripts/tool").write_text("#!/bin/sh\n")
+            plan = {"actionKey": "new_branch:8.6", "allowedPaths": {"php-bin": ["allowed.txt", "scripts/tool"]}}
+            for text_mode, script_mode in ((0o664, 0o775), (0o666, 0o777), (0o644, 0o755)):
+                (repo / "allowed.txt").chmod(text_mode)
+                (repo / "scripts/tool").chmod(script_mode)
+                sealed = pathlib.Path(temporary) / f"sealed-{text_mode:o}"
+                seal_patch(repo, base, plan, sealed)
+                patch = (sealed / "sealed.patch").read_text()
+                self.assertIn("new file mode 100755", patch)
+                self.assertNotIn("old mode", patch)
+            (repo / "allowed.txt").chmod(0o775)
+            with self.assertRaisesRegex(ControlError, "unexpected executable path: allowed.txt"):
+                seal_patch(repo, base, plan, pathlib.Path(temporary) / "executable")
+            (repo / "allowed.txt").chmod(0o600)
+            with self.assertRaisesRegex(ControlError, "unexpected mode: allowed.txt"):
+                seal_patch(repo, base, plan, pathlib.Path(temporary) / "private")
 
     def test_sealed_patch_keeps_the_exact_bytes_git_wrote(self):
         def git_in(repo, *arguments):

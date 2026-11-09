@@ -710,7 +710,10 @@ def seal_patch(
             require(not candidate.is_symlink(), f"patch contains symlink: {path}")
             require(candidate.is_file(), f"patch contains unsupported entry: {path}")
             require(candidate.stat().st_size <= 2 * 1024 * 1024, f"patch file too large: {path}")
-            mode = candidate.stat().st_mode & 0o777
+            # Group and other write bits come from the writer's umask (022 on GitHub
+            # runners, 002 for new users on Debian and Ubuntu) and never reach the
+            # sealed patch, which records only whether the file is executable.
+            mode = candidate.stat().st_mode & 0o755
             require(mode in {0o644, 0o755}, f"patch contains unexpected mode: {path}")
             require(mode != 0o755 or path.startswith("scripts/"), f"unexpected executable path: {path}")
             body = candidate.read_bytes()

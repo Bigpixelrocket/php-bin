@@ -10,6 +10,7 @@ import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from autorelease.control import (  # noqa: E402
+    COMMIT_SHA_RE,
     ROOT,
     ControlError,
     LEGAL_RELEASE_TRANSITIONS,
@@ -37,6 +38,82 @@ def gh(*arguments: str, capture: bool = True) -> str:
     return result.stdout.strip() if capture else ""
 
 
+def all_releases(repo: str) -> list[dict]:
+    """Return every release in the repository, drafts included for a write token."""
+    pages = json.loads(gh("api", f"repos/{repo}/releases?per_page=100", "--paginate", "--slurp"))
+    return [item for page in pages for item in page]
+
+
+def tag_commit(repo: str, version: str) -> str | None:
+    """Return the commit the release tag resolves to, or None when no such tag exists.
+
+    `matching-refs` answers an absent tag with an empty list, so any failed call
+    is an error rather than a missing tag.
+    """
+    refs = json.loads(gh("api", f"repos/{repo}/git/matching-refs/tags/{version}"))
+    exact = [ref for ref in refs if ref.get("ref") == f"refs/tags/{version}"]
+    if not exact:
+        return None
+    target = exact[0]["object"]
+    if target["type"] == "tag":
+        target = json.loads(gh("api", f"repos/{repo}/git/tags/{target['sha']}"))["object"]
+    if target["type"] != "commit":
+        raise ControlError(f"release tag does not name a commit: {version}")
+    return target["sha"]
+
+
+def discard_stale_draft(repo: str, version: str, commit: str) -> bool:
+    """Delete an unpublished draft whose tag no longer resolves to the admitted commit.
+
+    A draft is left behind when an attempt stops before publication. Once main has
+    moved, the next admitted dispatch names a newer commit, and the draft's tag and
+    bytes belong to the old one. Such a draft was never public, so it is deleted
+    with its tag and this run releases its own build of the admitted commit.
+
+    Only positive evidence of a stale draft acts. No release, a published release,
+    or a draft whose tag names the admitted commit is left untouched, so a published
+    release with a mismatched tag still fails at `draft_created`. Returns whether a
+    draft was discarded.
+    """
+    if PUBLISHED_RELEASE_TAG_RE.fullmatch(version) is None:
+        raise ControlError(f"release version is not a PHP version: {version}")
+    if COMMIT_SHA_RE.fullmatch(commit) is None:
+        raise ControlError("admitted commit is not an exact commit SHA")
+    named = [release for release in all_releases(repo) if release.get("tag_name") == version]
+    if not named:
+        return False
+    if len(named) != 1:
+        raise ControlError(f"more than one release names tag {version}")
+    release = named[0]
+    if release.get("draft") is not True:
+        return False
+    tagged = tag_commit(repo, version)
+    if tagged == commit:
+        return False
+    release_id = int(release["id"])
+
+    def require_unpublished_draft() -> None:
+        # Re-read by ID right before each deletion: publication is irreversible,
+        # and a release that is no longer this unpublished draft is never touched.
+        current = json.loads(gh("api", f"repos/{repo}/releases/{release_id}"))
+        if current.get("draft") is not True or current.get("tag_name") != version:
+            raise ControlError("release stopped being an unpublished draft while it was discarded")
+
+    # The tag goes first: a run that stops between the two deletions leaves a draft
+    # without its tag, which the next run recognizes as stale and finishes deleting.
+    # A stray tag with no release is never deleted here.
+    if tagged is not None:
+        require_unpublished_draft()
+        gh("api", "--method", "DELETE", f"repos/{repo}/git/refs/tags/{version}")
+    require_unpublished_draft()
+    gh("api", "--method", "DELETE", f"repos/{repo}/releases/{release_id}")
+    if tag_commit(repo, version) is not None or any(
+        item.get("tag_name") == version for item in all_releases(repo)
+    ):
+        raise ControlError(f"stale draft {version} is still present after it was discarded")
+    return True
+
+
 def expected_assets(directory: pathlib.Path, version: str) -> dict[str, str]:
     # A transaction only ever creates a full release: one archive per platform and
     # the SHA256SUMS that binds them. The macOS-only shape of older releases is
@@ -55,14 +132,8 @@ def github_effect(
     if target == "built":
         return
     if target == "draft_created":
-        ref_query = subprocess.run(
-            ["gh", "api", f"repos/{repo}/git/ref/tags/{version}"],
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        if ref_query.returncode != 0:
+        tagged = tag_commit(repo, version)
+        if tagged is None:
             message = json.dumps(
                 {
                     "tag": version,
@@ -91,14 +162,10 @@ def github_effect(
                 "-f",
                 f"sha={tag_sha}",
             )
-        else:
-            ref = json.loads(ref_query.stdout)
-            object_sha = ref["object"]["sha"]
-            if ref["object"]["type"] == "tag":
-                tag = json.loads(gh("api", f"repos/{repo}/git/tags/{object_sha}"))
-                object_sha = tag["object"]["sha"]
-            if object_sha != commit:
-                raise ControlError("existing tag does not point to the admitted commit")
+        elif tagged != commit:
+            # A stale draft was discarded before the transaction began, so what is
+            # left here is a published release or a stray tag: never retagged.
+            raise ControlError("existing tag does not point to the admitted commit")
         # The watcher reads the recipe identity back from the published notes to
         # decide whether this version needs a rebuild revision.
         release_tag = PUBLISHED_RELEASE_TAG_RE.fullmatch(version)
@@ -166,9 +233,7 @@ def github_effect(
             # rebuild of an older branch would take it from the newest version. The
             # publication therefore states it: latest only when no published release
             # sorts above this version.
-            pages = json.loads(gh("api", f"repos/{repo}/releases?per_page=100", "--paginate", "--slurp"))
-            published = [item for page in pages for item in page]
-            latest = "true" if release_is_newest(version, published) else "false"
+            latest = "true" if release_is_newest(version, all_releases(repo)) else "false"
             gh(
                 "api",
                 "--method",
@@ -184,15 +249,33 @@ def github_effect(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--transaction", type=pathlib.Path, required=True)
-    parser.add_argument("--target", required=True)
-    parser.add_argument("--assets", type=pathlib.Path, required=True)
+    parser.add_argument(
+        "--discard-stale-draft",
+        action="store_true",
+        help="before a transaction: delete an unpublished draft whose tag is not the admitted commit",
+    )
+    parser.add_argument("--transaction", type=pathlib.Path)
+    parser.add_argument("--target")
+    parser.add_argument("--assets", type=pathlib.Path)
     parser.add_argument("--version", required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--backend", choices=["filesystem", "github"], default="filesystem")
     parser.add_argument("--repo", default="bigpixelrocket/php-bin")
-    parser.add_argument("--output", type=pathlib.Path, required=True)
+    parser.add_argument("--output", type=pathlib.Path)
     args = parser.parse_args()
+
+    if args.discard_stale_draft:
+        try:
+            discarded = discard_stale_draft(args.repo, args.version, args.commit)
+        except (ControlError, KeyError, TypeError, ValueError, subprocess.CalledProcessError) as error:
+            detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) and error.stderr else str(error)
+            print(f"stale draft discard rejected: {detail}", file=sys.stderr)
+            return 1
+        print(json.dumps({"version": args.version, "discardedStaleDraft": discarded}))
+        return 0
+    missing = [flag for flag in ("transaction", "target", "assets", "output") if getattr(args, flag) is None]
+    if missing:
+        parser.error("a transition requires " + ", ".join(f"--{flag}" for flag in missing))
 
     try:
         transaction = load_json(args.transaction)
