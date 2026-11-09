@@ -774,6 +774,8 @@ class AutoreleaseControlTests(unittest.TestCase):
                     return json.dumps({"isDraft": is_draft, "databaseId": 42})
                 if arguments[:2] == ("api", "repos/o/r/releases?per_page=100"):
                     return pages
+                if arguments == ("api", f"repos/o/r/git/matching-refs/tags/{version}"):
+                    return json.dumps([{"ref": f"refs/tags/{version}", "object": {"type": "commit", "sha": "c" * 40}}])
                 return ""
 
             with mock.patch.dict(github_effect.__globals__, {"gh": gh}):

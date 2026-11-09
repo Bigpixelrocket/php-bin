@@ -179,9 +179,10 @@ succeeded:
    has its tag at an older commit; it was never public, so the job deletes the
    tag and then the draft (`scripts/publish-release --discard-stale-draft`,
    re-reading the draft before each deletion) and releases its own build of the
-   admitted commit. A published release, or a tag with no release, is never
-   deleted, and a mismatched tag there still stops the transaction. It
-   advances to a verified draft titled `PHP <tag>`, downloads the draft (only
+   admitted commit. A draft tagged at a commit that is not an ancestor of the
+   admitted one, which only a rerun of an older run would meet, stops the job
+   instead. A published release, or a tag with no release, is never deleted,
+   and a mismatched tag there still stops the transaction. It advances to a verified draft titled `PHP <tag>`, downloads the draft (only
    the write token can see one), and hands the draft bytes, the transaction, and the
    event record to the next jobs as one artifact, by ID and digests; the
    transaction names every asset's digest.
@@ -197,7 +198,10 @@ succeeded:
    the run with the verified draft left in place. The next admitted dispatch
    reuses that draft while main is unchanged, and otherwise replaces it with a
    build of the newer commit. It then re-reads the draft
-   once more, records `publishing`, and only then makes the release public. The
+   once more, records `publishing`, and only then makes the release public,
+   refusing unless the tag still names the run's admitted commit: an older run
+   rerun after its draft was replaced, or left without its tag, stops here
+   whatever its asset digests say. The
    publication sets GitHub's "Latest" flag explicitly: on only when no published
    release sorts above this version, comparing major, minor, patch, and revision
    as numbers, so a rebuild of an older branch never takes the badge from the
