@@ -679,6 +679,17 @@ def changed_paths(repo: pathlib.Path, base: str) -> list[str]:
     return sorted(set(paths + untracked))
 
 
+def git_mode(path: pathlib.Path) -> int:
+    """The mode git records for a regular file: 0o755 when its owner may execute
+    it, else 0o644.
+
+    Git stores only that bit, so the remaining permission bits come from the umask
+    of whichever checkout wrote the file (0o664 under umask 002, for example) and
+    must not decide admission or differ between the sealing and merging jobs.
+    """
+    return 0o755 if path.stat().st_mode & 0o100 else 0o644
+
+
 def seal_patch(
     repo: pathlib.Path,
     base: str,
@@ -718,8 +729,7 @@ def seal_patch(
             require(not candidate.is_symlink(), f"patch contains symlink: {path}")
             require(candidate.is_file(), f"patch contains unsupported entry: {path}")
             require(candidate.stat().st_size <= 2 * 1024 * 1024, f"patch file too large: {path}")
-            mode = candidate.stat().st_mode & 0o777
-            require(mode in {0o644, 0o755}, f"patch contains unexpected mode: {path}")
+            mode = git_mode(candidate)
             require(mode != 0o755 or path.startswith("scripts/"), f"unexpected executable path: {path}")
             body = candidate.read_bytes()
             require(b"\0" not in body, f"patch contains binary file: {path}")
@@ -778,7 +788,7 @@ def seal_patch(
             {
                 "path": path,
                 "digest": sha256_file(candidate) if candidate.is_file() else None,
-                "mode": oct(candidate.stat().st_mode & 0o777) if candidate.exists() else None,
+                "mode": oct(git_mode(candidate)) if candidate.exists() else None,
             }
         )
     manifest = {
@@ -877,6 +887,6 @@ def _verify_sealed_commit(
         if expected:
             require(sha256_file(candidate) == expected, f"validated file changed: {path}")
             require(
-                oct(candidate.stat().st_mode & 0o777) == file_record.get("mode"),
+                oct(git_mode(candidate)) == file_record.get("mode"),
                 f"validated file mode changed: {path}",
             )
