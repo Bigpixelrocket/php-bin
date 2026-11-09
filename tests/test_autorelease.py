@@ -3991,6 +3991,61 @@ class AutoreleaseControlTests(unittest.TestCase):
             self.assertEqual(1, refused.returncode)
             self.assertIn("staged release rejected", refused.stderr)
 
+    def test_the_draft_install_waits_for_the_validating_server_and_stops_when_it_exits(self):
+        import socket
+        import sys
+        import time
+
+        from autorelease.verify import load_workflow
+
+        steps = load_workflow(ROOT / ".github/workflows/autorelease-publish.yml")["jobs"]["verify-draft"]["steps"]
+        run = next(step["run"] for step in steps if step.get("name") == "Verify draft installation through temporary artifact path")
+        # The server validates the whole release before listening; the old 5-second
+        # budget expired while the x86_64 runner was still validating.
+        wait = run[run.index("ready=false"):run.index("\n", run.index('"$ready" ||'))]
+        self.assertIn("deadline=$((SECONDS + 120))", wait)
+        version = "8.5.12-1"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+
+            def readiness(server: list[str]) -> tuple[subprocess.CompletedProcess, float]:
+                with socket.socket() as probe:
+                    probe.bind(("127.0.0.1", 0))
+                    port = probe.getsockname()[1]
+                script = (
+                    f'"$@" & server_pid="$!"\n'
+                    "trap 'kill \"$server_pid\" 2>/dev/null || true' EXIT\n"
+                    f"{wait}\necho serving\n"
+                )
+                started = time.monotonic()
+                result = subprocess.run(
+                    ["bash", "-e", "-o", "pipefail", "-c", script, "wait", *server],
+                    capture_output=True, text=True, timeout=60, env={**os.environ, "port": str(port)},
+                    cwd=root,
+                )
+                return result, time.monotonic() - started
+
+            # A server still busy before it listens is waited for.
+            site = root / "site"
+            site.mkdir()
+            (site / "health").write_text("ok\n")
+            slow, _ = readiness([
+                "sh", "-c", 'sleep 1; exec "$0" -m http.server --bind 127.0.0.1 --directory "$1" "$port"',
+                sys.executable, str(site),
+            ])
+            self.assertEqual(0, slow.returncode, slow.stderr)
+            self.assertTrue(slow.stdout.endswith("serving\n"))
+            # A server that refuses the release ends the wait at once with its own error.
+            staged = release_directory(root / "staged", version)
+            (staged / "extra").write_text("x")
+            refused, elapsed = readiness([
+                str(ROOT / "scripts/serve-autorelease-artifact"), "--port", "0", "--assets", str(staged), "--version", version,
+            ])
+            self.assertEqual(1, refused.returncode)
+            self.assertIn("staged release rejected", refused.stderr)
+            self.assertIn("staged artifact server exited with code 1 before becoming healthy", refused.stderr)
+            self.assertLess(elapsed, 30)
+
     def test_archive_absolute_member_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             archive = pathlib.Path(temporary) / "php-8.5.9-cli-macos-aarch64.tar.gz"
