@@ -305,6 +305,14 @@ EOF
     # are the ones a shipped extension uses (excimer); it has fallbacks for both.
     echo '  ac_cv_have_decl_gettid: "no"'
     echo '  ac_cv_have_decl_pthread_attr_setsigmask_np: "no"'
+    # StaticPHP's Linux configure command passes Libtool's --with-pic, which PHP
+    # 8.6's configure rejects as obsolete; --enable-pic is the same setting under
+    # its new name. This is StaticPHP's own command (config/env.ini in the
+    # version .spc-version pins) with only that flag changed, so recheck it when
+    # StaticPHP changes. Earlier branches keep StaticPHP's command untouched.
+    if (( PHP_MAJOR > 8 || (PHP_MAJOR == 8 && PHP_MINOR_NUMBER >= 6) )); then
+      echo '  SPC_CMD_PREFIX_PHP_CONFIGURE: "./configure --prefix= --with-valgrind=no --disable-shared --enable-static --disable-all --disable-phpdbg --enable-pic"'
+    fi
   fi
   cat <<EOF
   ac_cv_func_memset_s: "no"

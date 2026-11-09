@@ -453,6 +453,34 @@ class BuildScriptTests(unittest.TestCase):
                     download,
                 )
 
+    def test_only_php_8_6_and_later_on_linux_replace_staticphps_configure_command(self):
+        # A Linux build machine; the build stops after writing its craft files,
+        # since this recipe copy has no pinned zig.
+        linux_bin = self.scratch / "linux-bin"
+        linux_bin.mkdir()
+        for name in ("uname", "getconf"):
+            (linux_bin / name).write_text(FAKE_SMOKE_TOOLS[name])
+            (linux_bin / name).chmod(0o755)
+        linux = {"PATH": f"{linux_bin}:{self.env['PATH']}", "FAKE_ARCH": "x86_64"}
+        command = (
+            '  SPC_CMD_PREFIX_PHP_CONFIGURE: "./configure --prefix= --with-valgrind=no'
+            ' --disable-shared --enable-static --disable-all --disable-phpdbg --enable-pic"\n'
+        )
+        for version, source, env, replaced in (
+            ("8.6.0RC5", "tag", linux, True),
+            ("9.0.0alpha1", "tag", linux, True),
+            ("8.5.12", "release", linux, False),
+            ("8.2.30", "release", linux, False),
+            ("8.6.0RC5", "tag", {}, False),
+        ):
+            with self.subTest(version=version, linux=bool(env)):
+                self.build(version, PHP_SOURCE=source, **env)
+                build = (self.root / f".build/{version}/s4/craft-build.yml").read_text()
+                self.assertEqual(bool(env), "ac_cv_have_decl_gettid" in build)
+                self.assertEqual(replaced, command in build)
+                self.assertEqual(replaced, "SPC_CMD_PREFIX_PHP_CONFIGURE" in build)
+                self.assertNotIn("--with-pic", build)
+
     def test_a_tag_build_needs_an_exact_tag_and_a_known_source(self):
         for version, source, message in (
             ("8.5", "tag", "PHP_SOURCE=tag needs an exact php-src tag version"),
