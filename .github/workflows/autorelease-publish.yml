@@ -217,8 +217,9 @@ jobs:
         run: |
           ./autorelease/control.py validate-policy
           test "$(git rev-parse HEAD)" = "$EXACT_COMMIT"
-          test "$(jq -r .actionKey admitted-run/autorelease-plan.json)" = "$ACTION_KEY"
-          test "$(jq -r .releaseIntent.version admitted-run/autorelease-plan.json)" = "$VERSION"
+          # A batch rebuild plan admits several releases, each in its own publish run.
+          ./autorelease/control.py require-plan-release --plan admitted-run/autorelease-plan.json \
+            --action-key "$ACTION_KEY" --version "$VERSION"
           test "$(jq -r .preconditions.phpBinHead admitted-run/autorelease-plan.json)" = "$EXACT_COMMIT"
           test "$(jq -r .preconditions.supportPolicyDigest admitted-run/autorelease-plan.json)" = "$(./autorelease/control.py digest support-policy.json)"
           ./autorelease/control.py operator-gate --operator-file .github/autorelease-operator.json --require-enabled
@@ -234,7 +235,8 @@ jobs:
           ./autorelease/control.py validate-recaptured-evidence \
             --plan admitted-run/autorelease-plan.json \
             --admitted-manifest admitted-run/evidence/evidence-manifest.json \
-            --current-manifest release-run/evidence/evidence-manifest.json
+            --current-manifest release-run/evidence/evidence-manifest.json \
+            --action-key "$ACTION_KEY" --version "$VERSION"
       - name: Select the mise-php commit installs are verified with
         id: plugin
         env:
@@ -618,14 +620,16 @@ jobs:
             gh run download "$INVESTIGATION_RUN_ID" \
               --name "autorelease-investigation-$INVESTIGATION_RUN_ID" \
               --dir admitted-run
-            test "$(jq -r .actionKey admitted-run/autorelease-plan.json)" = "$ACTION_KEY"
-            test "$(jq -r .releaseIntent.version admitted-run/autorelease-plan.json)" = "$VERSION"
+            ./autorelease/control.py require-plan-release --plan admitted-run/autorelease-plan.json \
+              --action-key "$ACTION_KEY" --version "$VERSION"
             test "$(jq -r .preconditions.phpBinHead admitted-run/autorelease-plan.json)" = "$EXACT_COMMIT"
             ./scripts/capture-autorelease-evidence --output release-run/evidence
+            # A batch sibling publishing on another branch never stops this release.
             ./autorelease/control.py validate-recaptured-evidence \
               --plan admitted-run/autorelease-plan.json \
               --admitted-manifest admitted-run/evidence/evidence-manifest.json \
-              --current-manifest release-run/evidence/evidence-manifest.json
+              --current-manifest release-run/evidence/evidence-manifest.json \
+              --action-key "$ACTION_KEY" --version "$VERSION"
           else
             test "$is_draft" = "false"
           fi
@@ -831,7 +835,7 @@ jobs:
     needs: [preflight, publish, verify-public]
     if: ${{ !cancelled() && needs.publish.result == 'success' && needs['verify-public'].result == 'success' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     environment: php-autorelease-publish
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
@@ -887,71 +891,85 @@ jobs:
       # exactly this release (merged by an earlier attempt, or recovered by the watcher)
       # ends the step. Otherwise the run-scoped branch belongs to this run alone, so any
       # PR or branch an earlier attempt left on it is withdrawn and filed afresh.
-      - name: Commit final event record through a checked PR
+      #
+      # A batch rebuild publishes several releases concurrently, and each files its own
+      # record. Main admits only a record that is a single commit on the current main,
+      # so a sibling's record merging first leaves this one out of date. When a merge
+      # fails and main has moved off the record's base, the record is withdrawn and
+      # filed again on the new main, at most once per attempt below; each move is
+      # another record landing, so the attempts cover every sibling. A failure with main
+      # unchanged is a real refusal and stops the step at once.
+      - name: Commit and merge final event record through a checked PR
         id: event_pr
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: autorelease/event-${{ github.run_id }}
         run: |
-          git fetch origin main
           filename="$(./autorelease/control.py action-filename "$ACTION_KEY")"
           record="autorelease-events/$filename"
-          rm -f release-run/main-record.json
-          if git cat-file -e "origin/main:$record" 2>/dev/null; then
-            git show "origin/main:$record" > release-run/main-record.json
-          fi
-          recorded="$(./autorelease/control.py release-recorded \
-            --record release-run/main-record.json \
-            --action-key "$ACTION_KEY" \
-            --version "$VERSION" \
-            --transaction release-run/transaction.json)"
-          if [[ "$recorded" == "true" ]]; then
-            echo "The event record for $ACTION_KEY is already on main."
-            echo "already_recorded=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "already_recorded=false" >> "$GITHUB_OUTPUT"
           gh auth setup-git
-          for stale in $(gh pr list --repo "${{ github.repository }}" --head "$BRANCH" --state open \
-            --json number --jq '.[].number'); do
-            gh pr close "$stale" --repo "${{ github.repository }}" --delete-branch
+          for attempt in 1 2 3 4 5 6 7 8; do
+            git fetch origin main
+            rm -f release-run/main-record.json
+            if git cat-file -e "origin/main:$record" 2>/dev/null; then
+              git show "origin/main:$record" > release-run/main-record.json
+            fi
+            recorded="$(./autorelease/control.py release-recorded \
+              --record release-run/main-record.json \
+              --action-key "$ACTION_KEY" \
+              --version "$VERSION" \
+              --transaction release-run/transaction.json)"
+            if [[ "$recorded" == "true" ]]; then
+              echo "The event record for $ACTION_KEY is already on main."
+              echo "already_recorded=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            for stale in $(gh pr list --repo "${{ github.repository }}" --head "$BRANCH" --state open \
+              --json number --jq '.[].number'); do
+              gh pr close "$stale" --repo "${{ github.repository }}" --delete-branch
+            done
+            if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
+              git push origin --delete "$BRANCH"
+            fi
+            git checkout -B "$BRANCH" origin/main
+            base="$(git rev-parse HEAD)"
+            cp release-run/event.json "$record"
+            git add "$record"
+            git -c user.name=autorelease -c user.email=autorelease@invalid \
+              commit -m "chore: complete $ACTION_KEY"
+            head="$(git rev-parse HEAD)"
+            digest="sha256:$(shasum -a 256 "$record" | awk '{print $1}')"
+            git push origin HEAD
+            url="$(gh pr create --base main --head "$BRANCH" \
+              --title "chore: complete $ACTION_KEY" \
+              --body "Durable event record for the immutable verified release transaction.")"
+            number="${url##*/}"
+            if ./scripts/merge-record-pr \
+              --pr "$number" \
+              --base "$base" \
+              --head "$head" \
+              --record "$record" \
+              --digest "$digest" \
+              --checks-output "release-run/event-checks-$attempt.json" \
+              --require-protected-controls; then
+              {
+                echo "already_recorded=false"
+                echo "number=$number"
+                echo "base_sha=$base"
+                echo "head_sha=$head"
+              } >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            git fetch origin main
+            moved="$(git rev-parse origin/main)"
+            if [[ "$moved" == "$base" ]]; then
+              echo "The record merge was refused while main stayed at $base." >&2
+              exit 1
+            fi
+            echo "Main moved from $base to $moved while the record was merging; filing it again on the new main."
           done
-          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
-            git push origin --delete "$BRANCH"
-          fi
-          git checkout -B "$BRANCH" origin/main
-          base="$(git rev-parse HEAD)"
-          cp release-run/event.json "$record"
-          git add "$record"
-          git -c user.name=autorelease -c user.email=autorelease@invalid \
-            commit -m "chore: complete $ACTION_KEY"
-          head="$(git rev-parse HEAD)"
-          digest="sha256:$(shasum -a 256 "$record" | awk '{print $1}')"
-          git push origin HEAD
-          url="$(gh pr create --base main --head "$BRANCH" \
-            --title "chore: complete $ACTION_KEY" \
-            --body "Durable event record for the immutable verified release transaction.")"
-          {
-            echo "number=${url##*/}"
-            echo "base_sha=$base"
-            echo "head_sha=$head"
-            echo "record=$record"
-            echo "digest=$digest"
-          } >> "$GITHUB_OUTPUT"
-      - name: Validate and merge final event record
-        id: merge
-        if: steps.event_pr.outputs.already_recorded == 'false'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          ./scripts/merge-record-pr \
-            --pr "${{ steps.event_pr.outputs.number }}" \
-            --base "${{ steps.event_pr.outputs.base_sha }}" \
-            --head "${{ steps.event_pr.outputs.head_sha }}" \
-            --record "${{ steps.event_pr.outputs.record }}" \
-            --digest "${{ steps.event_pr.outputs.digest }}" \
-            --checks-output release-run/event-checks.json \
-            --require-protected-controls
+          echo "Main kept moving under the event record for $ACTION_KEY; the next watcher run recovers it." >&2
+          exit 1
       - name: Notify owner of completed release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -970,7 +988,7 @@ jobs:
       - name: Record whether the event record merged
         if: always()
         env:
-          MERGE_OUTCOME: ${{ steps.merge.outcome }}
+          MERGE_OUTCOME: ${{ steps.event_pr.outcome }}
           ALREADY_RECORDED: ${{ steps.event_pr.outputs.already_recorded }}
         run: |
           mkdir -p release-run
@@ -1010,9 +1028,12 @@ jobs:
           retention-days: 90
 
   # The watcher admits one action per run and runs every 12 hours, while one upstream
-  # release day brings a patch on every maintained branch and a recipe change makes
-  # the newest version of every maintained branch rebuild-due (older patch versions
-  # are never rebuilt). So a release that is live, verified, and recorded on main
+  # release day brings a patch on every maintained branch. (A recipe change makes the
+  # newest version of every maintained branch rebuild-due, and one run admits that
+  # whole batch, one concurrent publish run per version; each sibling starts a watcher
+  # run here, the shared concurrency group keeps one running and one pending, and a
+  # run that starts while a sibling has not recorded yet holds its work back.) So a
+  # release that is live, verified, and recorded on main
   # starts the next watcher run at once, and that run admits the next
   # due action, if any, through the unchanged classification and admission. Only this
   # outcome chains: a failed or possibly-live run starts nothing, so a rebuild that keeps

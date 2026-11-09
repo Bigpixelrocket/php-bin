@@ -203,8 +203,8 @@ For an ordinary stable patch, the admitted no-edit intent goes directly to
 recipe change uses a sealed automation PR first. Never move an existing tag or
 replace a published asset. When the PHP patch is unchanged but the recipe
 changes, the watcher selects a rebuild tag such as `8.5.9-1` for the newest
-version of each maintained branch, one per run, and each recorded release starts
-the next run. Older patch versions keep their original binaries.
+version of each maintained branch and publishes all of them concurrently from
+one run. Older patch versions keep their original binaries.
 
 ### New PHP branch
 

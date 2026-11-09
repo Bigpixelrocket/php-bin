@@ -47,6 +47,7 @@ if __package__ in {None, ""}:
 from autorelease._admission import (  # noqa: E402
     PLAN_ACTIONS,
     PLAN_FIELDS,
+    OPTIONAL_PLAN_FIELDS,
     RECIPE_INPUT_PATHS,
     REQUIRED_PLAN_CHECKS,
     _validate_plan_shape,
@@ -54,9 +55,16 @@ from autorelease._admission import (  # noqa: E402
     changed_paths,
     git,
     is_lifecycle_resume,
+    plan_rebuild_keys,
+    plan_releases,
+    rebuild_revision,
+    rebuild_superseded_tag,
     recipe_identity,
     recorded_action_keys,
+    require_plan_release,
+    resumable_action_keys,
     seal_patch,
+    validate_branch_scoped_releases,
     validate_lifecycle_on_base,
     validate_plan,
     validate_recipe_rebuild_evidence,
@@ -80,6 +88,7 @@ from autorelease._implementation import (  # noqa: E402
 from autorelease._status import status_document, status_page  # noqa: E402
 from autorelease._evidence import (  # noqa: E402
     BRANCH_FEED_CAPTURE_RE,
+    BRANCH_SCOPED_CAPTURE_IDS,
     EDGE_CACHE_BYPASS_PARAMETER,
     EVIDENCE_CAPTURE_IDS,
     RUNTIME_PLAN_EVIDENCE_IDS,
@@ -113,6 +122,7 @@ from autorelease._state import (  # noqa: E402
     mutation_allowed,
     notification_decision,
     pending_recipe_rebuild,
+    pending_recipe_rebuilds,
     recipe_identity_note,
     release_event_recorded,
     release_is_newest,
@@ -304,8 +314,8 @@ def recipe_identities(root: pathlib.Path, commit: str) -> dict[str, str]:
     }
 
 
-def due_recipe_rebuild(manifest_path: pathlib.Path, root: pathlib.Path, commit: str) -> str | None:
-    """Select the rebuild due for a capture and one exact recipe commit.
+def due_recipe_rebuilds(manifest_path: pathlib.Path, root: pathlib.Path, commit: str) -> list[str]:
+    """Select every rebuild due for a capture and one exact recipe commit, newest first.
 
     Admission calls this with the same capture, commit, and accepted policy the watcher
     used, so it re-derives the selection instead of trusting it. Like the watcher, it
@@ -316,8 +326,50 @@ def due_recipe_rebuild(manifest_path: pathlib.Path, root: pathlib.Path, commit: 
     captures = manifest.get("captures") if isinstance(manifest, dict) else None
     require(isinstance(captures, list), "evidence manifest captures must be an array")
     if any(not isinstance(capture, dict) or capture.get("status") != 200 for capture in captures):
-        return None
-    return pending_recipe_rebuild(captured_php_bin_releases(manifest_path), recipe_identities(root, commit))
+        return []
+    return pending_recipe_rebuilds(captured_php_bin_releases(manifest_path), recipe_identities(root, commit))
+
+
+def due_recipe_rebuild(manifest_path: pathlib.Path, root: pathlib.Path, commit: str) -> str | None:
+    """Return the first rebuild `due_recipe_rebuilds` selects, or None when none is due."""
+    keys = due_recipe_rebuilds(manifest_path, root, commit)
+    return keys[0] if keys else None
+
+
+def validate_publish_recapture(
+    plan: dict[str, Any],
+    admitted_manifest_path: pathlib.Path,
+    current_manifest_path: pathlib.Path,
+    action_key: str | None = None,
+    version: str | None = None,
+) -> dict[str, Any]:
+    """Verify one publish run's release against the plan and its fresh recapture.
+
+    `action_key` and `version` name the release this publish run carries, and must be
+    a release the plan admits (`plan_releases`). A batch rebuild plan must name one:
+    its siblings publish on other branches while this run is in flight, so the
+    `php_bin_releases` capture is bound to this release's branch rather than to its
+    whole digest. Every other cited capture, and every other plan, stays bound exactly
+    as `validate_recaptured_evidence` binds it. Supersession is then rechecked on the
+    fresh captures: recapture exempts feeds that cannot prove the version, and a later
+    patch on the branch in any feed still stops the release.
+    """
+    require(isinstance(plan, dict), "autorelease plan must be an object")
+    require((action_key is None) == (version is None), "a publish release names both its action key and version")
+    if action_key is not None and version is not None:
+        require_plan_release(plan, action_key, version)
+    batch = plan.get("action") == "recipe_rebuild" and "rebuildActionKeys" in plan
+    require(not batch or version is not None, "a batch rebuild recapture must name its release")
+    result = validate_recaptured_evidence(
+        plan,
+        load_json(admitted_manifest_path),
+        load_json(current_manifest_path),
+        branch_scoped=BRANCH_SCOPED_CAPTURE_IDS if batch else frozenset(),
+    )
+    if batch and version is not None:
+        validate_branch_scoped_releases(admitted_manifest_path, current_manifest_path, version)
+    validate_release_is_newest_patch(plan.get("action", ""), plan.get("releaseIntent"), current_manifest_path)
+    return result
 
 
 def load_event_records(directory: pathlib.Path) -> list[dict[str, Any]]:
@@ -354,6 +406,19 @@ def main(argv: list[str] | None = None) -> int:
     recapture_parser.add_argument("--plan", required=True, type=pathlib.Path)
     recapture_parser.add_argument("--admitted-manifest", required=True, type=pathlib.Path)
     recapture_parser.add_argument("--current-manifest", required=True, type=pathlib.Path)
+    # The release this publish run carries; required for a batch rebuild plan.
+    recapture_parser.add_argument("--action-key")
+    recapture_parser.add_argument("--version")
+
+    # Every release an admitted plan dispatches, one "<action key> <version>" per line.
+    releases_parser = subparsers.add_parser("plan-releases")
+    releases_parser.add_argument("--plan", required=True, type=pathlib.Path)
+
+    # Whether one publish run's action key and version are a release the plan admits.
+    member_parser = subparsers.add_parser("require-plan-release")
+    member_parser.add_argument("--plan", required=True, type=pathlib.Path)
+    member_parser.add_argument("--action-key", required=True)
+    member_parser.add_argument("--version", required=True)
 
     event_parser = subparsers.add_parser("transition-event")
     event_parser.add_argument("--event", required=True, type=pathlib.Path)
@@ -451,17 +516,22 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "validate-recaptured-evidence":
-            plan = load_json(args.plan)
-            result = validate_recaptured_evidence(
-                plan,
-                load_json(args.admitted_manifest),
-                load_json(args.current_manifest),
+            result = validate_publish_recapture(
+                load_json(args.plan),
+                args.admitted_manifest,
+                args.current_manifest,
+                args.action_key,
+                args.version,
             )
-            # Recapture exempts feeds that cannot prove the version, so supersession is
-            # rechecked on the fresh captures: a later patch on the branch in any feed
-            # still stops the release, even one the digest comparison released.
-            validate_release_is_newest_patch(plan.get("action", ""), plan.get("releaseIntent"), args.current_manifest)
             print(json.dumps(result))
+        elif args.command == "plan-releases":
+            for release in plan_releases(load_json(args.plan)):
+                require(bool(ACTION_KEY_RE.fullmatch(release["actionKey"])), "plan release action key is invalid")
+                require(bool(STABLE_VERSION_RE.fullmatch(release["version"])), "plan release version is invalid")
+                print(f"{release['actionKey']} {release['version']}")
+        elif args.command == "require-plan-release":
+            require_plan_release(load_json(args.plan), args.action_key, args.version)
+            print(json.dumps({"releaseAdmitted": True, "actionKey": args.action_key, "version": args.version}))
         elif args.command == "transition-event":
             updated = transition_event(load_json(args.event), args.target, load_json(args.evidence))
             write_json(args.output, updated)

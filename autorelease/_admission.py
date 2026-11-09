@@ -24,6 +24,7 @@ from ._evidence import (
     load_plan_evidence,
     release_feed_capture_ids,
 )
+from ._state import PUBLISHED_RELEASE_TAG_RE
 from ._validation import (
     ACTION_KEY_RE,
     COMMIT_SHA_RE,
@@ -195,26 +196,126 @@ def branch_has_shipped(manifest_path: pathlib.Path, branch: str, completed_actio
     )
 
 
+def rebuild_superseded_tag(action_key: str) -> str:
+    """Return the published tag `recipe_rebuild:<version>:<n>` rebuilds.
+
+    That is the newest published revision of the version: `<version>` itself for the
+    first rebuild, `<version>-<n-1>` after that.
+    """
+    match = re.fullmatch(r"recipe_rebuild:(\d+\.\d+\.\d+):([1-9]\d*)", action_key)
+    require(bool(match), f"invalid recipe rebuild action key: {action_key}")
+    version, revision = match.group(1), int(match.group(2))
+    return version if revision == 1 else f"{version}-{revision - 1}"
+
+
+def rebuild_revision(action_key: str) -> str:
+    """Return the release tag a `recipe_rebuild:<version>:<n>` key publishes, `<version>-<n>`."""
+    rebuild_superseded_tag(action_key)
+    _prefix, version, revision = action_key.split(":")
+    return f"{version}-{revision}"
+
+
+def plan_rebuild_keys(plan: dict[str, Any]) -> list[str]:
+    """Return every rebuild key a `recipe_rebuild` plan admits, newest version first.
+
+    A plan admitted while two or more rebuilds were due carries the whole selection as
+    `rebuildActionKeys`, whose first key is its own `actionKey`. A plan admitted with
+    exactly one due carries no such field and is byte-identical to the single-rebuild
+    plans that preceded batches, so its one key is its `actionKey`.
+    """
+    require(plan.get("action") == "recipe_rebuild", "only a recipe rebuild plan names rebuild keys")
+    keys = plan.get("rebuildActionKeys", [plan.get("actionKey")])
+    require(
+        isinstance(keys, list) and bool(keys) and all(isinstance(key, str) for key in keys),
+        "recipe rebuild keys must be a non-empty array of action keys",
+    )
+    return keys
+
+
+def plan_releases(plan: dict[str, Any]) -> list[dict[str, str]]:
+    """Return each release an admitted plan dispatches: its action key and release tag.
+
+    Every publish run receives one of these pairs, and the publish transaction accepts a
+    pair only when it is listed here. A batch rebuild plan lists one pair per key; every
+    other release plan lists its own `actionKey` and `releaseIntent.version`.
+    """
+    require(isinstance(plan, dict), "autorelease plan must be an object")
+    if plan.get("action") == "recipe_rebuild":
+        return [{"actionKey": key, "version": rebuild_revision(key)} for key in plan_rebuild_keys(plan)]
+    release_intent = plan.get("releaseIntent")
+    require(isinstance(release_intent, dict), "the plan requests no release")
+    action_key, version = plan.get("actionKey"), release_intent.get("version")
+    require(isinstance(action_key, str) and isinstance(version, str), "the plan release is malformed")
+    return [{"actionKey": action_key, "version": version}]
+
+
+def require_plan_release(plan: dict[str, Any], action_key: str, version: str) -> None:
+    """Require one publish run's action key and release tag to be a release the plan admits."""
+    require(
+        {"actionKey": action_key, "version": version} in plan_releases(plan),
+        f"the admitted plan does not release {version} as {action_key}",
+    )
+
+
 def validate_recipe_rebuild_evidence(
     action: str,
     action_key: str,
     resolved_evidence: list[dict[str, Any]],
+    batch_keys: list[str] | None = None,
 ) -> None:
-    """Require a rebuild to cite the published release it supersedes.
+    """Require a rebuild to cite the published release each of its keys supersedes.
 
-    `recipe_rebuild:<version>:<n>` rebuilds the newest published revision of that
-    version: `<version>` itself for the first rebuild, `<version>-<n-1>` after that.
+    `batch_keys` is a batch plan's `rebuildActionKeys`; without it the plan's one key is
+    `action_key`. Every key must cite its own superseded tag in `php_bin_releases`.
     """
     if action != "recipe_rebuild":
         return
-    _prefix, version, revision = action_key.split(":")
-    rebuilt = version if revision == "1" else f"{version}-{int(revision) - 1}"
+    cited = {item.get("value") for item in resolved_evidence if item.get("captureId") == "php_bin_releases"}
+    for key in batch_keys or [action_key]:
+        require(
+            rebuild_superseded_tag(key) in cited,
+            "recipe rebuild does not cite the published release it supersedes",
+        )
+
+
+def branch_release_identity(body: bytes, branch: str) -> bytes:
+    """Project a `php_bin_releases` body to what one branch's rebuild depends on.
+
+    A batch rebuild publishes one release per branch concurrently, so each sibling's
+    publication changes the capture under the others. A rebuild of a version on
+    `branch` depends only on that branch's releases: that the release it supersedes is
+    still the newest revision, that no later patch shipped, and that its own tag is not
+    taken. The projection drops only entries whose tag is a published release on
+    another branch; every entry on this branch, and every entry whose tag is not a
+    release tag at all, stays bound. A body that is not an array is returned unchanged.
+    """
+    try:
+        releases = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return body
+    if not isinstance(releases, list):
+        return body
+    kept = []
+    for release in releases:
+        tag = PUBLISHED_RELEASE_TAG_RE.fullmatch(str(release.get("tag_name", ""))) if isinstance(release, dict) else None
+        if tag is None or tag.group(2) == branch:
+            kept.append(release)
+    return canonical_json(kept)
+
+
+def validate_branch_scoped_releases(
+    admitted_manifest_path: pathlib.Path,
+    current_manifest_path: pathlib.Path,
+    version: str,
+) -> None:
+    """Require the recaptured php-bin releases on `version`'s branch to be unchanged."""
+    match = PUBLISHED_RELEASE_TAG_RE.fullmatch(version)
+    require(match is not None, f"release version is invalid: {version}")
+    _capture, admitted = load_capture(admitted_manifest_path, "php_bin_releases")
+    _capture, current = load_capture(current_manifest_path, "php_bin_releases")
     require(
-        any(
-            item.get("captureId") == "php_bin_releases" and item.get("value") == rebuilt
-            for item in resolved_evidence
-        ),
-        "recipe rebuild does not cite the published release it supersedes",
+        branch_release_identity(admitted, match.group(2)) == branch_release_identity(current, match.group(2)),
+        f"recaptured evidence changed: php_bin_releases on PHP {match.group(2)}",
     )
 
 
@@ -336,10 +437,10 @@ def is_lifecycle_resume(plan: dict[str, Any]) -> bool:
     )
 
 
-def recorded_action_keys(directory: pathlib.Path) -> set[str]:
-    """Return the action key of every durable event record in `directory`, failing closed."""
+def _event_records(directory: pathlib.Path) -> list[tuple[str, dict[str, Any]]]:
+    """Return each durable event record in `directory` with its action key, failing closed."""
     require(directory.is_dir(), f"events directory is missing: {directory}")
-    keys = set()
+    records = []
     for path in sorted(directory.glob("*.json")):
         record = load_json(path)
         key = record.get("actionKey") if isinstance(record, dict) else None
@@ -347,8 +448,26 @@ def recorded_action_keys(directory: pathlib.Path) -> set[str]:
             isinstance(key, str) and bool(ACTION_KEY_RE.fullmatch(key)),
             f"event record carries no valid action key: {path.name}",
         )
-        keys.add(key)
-    return keys
+        records.append((key, record))
+    return records
+
+
+def recorded_action_keys(directory: pathlib.Path) -> set[str]:
+    """Return the action key of every durable event record in `directory`, failing closed."""
+    return {key for key, _record in _event_records(directory)}
+
+
+# Event record states a watcher run never resumes: done, or stopped for an operator.
+UNRESUMABLE_EVENT_STATES = frozenset({"complete", "blocked", "needs_human"})
+
+
+def resumable_action_keys(directory: pathlib.Path) -> set[str]:
+    """Return the action key of every event record in `directory` a watcher run resumes.
+
+    A record resumes unless its state is in `UNRESUMABLE_EVENT_STATES`. Admission reads
+    these states itself, so a rebuild resumed alone is re-derived, never trusted.
+    """
+    return {key for key, record in _event_records(directory) if record.get("state") not in UNRESUMABLE_EVENT_STATES}
 
 
 def validate_lifecycle_on_base(
@@ -411,6 +530,9 @@ PLAN_FIELDS = frozenset(
         "summary",
     }
 )
+# A field only a batch rebuild plan carries: the whole due selection, present exactly
+# when two or more rebuilds are due, so every other plan keeps its exact field set.
+OPTIONAL_PLAN_FIELDS = frozenset({"rebuildActionKeys"})
 PLAN_ACTIONS = frozenset(
     {"no_change", "new_patch", "new_branch", "branch_eol", "recipe_rebuild", "blocked", "needs_human"}
 )
@@ -432,7 +554,8 @@ def _validate_plan_shape(
     plan: dict[str, Any],
     manifest_path: pathlib.Path,
     completed_actions: set[str] | None,
-    pending_rebuild: str | None = None,
+    pending_rebuilds: list[str] | str | None = None,
+    resumable_keys: set[str] | None = None,
 ) -> str:
     """Reject a plan whose identity is wrong, and return the action key it claims.
 
@@ -440,19 +563,38 @@ def _validate_plan_shape(
     fields, names one reviewed action and one well-formed key that no completed event
     already owns.
 
-    `pending_rebuild` is the rebuild the watcher selected deterministically from the
-    same capture and recipe, or None when none is due. A rebuild plan must name exactly
-    that key, and no plan may record the evidence as unchanged while one is due, so a
-    pending rebuild can neither be invented nor silenced by the classifier.
+    `pending_rebuilds` is every rebuild the watcher selects deterministically from the
+    same capture and recipe, newest version first, or empty when none is due; a single
+    key stands for a one-key selection. A rebuild plan must name exactly that selection:
+    its `actionKey` is the first key, and `rebuildActionKeys` lists them all when two or
+    more are due and is absent when one is. No plan may record the evidence as
+    unchanged while one is due, so a pending rebuild can neither be invented, dropped,
+    nor silenced by the classifier.
+
+    `resumable_keys` are the action keys of the event records a watcher run resumes
+    (`resumable_action_keys`), or None when the records were not supplied. When two or
+    more rebuilds are due and the first has a resumable record, the classifier resumes
+    that key alone, so the plan must be the single rebuild of it, and any batch is
+    rejected. A single plan with two or more due is admitted only against the records.
     """
+    if isinstance(pending_rebuilds, str):
+        pending_rebuilds = [pending_rebuilds]
+    pending = list(pending_rebuilds or [])
     require(isinstance(plan, dict), "autorelease plan must be an object")
-    require(set(plan) == PLAN_FIELDS, "autorelease plan fields are unknown or missing")
+    require(
+        PLAN_FIELDS <= set(plan) <= PLAN_FIELDS | OPTIONAL_PLAN_FIELDS,
+        "autorelease plan fields are unknown or missing",
+    )
     require(plan.get("schemaVersion") == 1, "unsupported autorelease plan version")
     action = plan.get("action")
     require(action in PLAN_ACTIONS, "invalid autorelease action")
     action_key = plan.get("actionKey", "")
     require(isinstance(action_key, str) and bool(ACTION_KEY_RE.fullmatch(action_key)), "invalid action key")
     require(plan.get("editsRequired") in {True, False}, "plan must declare whether edits are required")
+    require(
+        "rebuildActionKeys" not in plan or action == "recipe_rebuild",
+        "only a recipe rebuild plan may list rebuild keys",
+    )
     if action in {"new_patch", "new_branch", "branch_eol"}:
         require(action_key.startswith(f"{action}:"), "action key does not match its action")
     if action in NO_WORK_ACTIONS:
@@ -463,13 +605,37 @@ def _validate_plan_shape(
             action_key == f"no_change:{manifest_digest.removeprefix('sha256:')[:16]}",
             "no-change action key is not bound to the evidence manifest",
         )
-        require(not pending_rebuild, f"no-change plan cannot leave a due rebuild pending: {pending_rebuild}")
+        require(not pending, f"no-change plan cannot leave a due rebuild pending: {', '.join(pending)}")
     elif action == "recipe_rebuild":
         require(
-            bool(pending_rebuild) and action_key == pending_rebuild,
-            f"recipe rebuild is not the selected rebuild: {pending_rebuild or 'none is due'}",
+            bool(pending) and action_key == pending[0],
+            f"recipe rebuild is not the selected rebuild: {pending[0] if pending else 'none is due'}",
         )
-        _prefix, version, revision = action_key.split(":")
+        if len(pending) == 1:
+            require(
+                "rebuildActionKeys" not in plan,
+                f"recipe rebuild batch is not the selected rebuild: only {pending[0]} is due",
+            )
+        elif "rebuildActionKeys" not in plan:
+            require(
+                resumable_keys is not None,
+                "a resumed recipe rebuild is admitted only against the event records",
+            )
+            require(
+                pending[0] in resumable_keys,
+                f"recipe rebuild batch is not the selected rebuilds: {', '.join(pending)}",
+            )
+        else:
+            require(
+                resumable_keys is None or pending[0] not in resumable_keys,
+                f"recipe rebuild {pending[0]} resumes its incomplete record alone, not in a batch",
+            )
+            require(
+                plan.get("rebuildActionKeys") == pending,
+                f"recipe rebuild batch is not the selected rebuilds: {', '.join(pending)}",
+            )
+            for key in pending[1:]:
+                require(key not in (completed_actions or set()), f"action key already completed: {key}")
         require(plan.get("editsRequired") is False, "recipe rebuild plan cannot require edits")
         allowed_paths = plan.get("allowedPaths")
         require(
@@ -478,7 +644,7 @@ def _validate_plan_shape(
         )
         release_intent = plan.get("releaseIntent")
         require(
-            isinstance(release_intent, dict) and release_intent.get("version") == f"{version}-{revision}",
+            isinstance(release_intent, dict) and release_intent.get("version") == rebuild_revision(action_key),
             "recipe rebuild release intent is not the selected revision",
         )
     require(
@@ -581,7 +747,9 @@ def _validate_plan_actions(
         )
     validate_stable_release_evidence(plan.get("action", ""), release_intent, resolved_evidence)
     validate_release_is_newest_patch(plan.get("action", ""), release_intent, manifest_path)
-    validate_recipe_rebuild_evidence(plan.get("action", ""), plan.get("actionKey", ""), resolved_evidence)
+    validate_recipe_rebuild_evidence(
+        plan.get("action", ""), plan.get("actionKey", ""), resolved_evidence, plan.get("rebuildActionKeys")
+    )
 
 
 def validate_plan(
@@ -590,9 +758,10 @@ def validate_plan(
     repo_heads: dict[str, str] | None = None,
     policy_digest: str | None = None,
     completed_actions: set[str] | None = None,
-    pending_rebuild: str | None = None,
+    pending_rebuilds: list[str] | str | None = None,
     repo: pathlib.Path | None = None,
     recorded_keys: set[str] | None = None,
+    resumable_keys: set[str] | None = None,
 ) -> dict[str, Any]:
     """Admit one classified plan, or reject it.
 
@@ -608,8 +777,12 @@ def validate_plan(
     policy there must be the one the plan was classified against and already hold the
     lifecycle edit, no record may exist for the key, and a resumed new branch must not
     have shipped. Without both inputs a resume is rejected.
+
+    `resumable_keys` are the keys of the event records a watcher run resumes. With two
+    or more rebuilds due they decide whether the plan is the batch or the first key's
+    resume alone (see `_validate_plan_shape`); without them that resume is rejected.
     """
-    action_key = _validate_plan_shape(plan, manifest_path, completed_actions, pending_rebuild)
+    action_key = _validate_plan_shape(plan, manifest_path, completed_actions, pending_rebuilds, resumable_keys)
     declared = _validate_plan_preconditions(plan, repo_heads, policy_digest)
     _validate_plan_actions(plan, manifest_path)
     validate_patch_extends_shipped_branch(

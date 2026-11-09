@@ -11,9 +11,10 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from autorelease.control import (  # noqa: E402
     ROOT,
     ControlError,
-    due_recipe_rebuild,
+    due_recipe_rebuilds,
     load_json,
     recorded_action_keys,
+    resumable_action_keys,
     validate_plan,
     write_json,
 )
@@ -27,7 +28,8 @@ parser.add_argument("--mise-php-head", required=True)
 parser.add_argument("--policy-digest", required=True)
 parser.add_argument("--completed-actions", type=pathlib.Path, required=True)
 # The durable event records at the checked-out base. A lifecycle resume is admitted
-# only when none exists for its key, so without them a resume is rejected.
+# only when none exists for its key, and a rebuild resumed alone while others are due
+# only when its key has a resumable record, so without them either resume is rejected.
 parser.add_argument("--events", type=pathlib.Path)
 parser.add_argument("--output", type=pathlib.Path, required=True)
 args = parser.parse_args()
@@ -41,17 +43,18 @@ try:
         raise ControlError("completed actions must be an array of strings")
     completed = set(completed_document)
     # Re-derived from the same capture, recipe commit, and policy the watcher used,
-    # so the classifier can only confirm the rebuild the watcher selected.
-    pending_rebuild = due_recipe_rebuild(args.manifest, ROOT, args.php_bin_head)
+    # so the classifier can only confirm the exact rebuild set the watcher selected.
+    pending_rebuilds = due_recipe_rebuilds(args.manifest, ROOT, args.php_bin_head)
     admission = validate_plan(
         load_json(args.plan),
         args.manifest,
         heads,
         args.policy_digest,
         completed,
-        pending_rebuild,
+        pending_rebuilds,
         ROOT,
         recorded_action_keys(args.events) if args.events else None,
+        resumable_action_keys(args.events) if args.events else None,
     )
     write_json(args.output, admission)
     print(json.dumps(admission))

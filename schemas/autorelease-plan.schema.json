@@ -11,6 +11,13 @@
       "pattern": "^(no_change:[0-9a-f]{16}|new_patch:\\d+\\.\\d+\\.\\d+|new_branch:\\d+\\.\\d+|branch_eol:\\d+\\.\\d+:\\d{4}-\\d{2}-\\d{2}|recipe_rebuild:\\d+\\.\\d+\\.\\d+:[1-9]\\d*|(?:source_unhealthy|health_failed|policy_failure):[0-9a-f]{8,64})$"
     },
     "action": {"type": "string", "enum": ["no_change", "new_patch", "new_branch", "branch_eol", "recipe_rebuild", "blocked", "needs_human"]},
+    "rebuildActionKeys": {
+      "description": "Only on a recipe_rebuild plan admitted while two or more rebuilds were due: every due rebuild, newest version first, beginning with actionKey. Each is published by its own concurrent publish run. A plan with one due rebuild omits it.",
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^recipe_rebuild:\\d+\\.\\d+\\.\\d+:[1-9]\\d*$"}
+    },
     "evidence": {
       "type": "array",
       "minItems": 1,

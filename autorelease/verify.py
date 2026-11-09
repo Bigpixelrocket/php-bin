@@ -181,14 +181,16 @@ def fixture_capture(
     aggregate: str,
     page: bytes,
     releases: list[dict[str, Any]],
-    rebuild: str = "",
+    rebuild: str | list[str] = "",
     incomplete: list[str] | None = None,
 ) -> pathlib.Path:
     """Write one watcher capture set in the retained artifact layout and return its manifest.
 
     `directory` plays `autorelease-run/`: the manifest lives in `evidence/` and the
     watch decision beside it, exactly where the classifier and admission read them.
+    `rebuild` is the selected rebuild key, or every selected key newest first.
     """
+    rebuilds = [rebuild] if isinstance(rebuild, str) and rebuild else list(rebuild or [])
     bodies = {
         "php_supported_versions": page,
         "php_release_feed": canonical_json({aggregate.split(".")[0]: {"version": aggregate}}),
@@ -230,7 +232,8 @@ def fixture_capture(
         "incompleteActions": sorted(incomplete or []),
         "action": "none",
         "actionKey": "",
-        "rebuildActionKey": rebuild,
+        "rebuildActionKey": rebuilds[0] if rebuilds else "",
+        "rebuildActionKeys": rebuilds,
         "classify": True,
     }
     (directory / "watch-decision.json").write_bytes(canonical_json(decision))
@@ -246,8 +249,10 @@ def classify_fixture(manifest_path: pathlib.Path, events: list[dict[str, Any]] |
     )
 
 
-def admit(plan: dict[str, Any], manifest_path: pathlib.Path, pending_rebuild: str | None = None) -> dict[str, Any]:
-    return validate_plan(plan, manifest_path, FIXTURE_HEADS, FIXTURE_POLICY_DIGEST, set(), pending_rebuild)
+def admit(
+    plan: dict[str, Any], manifest_path: pathlib.Path, pending_rebuilds: list[str] | str | None = None
+) -> dict[str, Any]:
+    return validate_plan(plan, manifest_path, FIXTURE_HEADS, FIXTURE_POLICY_DIGEST, set(), pending_rebuilds)
 
 
 MAINTAINED_PAGE = {"8.4": ("stable", "31 Dec 2028"), "8.5": ("stable", "31 Dec 2029")}
@@ -385,6 +390,23 @@ class Verifier:
                 lambda pending=pending: admit_fixture({**inputs, "pendingRebuild": pending}),
                 "not the selected rebuild",
             )
+        # Every due rebuild is admitted as one batch, and admission re-derives the exact
+        # set: a plan missing, adding, or reordering a key never admits.
+        batch_keys = ["recipe_rebuild:8.5.9:1", "recipe_rebuild:8.4.20:1"]
+        batch_manifest = fixture_capture(
+            directory / "rebuild-batch",
+            branch_feeds={"8.4": "8.4.20", "8.5": "8.5.9"},
+            aggregate="8.5.9",
+            page=support_page(MAINTAINED_PAGE),
+            releases=PUBLISHED,
+            rebuild=batch_keys,
+        )
+        batch = classify_fixture(batch_manifest)
+        assert_true(batch.get("rebuildActionKeys") == batch_keys, "the classifier did not batch every due rebuild")
+        admit(batch, batch_manifest, batch_keys)
+        for pending in (batch_keys[:1], [*batch_keys, "recipe_rebuild:8.3.30:1"], batch_keys[::-1]):
+            assert_reject(lambda pending=pending: admit(batch, batch_manifest, pending), "selected rebuild")
+        actions["recipe_rebuild_batch"] = batch_keys
         # A due patch outranks a due rebuild.
         both = fixture_capture(
             directory / "patch-and-rebuild",
