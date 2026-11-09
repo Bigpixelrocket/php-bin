@@ -132,11 +132,13 @@ normalize_modules() {
 
 # Print a shared-extension list (see stages/s4-shared.txt) as tab-separated
 # rows: name, default (on|off), loader (extension|zend_extension), requires
-# (comma list or -), and pin (<source>:<url> or -). Any malformed line, unknown
-# field, duplicate, or unresolvable requirement fails the whole list, so a typo
-# can never silently drop an extension from a release. A requirement must be
-# listed before the extension that needs it: mise-php writes php.ini lines in
-# this order, and PHP loads them top to bottom.
+# (comma list or -), pin (<source>:<url> or -), and the pin's SHA-256 digest (or
+# -). Any malformed line, unknown field, duplicate, or unresolvable requirement
+# fails the whole list, so a typo can never silently drop an extension from a
+# release. A requirement must be listed before the extension that needs it:
+# mise-php writes php.ini lines in this order, and PHP loads them top to bottom.
+# A digest needs a pin, and a GitHub-hosted pin needs a digest, since build.sh
+# downloads a pin with a digest itself (see fetch_pinned_sources there).
 read_shared_extensions() {
   awk '
     function fail(message) {
@@ -152,6 +154,7 @@ read_shared_extensions() {
       loader = "extension"
       requires = "-"
       pin = "-"
+      digest = "-"
       if (name !~ /^[a-z][a-z0-9_]*$/) fail("invalid extension name: " name)
       if (state != "on" && state != "off") fail("default must be on or off: " state)
       for (i = 3; i <= NF; i++) {
@@ -161,15 +164,19 @@ read_shared_extensions() {
           requires = substr($i, 10)
         } else if ($i ~ /^pin=[A-Za-z0-9_-]+:https:\/\/[^[:space:]]+$/) {
           pin = substr($i, 5)
+        } else if ($i ~ /^sha256=[0-9a-f]+$/ && length($i) == 71) {
+          digest = substr($i, 8)
         } else {
           fail("unknown field: " $i)
         }
       }
+      if (digest != "-" && pin == "-") fail("sha256= needs a pin=: " name)
+      if (digest == "-" && pin ~ /^[^:]+:https:\/\/([a-z.]+\.)?github(usercontent)?\.com\//) fail("a GitHub-hosted pin needs sha256=: " name)
       if (name in states) fail("duplicate extension: " name)
       states[name] = state
       order[++count] = name
       position[name] = count
-      rows[name] = name "\t" state "\t" loader "\t" requires "\t" pin
+      rows[name] = name "\t" state "\t" loader "\t" requires "\t" pin "\t" digest
       needs[name] = requires
     }
     END {
@@ -200,22 +207,30 @@ read_shared_extensions() {
 }
 
 # Print an ELF file's dynamic symbol table as `readelf --dyn-syms -W` does, with
-# every symbol's type in one field. zig's linker leaves the ELF OS/ABI at System V,
-# so readelf names an ifunc's STT_GNU_IFUNC type "<OS specific>: 10", three fields
-# where every other type has one, and the name would be read from the wrong field.
-# PHP 8.2 and 8.3 export their x86_64 base64 functions as ifuncs when built for the
-# baseline CPU.
+# one field per column, so the name is always field 8 and the section index field 7.
+# zig's linker leaves the ELF OS/ABI at System V, so readelf names an ifunc's
+# STT_GNU_IFUNC type "<OS specific>: 10" and a STB_GNU_UNIQUE binding the same way,
+# three fields where every other value has one; a type or binding it has no name
+# for prints as "<processor specific>: N" or "<unknown>: N". Each is folded into
+# one field, however many a row holds. A note readelf adds after the visibility for
+# other st_other bits, such as aarch64's "[VARIANT_PCS]", is dropped. PHP 8.2 and
+# 8.3 export their x86_64 base64 functions as ifuncs when built for the baseline
+# CPU. readelf translates these labels, so it runs in the C locale.
 elf_dynamic_symbols() {
-  readelf --dyn-syms -W "$1" | sed -E 's/<([A-Za-z]+) specific>: *([0-9]+)/\1_specific_\2/'
+  LC_ALL=C readelf --dyn-syms -W "$1" | sed -E \
+    -e 's/ \[[^]]*\]//g' \
+    -e 's/<([A-Za-z]+) specific>: *([0-9]+)/\1_specific_\2/g' \
+    -e 's/<unknown>: *([0-9]+)/unknown_\1/g'
 }
 
 # Print the dynamic symbols an ELF file defines, one per line, without versions.
+# Only numbered symbol rows count; the table's title and header lines do not.
 elf_defined_symbols() {
-  elf_dynamic_symbols "$1" | awk '$7 != "UND" && $8 != "" { sub(/@.*/, "", $8); print $8 }'
+  elf_dynamic_symbols "$1" | awk '$1 ~ /^[0-9]+:$/ && $7 != "UND" && $8 != "" { sub(/@.*/, "", $8); print $8 }'
 }
 
 # Print the unversioned symbols an ELF file needs from elsewhere, one per line.
 # Weak references are left out, since they resolve to null when absent.
 elf_required_symbols() {
-  elf_dynamic_symbols "$1" | awk '$7 == "UND" && $5 != "WEAK" && $8 != "" && $8 !~ /@/ { print $8 }'
+  elf_dynamic_symbols "$1" | awk '$1 ~ /^[0-9]+:$/ && $7 == "UND" && $5 != "WEAK" && $8 != "" && $8 !~ /@/ { print $8 }'
 }

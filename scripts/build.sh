@@ -21,6 +21,27 @@ if [[ "$PLATFORM" == linux-* ]]; then
   export SPC_TARGET="${PLATFORM#linux-}-linux-gnu.$LINUX_GLIBC_BASELINE"
 fi
 
+# StaticPHP clones some sources from github.com with git (micro, imap, libjxl and
+# others), which sends no token, so a clone fails whenever GitHub limits anonymous
+# traffic. With GITHUB_TOKEN set, git sends it to github.com and nowhere else, the
+# way actions/checkout does. It is the read-only token every build job holds and
+# StaticPHP already sends to the GitHub API; a git configuration in the
+# environment keeps it out of every process listing. git follows no redirect from
+# github.com: after one it would add the header to its next requests to the new
+# host, so a redirected clone fails instead.
+if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+  if [[ ! "${GIT_CONFIG_COUNT:-0}" =~ ^[0-9]+$ ]]; then
+    echo "GIT_CONFIG_COUNT must be a number, got: $GIT_CONFIG_COUNT" >&2
+    exit 1
+  fi
+  git_config_index="${GIT_CONFIG_COUNT:-0}"
+  export GIT_CONFIG_COUNT=$((git_config_index + 2))
+  export "GIT_CONFIG_KEY_$git_config_index=http.https://github.com/.extraheader"
+  export "GIT_CONFIG_VALUE_$git_config_index=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+  export "GIT_CONFIG_KEY_$((git_config_index + 1))=http.https://github.com/.followRedirects"
+  export "GIT_CONFIG_VALUE_$((git_config_index + 1))=false"
+fi
+
 # The publisher passes the full release tag, 8.4.5-1 for a rebuild; the build
 # folder keeps that tag, and StaticPHP gets the PHP version without it.
 BUILD_TARGET="${1:-8.4}"
@@ -175,6 +196,60 @@ print_failure_logs() {
   done
 }
 
+# Print where fetch_pinned_sources keeps a pin's verified archive, relative to the
+# build folder. StaticPHP reads the archive type from the file name, which a
+# GitHub API tarball URL does not carry.
+pinned_source_file() {
+  local source="${1%%:*}" url="${1#*:}"
+
+  case "$url" in
+    https://api.github.com/repos/*/tarball/*) echo "pinned/$source.tar.gz" ;;
+    *) echo "pinned/$source-${url##*/}" ;;
+  esac
+}
+
+# Download every shared-extension pin that carries a sha256= digest into pinned/,
+# and fail unless its bytes match the digest; craft_file points StaticPHP at the
+# verified file instead of the URL. StaticPHP fetches a pinned URL without a
+# token, so a GitHub-hosted pin would fail every build whenever GitHub limits
+# anonymous downloads. Here a github.com or api.github.com URL gets GITHUB_TOKEN,
+# which every build job holds read-only; no other host is sent it, and curl drops
+# it when GitHub redirects the download to another host. curl retries transient
+# failures with exponential backoff. An archive verified by an earlier attempt is
+# kept.
+fetch_pinned_sources() {
+  local pin digest url file actual
+  local curl_args=(--fail --silent --show-error --location --proto "=https"
+    --retry 5 --retry-all-errors --connect-timeout 30)
+
+  while IFS=$'\t' read -r _ _ _ _ pin digest; do
+    if [[ -z "$pin" || "$pin" == "-" || "$digest" == "-" ]]; then
+      continue
+    fi
+    url="${pin#*:}"
+    file="$(pinned_source_file "$pin")"
+    if [[ -f "$file" && "$(sha256_of "$file")" == "$digest" ]]; then
+      continue
+    fi
+    mkdir -p pinned && rm -f "$file" "$file.part" || return 1
+    if [[ -n "${GITHUB_TOKEN:-}" && "$url" =~ ^https://(api\.)?github\.com/ ]]; then
+      # From a file, so the token never appears in a process listing.
+      curl "${curl_args[@]}" -H @<(printf 'Authorization: Bearer %s\n' "$GITHUB_TOKEN") \
+        -o "$file.part" "$url" || return 1
+    else
+      curl "${curl_args[@]}" -o "$file.part" "$url" || return 1
+    fi
+    actual="$(sha256_of "$file.part")"
+    if [[ "$actual" != "$digest" ]]; then
+      rm -f "$file.part"
+      echo "${pin%%:*} from $url has SHA-256 $actual, not its pinned $digest." >&2
+      return 1
+    fi
+    mv "$file.part" "$file" || return 1
+    echo "Verified ${pin%%:*} against its pinned SHA-256 digest."
+  done <<< "$SHARED_ROWS"
+}
+
 # The compiled-in php.ini path points below /dev/null, which can never be a
 # directory, so a stray system php.ini is never read; each install's own
 # bin/php.ini beside the binary is found first. No scan directory is compiled
@@ -211,7 +286,15 @@ EOF
     if [[ -n "$PHP_SOURCE_PIN" ]]; then
       printf '    - "%s"\n' "$PHP_SOURCE_PIN"
     fi
-    awk -F '\t' 'NF && $5 != "-" { printf "    - \"%s\"\n", $5 }' <<< "$SHARED_ROWS"
+    while IFS=$'\t' read -r _ _ _ _ pin digest; do
+      if [[ -z "$pin" || "$pin" == "-" ]]; then
+        continue
+      elif [[ "$digest" == "-" ]]; then
+        printf '    - "%s"\n' "$pin"
+      else
+        printf '    - "%s:file://%s"\n' "${pin%%:*}" "$BUILD_DIR/$(pinned_source_file "$pin")"
+      fi
+    done <<< "$SHARED_ROWS"
   fi
   echo "extra-env:"
   if [[ "$PLATFORM" == macos-* ]]; then
@@ -439,6 +522,7 @@ run_staticphp() {
   local micro_patches
 
   cd "$BUILD_DIR" \
+    && fetch_pinned_sources \
     && { [[ "$PLATFORM" != linux-* ]] || { install_pinned_zig && install_crypt_stub; }; } \
     && "$SPC_BIN" doctor \
     && "$SPC_BIN" craft craft-download.yml \
@@ -532,7 +616,8 @@ fi
 # architecture, needs no shared library besides glibc's own, and needs no glibc
 # symbol newer than the baseline, so it runs on every glibc distribution from
 # that version on. A copy of libstdc++, libgcc_s, or any other library a
-# distribution may lack, or ship in another version, fails it.
+# distribution may lack, or ship in another version, fails it. readelf translates
+# the labels matched here, so every readelf call runs in the C locale.
 verify_linux_elf() {
   local file="$1" label="$2" machine library version newest
 
@@ -540,7 +625,7 @@ verify_linux_elf() {
     linux-x86_64) machine="Advanced Micro Devices X86-64" ;;
     linux-aarch64) machine="AArch64" ;;
   esac
-  if ! readelf -h "$file" | grep -Eq "^[[:space:]]*Machine:[[:space:]]+$machine\$"; then
+  if ! LC_ALL=C readelf -h "$file" | grep -Eq "^[[:space:]]*Machine:[[:space:]]+$machine\$"; then
     echo "$label is not built for $PLATFORM." >&2
     return 1
   fi
@@ -553,7 +638,7 @@ verify_linux_elf() {
         return 1
         ;;
     esac
-  done < <(readelf -d -W "$file" | sed -n 's/.*(NEEDED).*\[\(.*\)\]$/\1/p')
+  done < <(LC_ALL=C readelf -d -W "$file" | sed -n 's/.*(NEEDED).*\[\(.*\)\]$/\1/p')
   # The version needs section names each library version the file links against.
   while IFS= read -r version; do
     if [[ ! "$version" =~ ^GLIBC_[0-9]+(\.[0-9]+)+$ ]]; then
@@ -565,7 +650,7 @@ verify_linux_elf() {
       echo "$label needs $version, newer than the glibc $LINUX_GLIBC_BASELINE baseline." >&2
       return 1
     fi
-  done < <(readelf -V -W "$file" | awk '
+  done < <(LC_ALL=C readelf -V -W "$file" | awk '
     /^Version needs section/ { needs = 1; next }
     /^Version [a-z]+ section/ { needs = 0 }
     needs { for (i = 1; i < NF; i++) if ($i == "Name:") print $(i + 1) }
@@ -612,7 +697,7 @@ else
     linux-x86_64) INTERPRETER="/lib64/ld-linux-x86-64.so.2" ;;
     linux-aarch64) INTERPRETER="/lib/ld-linux-aarch64.so.1" ;;
   esac
-  if ! readelf -l -W "$PHP_BIN" | grep -Fq "[Requesting program interpreter: $INTERPRETER]"; then
+  if ! LC_ALL=C readelf -l -W "$PHP_BIN" | grep -Fq "[Requesting program interpreter: $INTERPRETER]"; then
     echo "Expected $PHP_BIN to load through glibc's $INTERPRETER." >&2
     exit 1
   fi
