@@ -142,7 +142,10 @@ scripts/compare-modules.sh .build/8.4/s0/buildroot/bin/php stages/s0.txt subset
 zig compiler, and checks each against its SHA-256 pin in `.spc-sha256`.
 
 Advance through `s1`, `s2`, `s3`, and `s4`. Stage `s4` also builds the shared
-extensions in `stages/s4-shared.txt` and runs the module gate:
+extensions in `stages/s4-shared.txt` and runs the module gate. An extension
+pinned there with a `sha256=` digest is downloaded by `scripts/build.sh` itself,
+with `GITHUB_TOKEN` for a GitHub URL when it is set, and the build stops unless
+the archive matches the digest:
 
 ```bash
 scripts/build.sh 8.4 s4
@@ -176,6 +179,15 @@ Docker; set `DOCKER="sudo docker"` where Docker needs root:
 ```bash
 scripts/smoke-test-linux.sh .artifacts/php-8.4.5-cli-linux-x86_64.tar.gz expected-modules/8.4.txt
 ```
+
+Each image is pinned by digest, with its tag in a comment, so an image pushed
+upstream later cannot fail a release whose archive did not change, and a failed
+pull is retried with backoff. To move to the images the tags name today, run
+`scripts/refresh-smoke-images`, which rewrites each digest after checking that
+the tag still names images for both linux/amd64 and linux/arm64 (amd64 alone for
+Arch), then land the diff by pull request. `scripts/refresh-smoke-images --check`
+changes nothing and exits 1 when a tag has moved. The smoke test is not a recipe
+input, so refreshing it rebuilds nothing.
 
 ## Publishing and recovery policy
 

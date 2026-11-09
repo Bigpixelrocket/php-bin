@@ -157,8 +157,10 @@ resolves most sources through the GitHub API and runs third-party build
 scripts, so the publish workflow's `build` job builds, gates, and packages the
 exact commit once per platform, each leg on its own native runner (`macos-26`,
 `ubuntu-latest`, `ubuntu-24.04-arm`) with a token that can only read contents;
-that token authenticates StaticPHP's API calls, which anonymous shared runners
-would lose to rate limits. Each Linux leg also runs `scripts/smoke-test-linux.sh`
+that token authenticates StaticPHP's API calls and git clones from github.com,
+and `build.sh`'s download of each GitHub-hosted pin (verified against its
+`sha256=` digest in `stages/s4-shared.txt`), all of which anonymous shared
+runners would lose to rate limits. Each Linux leg also runs `scripts/smoke-test-linux.sh`
 on the distributions the archive supports. Each leg reports its artifact ID and
 archive digest under its own platform's output names. The transaction itself
 runs in three write-scoped jobs, in order, each only after the one before

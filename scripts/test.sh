@@ -280,11 +280,20 @@ done
 
 # The shipped list parses, and a requirement listed after the extension that
 # needs it, or an extension requiring itself, is rejected, since php.ini lines
-# load in list order.
+# load in list order. A GitHub-hosted pin without a digest, a digest without a
+# pin, and a digest that is not SHA-256 are rejected too.
 read_shared_extensions "$PROJECT_ROOT/stages/s4-shared.txt" > /dev/null
 printf 'demo_off off requires=demo_on\ndemo_on on\n' > "$SCRATCH_DIR/misordered.txt"
 printf 'demo_on on requires=demo_on\n' > "$SCRATCH_DIR/self.txt"
-for list in misordered self; do
+DIGEST="$(printf 'x' | sha256_of /dev/stdin)"
+printf 'demo off pin=demo:https://api.github.com/repos/o/r/tarball/v1\n' > "$SCRATCH_DIR/undigested.txt"
+printf 'demo off pin=demo:https://github.com/o/r/archive/v1.tar.gz\n' > "$SCRATCH_DIR/undigested-archive.txt"
+printf 'demo off sha256=%s\n' "$DIGEST" > "$SCRATCH_DIR/unpinned.txt"
+printf 'demo off pin=demo:https://example.org/d.tgz sha256=%s\n' "${DIGEST:1}" > "$SCRATCH_DIR/short.txt"
+printf 'demo off pin=demo:https://api.github.com/repos/o/r/tarball/v1 sha256=%s\n' "$DIGEST" \
+  > "$SCRATCH_DIR/digested.txt"
+test "$(read_shared_extensions "$SCRATCH_DIR/digested.txt" | cut -f6)" = "$DIGEST"
+for list in misordered self undigested undigested-archive unpinned short; do
   if read_shared_extensions "$SCRATCH_DIR/$list.txt" > /dev/null 2>&1; then
     echo "Expected the $list shared-extension list to be rejected." >&2
     exit 1

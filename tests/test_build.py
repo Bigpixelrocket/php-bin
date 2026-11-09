@@ -1,7 +1,10 @@
 """Behavior of scripts/build.sh around StaticPHP, and of the upstream canary."""
 
+import base64
+import hashlib
 import json
 import os
+import re
 import pathlib
 import shutil
 import subprocess
@@ -63,6 +66,29 @@ FAKE_UNAME = textwrap.dedent(
     """
 )
 
+# Records each download as `<url> <headers read from -H files>` and writes
+# FAKE_CURL_BODY to the -o file, or fails when FAKE_CURL_FAIL is set.
+FAKE_CURL = textwrap.dedent(
+    """\
+    #!/usr/bin/env bash
+    out="" headers="" url=""
+    while (($#)); do
+      case "$1" in
+        -o) out="$2"; shift ;;
+        -H) if [[ "$2" == @* ]]; then headers+="$(cat "${2#@}")"; else headers+="$2"; fi; shift ;;
+        --proto | --retry | --connect-timeout) shift ;;
+        -*) ;;
+        *) url="$1" ;;
+      esac
+      shift
+    done
+    echo "$url ${headers:-no-headers}" >> "$CURL_CALLS"
+    if [[ -n "${FAKE_CURL_FAIL:-}" ]]; then exit 22; fi
+    printf '%s' "${FAKE_CURL_BODY:-pinned archive}" > "$out"
+    """
+)
+PINNED_BODY_DIGEST = hashlib.sha256(b"pinned archive").hexdigest()
+
 UPSTREAM_LAYOUT = "standard:config.m4 date:config0.m4 imap/tests:x.phpt com_dotnet:config.w32 skeleton:README"
 
 
@@ -74,9 +100,14 @@ class BuildScriptTests(unittest.TestCase):
         self.root = self.scratch / "php-bin"
         for name in ("scripts", "stages", "expected-modules"):
             shutil.copytree(ROOT / name, self.root / name)
+        # Every pinned digest names the fake download, so no test reaches the network.
+        self.shared_list = self.root / "stages/s4-shared.txt"
+        self.shared_list.write_text(
+            re.sub(r"sha256=[0-9a-f]{64}", f"sha256={PINNED_BODY_DIGEST}", self.shared_list.read_text())
+        )
         bin_dir = self.scratch / "bin"
         bin_dir.mkdir()
-        for name, body in (("spc", FAKE_SPC), ("uname", FAKE_UNAME)):
+        for name, body in (("spc", FAKE_SPC), ("uname", FAKE_UNAME), ("curl", FAKE_CURL)):
             path = bin_dir / name
             path.write_text(body)
             path.chmod(0o755)
@@ -86,8 +117,10 @@ class BuildScriptTests(unittest.TestCase):
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
             "SPC_BIN": str(bin_dir / "spc"),
             "SPC_CALLS": str(self.calls),
+            "CURL_CALLS": str(self.scratch / "curl.txt"),
             "FAKE_EXT_DIRS": UPSTREAM_LAYOUT,
         }
+        self.env.pop("GITHUB_TOKEN", None)
 
     def build(self, version, **env):
         return subprocess.run(
@@ -314,6 +347,79 @@ class BuildScriptTests(unittest.TestCase):
         self.assertIn("craft-options:\n  download: false\n  build: true\n", build)
         self.assertNotIn("php-src:", download)
 
+    def curl_calls(self):
+        return (self.scratch / "curl.txt").read_text().splitlines()
+
+    def test_a_github_pin_downloads_with_the_read_only_token_and_builds_the_verified_file(self):
+        spx = "https://api.github.com/repos/NoiseByNorthwest/php-spx/tarball/refs/tags/v0.4.22"
+        self.build("8.4.27", GITHUB_TOKEN="read-only-token")
+        self.assertEqual([f"{spx} Authorization: Bearer read-only-token"], self.curl_calls())
+        build_dir = self.root / ".build/8.4.27/s4"
+        self.assertEqual("pinned archive", (build_dir / "pinned/spx.tar.gz").read_text())
+        download = (build_dir / "craft-download.yml").read_text()
+        self.assertIn(f'    - "spx:file://{build_dir}/pinned/spx.tar.gz"\n', download)
+        self.assertNotIn("php-spx", download)
+        # Every other pin is still StaticPHP's to download, and the token never leaves GitHub.
+        self.assertIn('    - "xdebug:https://pecl.php.net/get/xdebug-3.5.3.tgz"\n', download)
+        # A retry keeps the verified archive instead of downloading it again.
+        self.calls.unlink()
+        self.build("8.4.27", GITHUB_TOKEN="read-only-token")
+        self.assertEqual(1, len(self.curl_calls()))
+
+    def test_a_pin_download_without_a_token_or_off_github_sends_no_credentials(self):
+        self.shared_list.write_text(self.shared_list.read_text().replace(
+            "pin=xdebug:https://pecl.php.net/get/xdebug-3.5.3.tgz",
+            f"pin=xdebug:https://pecl.php.net/get/xdebug-3.5.3.tgz sha256={PINNED_BODY_DIGEST}",
+        ))
+        self.build("8.4.27", GITHUB_TOKEN="read-only-token")
+        self.assertIn("https://pecl.php.net/get/xdebug-3.5.3.tgz no-headers", self.curl_calls())
+        download = (self.root / ".build/8.4.27/s4/craft-download.yml").read_text()
+        self.assertIn("xdebug:file://", download)
+        (self.scratch / "curl.txt").unlink()
+        (self.root / ".build/8.4.27/s4/pinned/spx.tar.gz").unlink()
+        self.build("8.4.27")
+        self.assertIn(
+            "https://api.github.com/repos/NoiseByNorthwest/php-spx/tarball/refs/tags/v0.4.22 no-headers",
+            self.curl_calls(),
+        )
+
+    def test_a_pin_whose_bytes_differ_from_its_digest_stops_the_build_before_staticphp(self):
+        for env, message in (
+            ({"FAKE_CURL_BODY": "tampered"}, f"not its pinned {PINNED_BODY_DIGEST}"),
+            ({"FAKE_CURL_FAIL": "1"}, ""),
+        ):
+            with self.subTest(env=env):
+                result = self.build("8.4.27", GITHUB_TOKEN="read-only-token", **env)
+                self.assertNotEqual(0, result.returncode)
+                self.assertIn(message, result.stderr)
+                self.assertFalse(self.calls.exists())
+                self.assertEqual([], list((self.root / ".build/8.4.27/s4/pinned").iterdir()))
+
+    def test_git_clones_authenticate_to_github_only_with_a_token(self):
+        def git_config(**env):
+            self.calls.unlink(missing_ok=True)
+            spc = self.scratch / "bin/spc"
+            spc.write_text(FAKE_SPC.replace(
+                'echo "$*" >> "$SPC_CALLS"',
+                'echo "$*" >> "$SPC_CALLS"; env | grep "^GIT_CONFIG_" | sort >> "$SPC_CALLS"', 1,
+            ))
+            self.build("8.4.27", **env)
+            return sorted({line for line in self.calls.read_text().splitlines() if line.startswith("GIT_CONFIG_")})
+
+        token = base64.b64encode(b"x-access-token:read-only-token").decode()
+        self.assertEqual([
+            "GIT_CONFIG_COUNT=1",
+            "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader",
+            f"GIT_CONFIG_VALUE_0=AUTHORIZATION: basic {token}",
+        ], git_config(GITHUB_TOKEN="read-only-token"))
+        # An existing environment configuration is kept, and the header added after it.
+        self.assertIn(
+            "GIT_CONFIG_KEY_1=http.https://github.com/.extraheader",
+            git_config(GITHUB_TOKEN="read-only-token", GIT_CONFIG_COUNT="1",
+                       GIT_CONFIG_KEY_0="core.autocrlf", GIT_CONFIG_VALUE_0="false"),
+        )
+        self.assertEqual([], git_config())
+
     def test_a_tag_build_pins_php_src_to_the_exact_tag(self):
         for version, numeric in (("8.5.12", "8.5.12"), ("8.6.0RC4", "8.6.0"), ("9.0.0alpha1", "9.0.0")):
             with self.subTest(version=version):
@@ -352,13 +458,25 @@ DEPENDENCY_TABLE = (
 
 
 # Dynamic symbol tables as binutils' readelf prints them for zig-linked files, whose
-# ELF OS/ABI stays System V: an ifunc's type is then "<OS specific>: 10".
+# ELF OS/ABI stays System V: an ifunc's type, and a STB_GNU_UNIQUE binding, is then
+# "<OS specific>: 10". The unique-ifunc, other-bits and variant-pcs tables are
+# binutils 2.47's output for a g++ shared object whose st_info and st_other bytes were
+# patched to those values (the last with e_machine set to AArch64). readelf
+# translates those labels; a Spanish locale prints its catalog's, as binutils 2.47 does.
 FAKE_READELF = textwrap.dedent(
     """\
     #!/usr/bin/env bash
+    locale="${LC_ALL:-${LC_MESSAGES:-${LANG:-C}}}"
+    translate() {
+      if [[ "$locale" == es_* ]]; then
+        sed 's/<OS specific>/<específico del SO>/g'
+      else
+        cat
+      fi
+    }
     case "$3" in
       *php)
-        cat <<'TABLE'
+        translate <<'TABLE'
 
     Symbol table '.dynsym' contains 5 entries:
        Num:    Value          Size Type    Bind   Vis      Ndx Name
@@ -371,7 +489,7 @@ FAKE_READELF = textwrap.dedent(
     TABLE
         ;;
       *mongodb.so)
-        cat <<'TABLE'
+        translate <<'TABLE'
 
     Symbol table '.dynsym' contains 6 entries:
        Num:    Value          Size Type    Bind   Vis      Ndx Name
@@ -384,20 +502,60 @@ FAKE_READELF = textwrap.dedent(
          6: 00000000000a1000    42 FUNC    GLOBAL DEFAULT   12 get_module
     TABLE
         ;;
+      *unique-ifunc.so)
+        translate <<'TABLE'
+
+    Symbol table '.dynsym' contains 10 entries:
+       Num:    Value          Size Type    Bind   Vis      Ndx Name
+         0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND 
+         1: 0000000000000000     0 FUNC    WEAK   DEFAULT  UND __cxa_finalize@GLIBC_2.2.5 (2)
+         2: 0000000000000000     0 NOTYPE  WEAK   DEFAULT  UND _ITM_deregisterTMCloneTable
+         3: 0000000000000000     0 NOTYPE  WEAK   DEFAULT  UND __gmon_start__
+         4: 0000000000000000     0 NOTYPE  WEAK   DEFAULT  UND _ITM_registerTMCloneTable
+         5: 000000000000110e     8 FUNC    GLOBAL DEFAULT    9 copy
+         6: 000000000000400c     4 OBJECT  <OS specific>: 10 DEFAULT   20 _ZN6holderIiE5valueE
+         7: 0000000000004010     4 OBJECT  <OS specific>: 10 DEFAULT   20 _ZZ14shared_countervE7counter
+         8: 00000000000010f7    23 FUNC    GLOBAL DEFAULT    9 _Z5touchv
+         9: 00000000000010ef     8 <OS specific>: 10 <OS specific>: 10 DEFAULT    9 php_base64_encode
+    TABLE
+        ;;
+      *other-bits.so)
+        translate <<'TABLE'
+
+    Symbol table '.dynsym' contains 4 entries:
+       Num:    Value          Size Type    Bind   Vis      Ndx Name
+         0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND 
+         1: 0000000000000000     0 FUNC    GLOBAL DEFAULT [<other>: 80]   UND zend_vector_kernel
+         2: 0000000000000000     0 NOTYPE  WEAK   DEFAULT  UND _ITM_deregisterTMCloneTable
+         3: 000000000000110e     8 FUNC    GLOBAL DEFAULT [<other>: 80]     9 copy
+    TABLE
+        ;;
+      *variant-pcs.so)
+        translate <<'TABLE'
+
+    Symbol table '.dynsym' contains 5 entries:
+       Num:    Value          Size Type    Bind   Vis      Ndx Name
+         0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND 
+         1: 0000000000000000     0 FUNC    GLOBAL DEFAULT [VARIANT_PCS]   UND zend_vector_kernel
+         2: 0000000000000000     0 NOTYPE  WEAK   DEFAULT  UND _ITM_deregisterTMCloneTable
+         3: 000000000000110e     8 FUNC    GLOBAL DEFAULT [VARIANT_PCS]     9 copy
+         4: 00000000000010ef     8 <OS specific>: 10 GLOBAL DEFAULT    9 php_base64_encode
+    TABLE
+        ;;
     esac
     """
 )
 
 
 class ElfSymbolTests(unittest.TestCase):
-    def symbols(self, function, file):
+    def symbols(self, function, file, **env):
         with tempfile.TemporaryDirectory() as scratch:
             readelf = pathlib.Path(scratch) / "readelf"
             readelf.write_text(FAKE_READELF)
             readelf.chmod(0o755)
             result = subprocess.run(
                 ["bash", "-c", f'source "$1" && {function} "$2"', "-", str(ROOT / "scripts/lib.sh"), file],
-                env={**os.environ, "PATH": f"{scratch}:{os.environ['PATH']}"},
+                env={**os.environ, "PATH": f"{scratch}:{os.environ['PATH']}", **env},
                 capture_output=True, text=True, check=True,
             )
         return set(result.stdout.split())
@@ -421,6 +579,131 @@ class ElfSymbolTests(unittest.TestCase):
             self.symbols("elf_required_symbols", "modules/mongodb.so")
             - self.symbols("elf_defined_symbols", "bin/php"),
         )
+
+    def test_a_row_with_an_os_specific_type_and_binding_keeps_its_name(self):
+        self.assertEqual(
+            {"copy", "_ZN6holderIiE5valueE", "_ZZ14shared_countervE7counter", "_Z5touchv", "php_base64_encode"},
+            self.symbols("elf_defined_symbols", "lib-unique-ifunc.so"),
+        )
+
+    def test_a_note_after_the_visibility_leaves_the_columns_in_place(self):
+        for file in ("lib-other-bits.so", "lib-variant-pcs.so"):
+            with self.subTest(file=file):
+                self.assertEqual({"zend_vector_kernel"}, self.symbols("elf_required_symbols", file))
+                self.assertLessEqual({"copy"}, self.symbols("elf_defined_symbols", file))
+        self.assertIn("php_base64_encode", self.symbols("elf_defined_symbols", "lib-variant-pcs.so"))
+
+    def test_a_translated_locale_reads_the_same_symbols(self):
+        for locale in ({"LANG": "es_ES.UTF-8"}, {"LC_ALL": "es_ES.UTF-8"}):
+            with self.subTest(locale=locale):
+                env = {"LC_ALL": "", "LC_MESSAGES": "", **locale}
+                self.assertEqual(
+                    self.symbols("elf_defined_symbols", "bin/php", LC_ALL="C"),
+                    self.symbols("elf_defined_symbols", "bin/php", **env),
+                )
+                self.assertEqual(
+                    {"getrandom"},
+                    self.symbols("elf_required_symbols", "modules/mongodb.so", **env)
+                    - self.symbols("elf_defined_symbols", "bin/php", **env),
+                )
+
+    def test_every_readelf_call_runs_in_the_c_locale(self):
+        for script in ("scripts/lib.sh", "scripts/build.sh"):
+            for number, line in enumerate((ROOT / script).read_text().splitlines(), 1):
+                code = line.split("#", 1)[0]
+                if "readelf " in code:
+                    with self.subTest(script=script, line=number):
+                        self.assertIn("LC_ALL=C readelf ", code)
+
+
+# A Linux build machine for smoke-test-linux.sh: FAKE_ARCH names the architecture,
+# docker fails each image's first FAKE_PULL_FAILURES pulls and reports a module
+# list of `core` for every run, and sleep only records its delay.
+FAKE_SMOKE_TOOLS = {
+    "uname": '#!/usr/bin/env bash\ncase "$1" in -s) echo Linux ;; -m) echo "$FAKE_ARCH" ;; *) echo Linux ;; esac\n',
+    "getconf": "#!/usr/bin/env bash\necho 'glibc 2.39'\n",
+    "sleep": '#!/usr/bin/env bash\necho "sleep $1" >> "$DOCKER_CALLS"\n',
+    "docker": textwrap.dedent(
+        """\
+        #!/usr/bin/env bash
+        echo "$*" >> "$DOCKER_CALLS"
+        case "$1" in
+          pull)
+            tries="$(grep -cxF "pull -q $3" "$DOCKER_CALLS")"
+            (( tries > ${FAKE_PULL_FAILURES:-0} )) || exit 1
+            ;;
+          run) printf -- '--- modules\\ncore\\n--- end\\n' ;;
+        esac
+        """
+    ),
+}
+
+
+class SmokeTestImageTests(unittest.TestCase):
+    def smoke(self, arch="x86_64", failures=0):
+        with tempfile.TemporaryDirectory() as scratch:
+            scratch = pathlib.Path(scratch)
+            bin_dir = scratch / "bin"
+            bin_dir.mkdir()
+            for name, body in FAKE_SMOKE_TOOLS.items():
+                (bin_dir / name).write_text(body)
+                (bin_dir / name).chmod(0o755)
+            (scratch / "php/share/php-bin").mkdir(parents=True)
+            (scratch / "php/share/php-bin/manifest.json").write_text('{"extensions": []}')
+            subprocess.run(["tar", "-czf", str(scratch / "php.tar.gz"), "-C", str(scratch / "php"), "."], check=True)
+            (scratch / "expected.txt").write_text("core\n")
+            calls = scratch / "docker.txt"
+            calls.touch()
+            result = subprocess.run(
+                [str(ROOT / "scripts/smoke-test-linux.sh"), str(scratch / "php.tar.gz"), str(scratch / "expected.txt")],
+                env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "DOCKER_CALLS": str(calls),
+                     "FAKE_ARCH": arch, "FAKE_PULL_FAILURES": str(failures), "TMPDIR": str(scratch)},
+                capture_output=True, text=True, check=False,
+            )
+            return result, calls.read_text().splitlines()
+
+    def test_every_image_is_pinned_by_digest_beside_its_tag(self):
+        text = (ROOT / "scripts/smoke-test-linux.sh").read_text()
+        pinned = re.findall(r"([a-z0-9/._-]+)@sha256:[0-9a-f]{64} # ([a-z0-9/._-]+):\S+", text)
+        self.assertEqual(
+            ["debian", "fedora", "ubuntu", "ubuntu", "gentoo/stage3", "archlinux"], [name for name, _ in pinned]
+        )
+        self.assertEqual([name for name, _ in pinned], [tag for _, tag in pinned])
+        # A tag appears only in the comment beside its digest, never as a reference.
+        for line in text.splitlines():
+            if not line.lstrip().startswith("#"):
+                self.assertNotRegex(line.split(" # ")[0], r"\b(fedora|ubuntu|debian|archlinux|gentoo/stage3):")
+
+    def test_each_pinned_image_runs_by_digest_and_arch_only_on_x86_64(self):
+        for arch, images in (("x86_64", 6), ("aarch64", 5)):
+            with self.subTest(arch=arch):
+                result, calls = self.smoke(arch)
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                pulls = [call.split()[2] for call in calls if call.startswith("pull ")]
+                self.assertEqual(images + 1, len(pulls))
+                self.assertTrue(all(re.fullmatch(r"[a-z0-9/._-]+@sha256:[0-9a-f]{64}", image) for image in pulls))
+                self.assertEqual(arch == "x86_64", any(image.startswith("archlinux@") for image in pulls))
+                # The baseline-CPU run reuses the pinned Debian image under QEMU.
+                qemu = [call for call in calls if call.startswith("run ") and "QEMU=qemu-" in call]
+                self.assertEqual(1, len(qemu))
+                self.assertIn(pulls[3], qemu[0])
+
+    def test_a_failed_pull_is_retried_with_backoff(self):
+        result, calls = self.smoke(failures=2)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        first = calls[: calls.index(next(call for call in calls if call.startswith("run ")))]
+        self.assertEqual(
+            ["pull", "sleep 15", "pull", "sleep 30", "pull"],
+            [call.split()[0] if call.startswith("pull") else call for call in first],
+        )
+        self.assertIn("(attempt 1 of 4); retrying in 15s.", result.stderr)
+
+    def test_an_image_that_never_pulls_fails_after_four_tries(self):
+        result, calls = self.smoke(failures=99)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("FAIL could not pull", result.stdout)
+        self.assertEqual(["sleep 15", "sleep 30", "sleep 60"], [call for call in calls if call.startswith("sleep")][:3])
+        self.assertEqual(4 * 7, len([call for call in calls if call.startswith("pull ")]))
 
 
 class AttributionTests(unittest.TestCase):

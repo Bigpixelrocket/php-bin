@@ -6,6 +6,7 @@
 # on its own, and HTTPS works through both OpenSSL streams and curl once
 # openssl.cafile and curl.cainfo name the distribution's CA bundle. A last Debian
 # run repeats every check with PHP under QEMU on the architecture's baseline CPU.
+# Every image is pinned by digest, and a failed pull is retried.
 #
 # HTTPS with no CA setting at all is measured and reported, never failed: OpenSSL
 # looks under /etc/ssl, which only some distributions fill, and each install's
@@ -37,16 +38,23 @@ fi
 read -r -a DOCKER <<< "${DOCKER:-docker}"
 
 # glibc 2.17 is the baseline; Ubuntu 16.04 (glibc 2.23) is the oldest image
-# that still installs CA certificates. Arch publishes no arm64 image.
+# that still installs CA certificates. Arch publishes no arm64 image. Each image
+# is pinned to the multi-architecture index its tag, in the comment beside it,
+# named when last refreshed, so an image an upstream pushes later cannot fail a
+# release whose bytes did not change. scripts/refresh-smoke-images re-resolves
+# every tag and rewrites the digests.
+DEBIAN=debian@sha256:3f0347f4b50e7a54a91d1beaf6ce6fa5aec392347da6a9184b5bfe4e1b814538 # debian:stable
 IMAGES=(
-  fedora:latest
-  ubuntu:16.04
-  ubuntu:latest
-  debian:stable
-  gentoo/stage3:latest
+  fedora@sha256:a7d72ba2745b100a3351087472e5ee7b2450af7cf331e7673007e3817612839c # fedora:latest
+  ubuntu@sha256:1f1a2d56de1d604801a9671f301190704c25d604a416f59e03c04f5c6ffee0d6 # ubuntu:16.04
+  ubuntu@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c # ubuntu:latest
+  "$DEBIAN"
+  gentoo/stage3@sha256:74bd9b8e57bdf72d88ccacc4c467b8e73af584b06c3e89b581db8d35930416d3 # gentoo/stage3:latest
 )
 if [[ "$PLATFORM" == linux-x86_64 ]]; then
-  IMAGES+=(archlinux:latest)
+  IMAGES+=(
+    archlinux@sha256:b1c2fe6e717bfd5673af8fc217e1e1c3ce0dcbb1d53c3414c8425e7ce79fc6d9 # archlinux:latest, amd64 only
+  )
 fi
 # Every container shares the build machine's CPU, so none would catch an
 # instruction older CPUs lack. One more Debian run checks the same things with
@@ -56,7 +64,7 @@ case "$PLATFORM" in
   linux-x86_64) BASELINE_CPU="qemu-x86_64 -cpu qemu64" ;;
   linux-aarch64) BASELINE_CPU="qemu-aarch64 -cpu cortex-a53" ;;
 esac
-RUNS=("${IMAGES[@]}" "debian:stable+qemu")
+RUNS=("${IMAGES[@]}" "$DEBIAN+qemu")
 
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/php-bin-smoke.XXXXXX")"
 CONTAINERS=()
@@ -248,6 +256,24 @@ fi
 exit "$status"
 SH
 
+# Pull an image, retrying with backoff, since a registry outage or rate limit
+# says nothing about the archive under test. Four tries span about two minutes.
+pull_image() {
+  local attempt delay=15
+
+  for attempt in 1 2 3 4; do
+    if "${DOCKER[@]}" pull -q "$1" > /dev/null; then
+      return 0
+    fi
+    if ((attempt < 4)); then
+      echo "Pulling $1 failed (attempt $attempt of 4); retrying in ${delay}s." >&2
+      sleep "$delay"
+      delay=$((delay * 2))
+    fi
+  done
+  return 1
+}
+
 FAILED=()
 index=0
 for run in "${RUNS[@]}"; do
@@ -261,7 +287,7 @@ for run in "${RUNS[@]}"; do
   fi
   echo "=== $run"
   CONTAINERS+=("$name")
-  if ! "${DOCKER[@]}" pull -q "$image" > /dev/null; then
+  if ! pull_image "$image"; then
     echo "FAIL could not pull $image"
     FAILED+=("$run")
     continue

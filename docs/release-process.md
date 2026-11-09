@@ -51,7 +51,8 @@ A human changes what gets built, never how it gets released:
    default-on shared extensions.
 2. Update the recipe: `stages/s4.txt` for modules compiled into the binary,
    `stages/s4-shared.txt` for shared extensions, their default state, and
-   the stable release each new extension is pinned to.
+   the stable release each new extension is pinned to. A pin hosted on GitHub
+   also needs its archive's `sha256=` digest (see that file's header).
 3. Run `scripts/build.sh <minor> s4` on macOS arm64, Linux x86_64, and Linux
    aarch64 (or dispatch the `Build PHP spike` workflow, which builds all three).
    The module gate must pass on each, with a macOS 26.0 deployment target on

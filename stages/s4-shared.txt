@@ -1,6 +1,6 @@
 # Shared extensions built beside the static s4 binary, one per line:
 #
-#   <extension> <on|off> [zend] [requires=<ext>[,<ext>...]] [pin=<source>:<url>]
+#   <extension> <on|off> [zend] [requires=<ext>[,<ext>...]] [pin=<source>:<url> [sha256=<digest>]]
 #
 # on        loaded by default through each install's bin/php.ini; the static
 #           binary plus every "on" extension must equal expected-modules exactly
@@ -9,6 +9,12 @@
 # requires  other shared extensions that must load first
 # pin       StaticPHP source name and the exact stable release archive to build,
 #           so an upstream prerelease can never slip into a published build
+# sha256    the pinned archive's SHA-256 digest; build.sh downloads the archive
+#           itself, with the build's read-only GitHub token for a GitHub URL, and
+#           fails unless the bytes match before StaticPHP extracts them. A
+#           GitHub-hosted pin needs one: StaticPHP fetches a pinned URL without a
+#           token, so every build would fail whenever GitHub limits anonymous
+#           downloads. Refresh it with: curl -fsSL <url> | shasum -a 256
 #
 # Deliberately absent: msgpack (building it compiles redis against it, so the
 # default-on redis would stop loading without it), grpc (build time), swoole
@@ -27,7 +33,7 @@ pdo_sqlsrv      on
 xdebug          off  zend  pin=xdebug:https://pecl.php.net/get/xdebug-3.5.3.tgz
 pcov            off        pin=pcov:https://pecl.php.net/get/pcov-1.0.12.tgz
 excimer         off        pin=ext-excimer:https://pecl.php.net/get/excimer-1.2.6.tgz
-spx             off        pin=spx:https://github.com/NoiseByNorthwest/php-spx/archive/refs/tags/v0.4.22.tar.gz
+spx             off        pin=spx:https://api.github.com/repos/NoiseByNorthwest/php-spx/tarball/refs/tags/v0.4.22 sha256=9aa801c398e0c0cb35854a27868f9eb50cecd2bbf2660cda9e358da454019405
 xhprof          off        pin=xhprof:https://pecl.php.net/get/xhprof-2.3.10.tgz
 apcu            off        pin=apcu:https://pecl.php.net/get/apcu-5.1.28.tgz
 memcached       off  requires=igbinary  pin=memcached:https://pecl.php.net/get/memcached-3.4.0.tgz

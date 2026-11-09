@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Re-pin the distribution images scripts/smoke-test-linux.sh runs.
+
+The smoke test names each image by the digest of the multi-architecture index
+its tag pointed to when last refreshed, with the tag in a trailing comment:
+
+    fedora@sha256:<digest>  # fedora:latest
+
+so an image an upstream pushes later cannot fail a release whose bytes did not
+change. This resolves every tag on Docker Hub again, checks that it still names
+an index with a linux/amd64 and a linux/arm64 image (linux/amd64 alone for a
+comment that says "amd64 only"), and rewrites each digest in place. Review the
+diff and land it like any other change to the smoke test.
+
+Usage: scripts/refresh-smoke-images [--check]
+
+--check changes nothing and exits 1 when a tag now names another digest.
+"""
+
+import hashlib
+import json
+import pathlib
+import re
+import sys
+import urllib.parse
+import urllib.request
+
+SMOKE_TEST = pathlib.Path(__file__).resolve().parent / "smoke-test-linux.sh"
+PINNED = re.compile(
+    r"(?P<name>[a-z0-9][a-z0-9._/-]*)@sha256:(?P<digest>[0-9a-f]{64})"
+    r"(?P<gap>\s+#\s+)(?P<tag>[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+)(?P<note>[^\n]*)"
+)
+INDEX_TYPES = (
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+)
+
+
+def fetch(url, headers=None):
+    request = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return response.read(), response.headers
+
+
+def resolve(tag):
+    """Return the digest a Docker Hub tag names now and the platforms its index holds."""
+    name, reference = tag.rsplit(":", 1)
+    repository = name if "/" in name else f"library/{name}"
+    query = urllib.parse.urlencode({"service": "registry.docker.io", "scope": f"repository:{repository}:pull"})
+    token = json.loads(fetch(f"https://auth.docker.io/token?{query}")[0])["token"]
+    body, headers = fetch(
+        f"https://registry-1.docker.io/v2/{repository}/manifests/{reference}",
+        {"Authorization": f"Bearer {token}", "Accept": ", ".join(INDEX_TYPES)},
+    )
+    digest = hashlib.sha256(body).hexdigest()
+    if headers.get("Docker-Content-Digest") not in (None, f"sha256:{digest}"):
+        raise SystemExit(f"{tag}: the registry's digest does not match the manifest it sent.")
+    manifest = json.loads(body)
+    if manifest.get("mediaType") not in INDEX_TYPES:
+        raise SystemExit(f"{tag} names a single-platform image, not a multi-architecture index.")
+    platforms = {
+        f"{entry['platform']['os']}/{entry['platform']['architecture']}"
+        for entry in manifest.get("manifests", [])
+        if "platform" in entry
+    }
+    return digest, platforms
+
+
+def main():
+    check = sys.argv[1:] == ["--check"]
+    if sys.argv[1:] not in ([], ["--check"]):
+        raise SystemExit(__doc__)
+    text = SMOKE_TEST.read_text()
+    changed = []
+
+    def refresh(match):
+        name, tag, note = match["name"], match["tag"], match["note"]
+        if tag.rsplit(":", 1)[0] != name:
+            raise SystemExit(f"{name}@sha256:... is commented with another image's tag, {tag}.")
+        digest, platforms = resolve(tag)
+        needed = {"linux/amd64"} if "amd64 only" in note else {"linux/amd64", "linux/arm64"}
+        if not needed <= platforms:
+            raise SystemExit(f"{tag} lacks {', '.join(sorted(needed - platforms))}.")
+        if digest != match["digest"]:
+            changed.append(tag)
+        print(f"{tag}: sha256:{digest}{' (changed)' if digest != match['digest'] else ''}")
+        return f"{name}@sha256:{digest}{match['gap']}{tag}{note}"
+
+    updated, count = PINNED.subn(refresh, text)
+    if count == 0:
+        raise SystemExit(f"No pinned image found in {SMOKE_TEST}.")
+    if check:
+        sys.exit(1 if changed else 0)
+    SMOKE_TEST.write_text(updated)
+
+
+if __name__ == "__main__":
+    main()
