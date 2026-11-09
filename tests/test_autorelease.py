@@ -59,6 +59,7 @@ from autorelease.control import (
     strip_supported_versions_date_presentation,
     transition_event,
     validate_archive,
+    validate_release_assets,
     validate_completed_event_record,
     validate_evidence_attestation_predicate,
     validate_readiness_event_record,
@@ -115,6 +116,44 @@ def run_control(*argv: str) -> tuple[int, str]:
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
         status = control_main(list(argv))
     return status, out.getvalue().strip()
+
+
+# The leading bytes each platform's bin/php starts with: a 64-bit Mach-O for arm64,
+# or a 64-bit ELF with the platform's e_machine.
+PLATFORM_EXECUTABLES = {
+    "macos-aarch64": b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01" + b"\x00" * 24,
+    "linux-x86_64": b"\x7fELF\x02\x01" + b"\x00" * 12 + b"\x3e\x00" + b"\x00" * 12,
+    "linux-aarch64": b"\x7fELF\x02\x01" + b"\x00" * 12 + b"\xb7\x00" + b"\x00" * 12,
+}
+ALL_PLATFORMS = ("macos-aarch64", "linux-x86_64", "linux-aarch64")
+
+
+def release_archive(directory: pathlib.Path, version: str, platform: str, executable: str | None = None,
+                    manifest: bytes | None = None) -> pathlib.Path:
+    """Write one release archive whose bin/php is `executable`'s binary (default: the platform's own)."""
+    archive = directory / f"php-{version}-cli-{platform}.tar.gz"
+    if manifest is None:
+        manifest = json.dumps(
+            {"schemaVersion": 1, "release": version, "phpVersion": version.split("-")[0], "extensions": []}
+        ).encode()
+    with tarfile.open(archive, "w:gz") as handle:
+        for name, body in (("./bin/php", PLATFORM_EXECUTABLES[executable or platform]),
+                           ("./share/php-bin/manifest.json", manifest)):
+            info = tarfile.TarInfo(name)
+            info.size = len(body)
+            handle.addfile(info, io.BytesIO(body))
+    return archive
+
+
+def release_directory(directory: pathlib.Path, version: str, platforms=ALL_PLATFORMS) -> pathlib.Path:
+    """Stage one release: an archive per platform and their canonical SHA256SUMS."""
+    directory.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for platform in sorted(platforms):
+        archive = release_archive(directory, version, platform)
+        lines.append(f"{sha256_file(archive).removeprefix('sha256:')}  {archive.name}\n")
+    (directory / "SHA256SUMS").write_text("".join(sorted(lines, key=lambda line: line.split("  ")[1])))
+    return directory
 
 
 def evidence_manifest(digests: dict[str, str]) -> dict:
@@ -3044,6 +3083,31 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertEqual({"contents": "read"}, build["permissions"])
         self.assertNotIn("environment", build)
         self.assertEqual("preflight", build["needs"])
+        # Every platform builds on its own native runner, and each leg reports its
+        # artifact under its own output names so the legs never overwrite each other.
+        platforms = {"macos-aarch64": "macos-26", "linux-x86_64": "ubuntu-latest", "linux-aarch64": "ubuntu-24.04-arm"}
+        self.assertEqual(
+            platforms, {leg["platform"]: leg["runner"] for leg in build["strategy"]["matrix"]["include"]}
+        )
+        self.assertIs(False, build["strategy"]["fail-fast"])
+        self.assertEqual("${{ matrix.runner }}", build["runs-on"])
+        self.assertEqual(
+            {
+                f"{kind}_{platform.replace('-', '_')}": f"${{{{ steps.report.outputs.{kind}_{platform.replace('-', '_')} }}}}"
+                for platform in platforms
+                for kind in ("artifact_id", "archive_digest")
+            },
+            build["outputs"],
+        )
+        build_names = [step.get("name") for step in build["steps"]]
+        smoke = build["steps"][build_names.index("Smoke test on Linux distributions")]
+        self.assertEqual("startsWith(matrix.platform, 'linux-')", smoke["if"])
+        self.assertIn("./scripts/smoke-test-linux.sh", smoke["run"])
+        # A failing smoke test leaves no artifact for the release job to take.
+        self.assertLess(
+            build_names.index("Smoke test on Linux distributions"),
+            build_names.index("Hand the staged archive to the release job"),
+        )
         token_steps = []
         for _, _, step in (entry for entry in steps if entry[0] == "build"):
             self.assertFalse(str(step.get("uses") or "").startswith("jdx/mise-action@"))
@@ -3069,30 +3133,45 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertEqual("steps.existing.outputs.reuse != 'true'", require["if"])
         self.assertEqual("${{ needs.build.result }}", require["env"]["BUILD_RESULT"])
         self.assertTrue(require["run"].startswith('test "$BUILD_RESULT" = success\n'))
+        for platform in platforms:
+            key = platform.replace("-", "_")
+            self.assertEqual(
+                f"${{{{ needs.build.outputs.artifact_id_{key} }}}}", require["env"][f"{key.upper()}_ID"]
+            )
         download = release["steps"][names.index("Download the isolated build")]
         self.assertEqual(
             {
-                "artifact-ids": "${{ needs.build.outputs.artifact_id }}",
+                "artifact-ids": ",".join(
+                    f"${{{{ needs.build.outputs.artifact_id_{platform.replace('-', '_')} }}}}" for platform in platforms
+                ),
                 "path": ".artifacts",
+                "merge-multiple": True,
                 "digest-mismatch": "error",
             },
             download["with"],
         )
         verify = release["steps"][names.index("Verify the staged bytes the build reported")]
-        self.assertEqual("${{ needs.build.outputs.archive_digest }}", verify["env"]["ARCHIVE_DIGEST"])
-        self.assertEqual("${{ needs.build.outputs.checksums_digest }}", verify["env"]["CHECKSUMS_DIGEST"])
+        for platform in platforms:
+            key = platform.replace("-", "_")
+            self.assertEqual(
+                f"${{{{ needs.build.outputs.archive_digest_{key} }}}}", verify["env"][f"{key.upper()}_DIGEST"]
+            )
+            self.assertIn(f'reported {platform} "${key.upper()}_DIGEST"', verify["run"])
         self.assertIn(
             'test "$(find .artifacts -mindepth 1 -print | LC_ALL=C sort | paste -sd \' \' -)" \\\n'
-            '  = ".artifacts/SHA256SUMS .artifacts/$archive"',
+            '  = ".artifacts/php-$VERSION-cli-linux-aarch64.tar.gz .artifacts/php-$VERSION-cli-linux-x86_64.tar.gz '
+            '.artifacts/php-$VERSION-cli-macos-aarch64.tar.gz"',
             verify["run"],
         )
-        self.assertIn('test "sha256:$archive_hex" = "$ARCHIVE_DIGEST"', verify["run"])
+        # The one SHA256SUMS is written here, over exactly the verified archives.
         self.assertIn(
-            'test "sha256:$(shasum -a 256 .artifacts/SHA256SUMS | awk \'{print $1}\')" = "$CHECKSUMS_DIGEST"',
+            './scripts/validate-autorelease-archive --release-dir .artifacts --version "$VERSION" --write-checksums',
             verify["run"],
         )
-        self.assertIn('grep -Fx "$archive_hex  $archive" .artifacts/SHA256SUMS', verify["run"])
-        self.assertIn("validate-autorelease-archive", verify["run"])
+        # A release this transaction resumes must already be a full one.
+        reconcile = release["steps"][names.index("Reconcile existing immutable release assets")]
+        self.assertIn('--release-dir .artifacts --version "$VERSION"\n', reconcile["run"])
+        self.assertNotIn("--allow-legacy", reconcile["run"])
         self.assertLess(
             names.index("Reconcile existing immutable release assets"),
             names.index("Require the isolated build"),
@@ -3118,10 +3197,20 @@ class AutoreleaseControlTests(unittest.TestCase):
 
         # The built binary runs only in two read-only jobs with no environment, and
         # mise there may not restore a cached binary another job could have saved.
+        # Each runs every platform's archive on that platform's native runner.
         binary_jobs = {job for job, _, step in steps if "mise exec" in (step.get("run") or "")}
         self.assertEqual({"verify-draft", "verify-public"}, binary_jobs)
         for job in binary_jobs:
-            self.assertEqual({"contents": "read"}, jobs[job]["permissions"], job)
+            self.assertEqual(
+                platforms, {leg["platform"]: leg["runner"] for leg in jobs[job]["strategy"]["matrix"]["include"]}, job
+            )
+            self.assertEqual("${{ matrix.runner }}", jobs[job]["runs-on"], job)
+            self.assertEqual("${{ matrix.machine }}", jobs[job]["env"]["MACHINE"], job)
+            self.assertEqual(
+                {"contents": "read"} if job == "verify-draft" else {"contents": "read", "attestations": "read"},
+                jobs[job]["permissions"],
+                job,
+            )
             self.assertNotIn("environment", jobs[job], job)
             self.assertEqual("${{ github.token }}", jobs[job]["env"]["GITHUB_TOKEN"], job)
             mise = [step for step in jobs[job]["steps"] if str(step.get("uses") or "").startswith("jdx/mise-action@")]
@@ -3158,8 +3247,20 @@ class AutoreleaseControlTests(unittest.TestCase):
         handoffs = {
             ("verify-draft", "Download the draft bytes"): "release",
             ("publish", "Download the verified draft transaction"): "release",
+            ("verify-public", "Download the published transaction"): "publish",
             ("finalize", "Download the published transaction"): "publish",
         }
+        # The draft bytes are bound through the transaction digest: every draft
+        # consumer proves the files are exactly the release set the transaction names.
+        for job, name in (("verify-draft", "Verify the draft bytes the release job reported"),
+                          ("publish", "Verify the handed-over transaction")):
+            check = next(step for step in jobs[job]["steps"] if step.get("name") == name)["run"]
+            self.assertIn('./scripts/validate-autorelease-archive --release-dir release-handoff/draft', check, job)
+            self.assertIn('= "$(jq -cS .assetDigests release-handoff/transaction.json)"', check, job)
+        public = next(
+            step for step in jobs["verify-public"]["steps"] if step.get("name") == "Verify the public bytes and their attestation"
+        )["run"]
+        self.assertIn('gh release verify-asset "$VERSION" "$public/$name" --repo "$REPOSITORY"', public)
         for (job, name), producer in handoffs.items():
             names = [step.get("name") for step in jobs[job]["steps"]]
             download = jobs[job]["steps"][names.index(name)]
@@ -3562,60 +3663,86 @@ class AutoreleaseControlTests(unittest.TestCase):
         )
         released_program = (
             '[{kind:"published_immutable_release",version:$version,phpBinCommit:$commit,'
-            'attestationDigest:$attestation,assetDigests:'
-            '{("php-"+$version+"-cli-macos-aarch64.tar.gz"):$archive,"SHA256SUMS":$checksums}}]'
+            'attestationDigest:$attestation,assetDigests:$assets}]'
         )
+        # The digests come from the release check, which reads back a full release or
+        # one published before Linux builds.
+        self.assertIn(
+            './scripts/validate-autorelease-archive --release-dir "$assets" --version "$version" --allow-legacy',
+            recovery,
+        )
+        self.assertIn('--argjson assets "$(jq -c .assetDigests autorelease-plan-download/recovered-assets.json)"', recovery)
         verified_program = '[{kind:"public_release_bytes_reverified",version:$version,modes:["public_download"]}]'
         complete_program = '[{kind:"record_recovered_by_watcher",runId:$runId}]'
         for program in (record_program, released_program, verified_program, complete_program):
             self.assertIn(program, recovery)
 
-        def jq(program, **args):
+        def jq(program, json_args=None, **args):
             argv = ["jq", "-n"]
             for name, value in args.items():
                 argv += ["--arg", name, value]
+            for name, value in (json_args or {}).items():
+                argv += ["--argjson", name, json.dumps(value)]
             return subprocess.run(argv + [program], capture_output=True, text=True, check=True).stdout
 
         version = "8.5.9"
         commit = "c" * 40
-        with tempfile.TemporaryDirectory() as temporary:
-            work = pathlib.Path(temporary)
-            event = work / "recovered-event.json"
-            evidence = work / "recovery-evidence.json"
-            output = work / "recovered-event.next"
-            event.write_text(
-                jq(
-                    record_program,
-                    actionKey=f"new_patch:{version}",
-                    classification="new_patch",
-                    commit=commit,
-                    runId="4242",
-                    evidenceManifestDigest="sha256:" + "d" * 64,
+        for platforms in (ALL_PLATFORMS, ("macos-aarch64",)):
+            with self.subTest(platforms=platforms), tempfile.TemporaryDirectory() as temporary:
+                self._recover_record(
+                    pathlib.Path(temporary), root, recovery, jq, version, commit, platforms,
+                    record_program, released_program, verified_program, complete_program,
                 )
+
+    def _recover_record(self, work, root, recovery, jq, version, commit, platforms,
+                        record_program, released_program, verified_program, complete_program):
+        assets_dir = release_directory(work / "recovered-release", version, platforms)
+        checked = subprocess.run(
+            [str(root / "scripts/validate-autorelease-archive"), "--release-dir", str(assets_dir),
+             "--version", version, "--allow-legacy"],
+            capture_output=True, text=True, check=True,
+        )
+        assets = json.loads(checked.stdout)["assetDigests"]
+        self.assertEqual(len(platforms) + 1, len(assets))
+        event = work / "recovered-event.json"
+        evidence = work / "recovery-evidence.json"
+        output = work / "recovered-event.next"
+        event.write_text(
+            jq(
+                record_program,
+                actionKey=f"new_patch:{version}",
+                classification="new_patch",
+                commit=commit,
+                runId="4242",
+                evidenceManifestDigest="sha256:" + "d" * 64,
             )
-            transitions = (
-                ("released", lambda: jq(
-                    released_program,
-                    version=version,
-                    commit=commit,
-                    archive="sha256:" + "a" * 64,
-                    checksums="sha256:" + "b" * 64,
-                    attestation="sha256:" + "e" * 64,
-                )),
-                ("public_install_verified", lambda: jq(verified_program, version=version)),
-                ("complete", lambda: jq(complete_program, runId="4242")),
+        )
+        transitions = (
+            ("released", lambda: jq(
+                released_program,
+                {"assets": assets},
+                version=version,
+                commit=commit,
+                attestation="sha256:" + "e" * 64,
+            )),
+            ("public_install_verified", lambda: jq(verified_program, version=version)),
+            ("complete", lambda: jq(complete_program, runId="4242")),
+        )
+        for target, build in transitions:
+            self.assertIn(f"--target {target}", recovery)
+            evidence.write_text(build())
+            subprocess.run(
+                [str(root / "scripts/autorelease-event"),
+                 "--event", str(event), "--target", target,
+                 "--evidence", str(evidence), "--output", str(output)],
+                capture_output=True, check=True,
             )
-            for target, build in transitions:
-                self.assertIn(f"--target {target}", recovery)
-                evidence.write_text(build())
-                subprocess.run(
-                    [str(root / "scripts/autorelease-event"),
-                     "--event", str(event), "--target", target,
-                     "--evidence", str(evidence), "--output", str(output)],
-                    capture_output=True, check=True,
-                )
-                output.replace(event)
-            validate_completed_event_record(json.loads(event.read_text()))
+            output.replace(event)
+        record = json.loads(event.read_text())
+        validate_completed_event_record(record)
+        # The record names exactly the assets the release holds, so a later rerun of
+        # the publish run reads it as this release's record.
+        self.assertTrue(release_event_recorded(record, f"new_patch:{version}", version, assets))
 
     def test_assert_admission_checks(self):
         script = str(pathlib.Path(__file__).resolve().parents[1] / "scripts/assert-admission-checks")
@@ -3741,6 +3868,128 @@ class AutoreleaseControlTests(unittest.TestCase):
             self.assertNotEqual(0, moved.returncode)
             self.assertIn("main moved away from", moved.stderr)
             self.assertEqual("", merge_log.read_text())
+
+    def test_release_assets_are_one_archive_per_platform_bound_by_one_checksum_list(self):
+        version = "8.5.12-1"
+        with tempfile.TemporaryDirectory() as temporary:
+            work = pathlib.Path(temporary)
+            full = release_directory(work / "full", version)
+            digests = validate_release_assets(full, version)
+            self.assertEqual(
+                ["SHA256SUMS"] + [f"php-{version}-cli-{platform}.tar.gz" for platform in sorted(ALL_PLATFORMS)],
+                list(digests),
+            )
+            # The checksum list is sorted by file name, one `<hex>  <name>` line each.
+            self.assertEqual(
+                [line.split("  ")[1] for line in (full / "SHA256SUMS").read_text().splitlines()],
+                sorted(name for name in digests if name != "SHA256SUMS"),
+            )
+            # A release from before Linux builds is accepted only where asked for.
+            legacy = release_directory(work / "legacy", version, ("macos-aarch64",))
+            with self.assertRaisesRegex(ControlError, "not exactly the expected set"):
+                validate_release_assets(legacy, version)
+            self.assertEqual(
+                {"SHA256SUMS", f"php-{version}-cli-macos-aarch64.tar.gz"},
+                set(validate_release_assets(legacy, version, allow_legacy=True)),
+            )
+            # A Linux-only or partial set is never a release, legacy or not.
+            partial = release_directory(work / "partial", version, ("macos-aarch64", "linux-x86_64"))
+            with self.assertRaisesRegex(ControlError, "not exactly the expected set"):
+                validate_release_assets(partial, version, allow_legacy=True)
+
+            def broken(name, change):
+                directory = release_directory(work / name, version)
+                change(directory)
+                return directory
+
+            refusals = (
+                (lambda d: (d / "notes.txt").write_text("extra"), "not exactly the expected set"),
+                (lambda d: (d / "SHA256SUMS").write_text((d / "SHA256SUMS").read_text() + "\n"), "does not bind exactly"),
+                (lambda d: (d / "SHA256SUMS").write_text(
+                    "".join(reversed((d / "SHA256SUMS").read_text().splitlines(keepends=True)))), "does not bind exactly"),
+                # An archive named for one platform must hold that platform's binary.
+                (lambda d: release_archive(d, version, "linux-aarch64", executable="linux-x86_64"),
+                 "not a linux-aarch64 executable"),
+                (lambda d: release_archive(d, version, "macos-aarch64", executable="linux-aarch64"),
+                 "not a macos-aarch64 executable"),
+                # Every platform ships the same manifest for this exact release.
+                (lambda d: release_archive(d, version, "linux-x86_64", manifest=json.dumps(
+                    {"schemaVersion": 1, "release": version, "phpVersion": "8.5.12", "extensions": [{"name": "x"}]}
+                ).encode()), "different manifests"),
+                (lambda d: release_archive(d, version, "linux-x86_64", manifest=json.dumps(
+                    {"schemaVersion": 1, "release": "8.5.12", "phpVersion": "8.5.12", "extensions": []}
+                ).encode()), "manifest for another release"),
+            )
+            for index, (change, reason) in enumerate(refusals):
+                with self.subTest(reason=reason, index=index), self.assertRaisesRegex(ControlError, reason):
+                    validate_release_assets(broken(f"broken-{index}", change), version)
+
+    def test_release_checksums_are_written_only_over_exactly_one_archive_per_platform(self):
+        version = "8.4.27"
+        with tempfile.TemporaryDirectory() as temporary:
+            staged = pathlib.Path(temporary) / "staged"
+            staged.mkdir()
+            for platform in ALL_PLATFORMS:
+                release_archive(staged, version, platform)
+            status, output = run_control(
+                "validate-archive", "--release-dir", str(staged), "--version", version, "--write-checksums"
+            )
+            self.assertEqual(0, status)
+            self.assertEqual(validate_release_assets(staged, version), json.loads(output)["assetDigests"])
+            # A second write would replace a list the build did not produce.
+            self.assertEqual(1, run_control(
+                "validate-archive", "--release-dir", str(staged), "--version", version, "--write-checksums")[0])
+            missing = pathlib.Path(temporary) / "missing"
+            missing.mkdir()
+            release_archive(missing, version, "macos-aarch64")
+            self.assertEqual(1, run_control(
+                "validate-archive", "--release-dir", str(missing), "--version", version, "--write-checksums")[0])
+            self.assertFalse((missing / "SHA256SUMS").exists())
+            self.assertEqual(1, run_control(
+                "validate-archive", "--archive", str(missing / f"php-{version}-cli-macos-aarch64.tar.gz"),
+                "--version", version, "--allow-legacy")[0])
+
+    def test_the_staged_release_server_lists_every_asset(self):
+        import socket
+        import time
+        import urllib.request
+
+        version = "8.5.12-1"
+        script = str(ROOT / "scripts/serve-autorelease-artifact")
+        with tempfile.TemporaryDirectory() as temporary:
+            staged = release_directory(pathlib.Path(temporary) / "staged", version)
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+            server = subprocess.Popen([script, "--port", str(port), "--assets", str(staged), "--version", version])
+            try:
+                base = f"http://127.0.0.1:{port}"
+                for _ in range(100):
+                    try:
+                        urllib.request.urlopen(f"{base}/health", timeout=1).read()
+                        break
+                    except OSError:
+                        time.sleep(0.05)
+                release = json.loads(
+                    urllib.request.urlopen(f"{base}/repos/bigpixelrocket/php-bin/releases/tags/{version}").read()
+                )
+                names = [asset["name"] for asset in release["assets"]]
+                self.assertEqual(sorted(validate_release_assets(staged, version)), names)
+                archive = f"php-{version}-cli-linux-aarch64.tar.gz"
+                self.assertEqual(
+                    (staged / archive).read_bytes(), urllib.request.urlopen(f"{base}/assets/{archive}").read()
+                )
+            finally:
+                server.terminate()
+                server.wait(timeout=10)
+            # A staged directory that is not exactly a release is refused before serving.
+            (staged / "extra").write_text("x")
+            refused = subprocess.run(
+                [script, "--port", str(port), "--assets", str(staged), "--version", version],
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(1, refused.returncode)
+            self.assertIn("staged release rejected", refused.stderr)
 
     def test_archive_absolute_member_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -273,12 +273,15 @@ jobs:
           assets=autorelease-plan-download/recovered-release
           mkdir -p "$assets"
           gh release download "$version" --repo "${{ github.repository }}" --dir "$assets" --clobber
-          ./scripts/validate-autorelease-archive \
-            --archive "$assets/php-$version-cli-macos-aarch64.tar.gz" \
-            --version "$version"
-          archive_digest="$(shasum -a 256 "$assets/php-$version-cli-macos-aarch64.tar.gz" | awk '{print $1}')"
-          grep -Fx "$archive_digest  php-$version-cli-macos-aarch64.tar.gz" "$assets/SHA256SUMS"
-          checksums_digest="$(shasum -a 256 "$assets/SHA256SUMS" | awk '{print $1}')"
+          # A release is one archive per platform plus SHA256SUMS; one published before
+          # Linux builds holds only the macOS archive, and stays exactly as published.
+          # Either way the record names the digest of every asset the release holds.
+          ./scripts/validate-autorelease-archive --release-dir "$assets" --version "$version" --allow-legacy \
+            > autorelease-plan-download/recovered-assets.json
+          # The names are exactly the validated release asset names.
+          for name in $(jq -r '.assetDigests | keys[]' autorelease-plan-download/recovered-assets.json); do
+            gh release verify-asset "$version" "$assets/$name" --repo "${{ github.repository }}" > /dev/null
+          done
           # The record states exactly what this run verified: the public release bytes.
           # A fresh install is not reverifiable here, so it is never claimed as evidence.
           jq -n \
@@ -292,10 +295,9 @@ jobs:
           jq -n \
             --arg version "$version" \
             --arg commit "$release_commit" \
-            --arg archive "sha256:$archive_digest" \
-            --arg checksums "sha256:$checksums_digest" \
+            --argjson assets "$(jq -c .assetDigests autorelease-plan-download/recovered-assets.json)" \
             --arg attestation "sha256:$(shasum -a 256 autorelease-plan-download/recovered-attestation.json | awk '{print $1}')" \
-            '[{kind:"published_immutable_release",version:$version,phpBinCommit:$commit,attestationDigest:$attestation,assetDigests:{("php-"+$version+"-cli-macos-aarch64.tar.gz"):$archive,"SHA256SUMS":$checksums}}]' \
+            '[{kind:"published_immutable_release",version:$version,phpBinCommit:$commit,attestationDigest:$attestation,assetDigests:$assets}]' \
             > autorelease-plan-download/recovery-evidence.json
           ./scripts/autorelease-event --event autorelease-plan-download/recovered-event.json --target released \
             --evidence autorelease-plan-download/recovery-evidence.json \

@@ -1,7 +1,9 @@
 name: Upstream canary
 
 # Builds what php-src has tagged but php-bin has not published, straight from each
-# tag, with the release recipe and its module gate (see scripts/select-canary-builds):
+# tag, with the release recipe and its module gate (see scripts/select-canary-builds),
+# on every platform a release publishes, each on its own native runner; a Linux
+# release-mode build also runs the distribution smoke test the release runs:
 # the newest unpublished patch of every maintained branch exactly as its release
 # would build, and the next branch's newest tag, from its first alpha on, the way its
 # new-branch discovery will (an extension that does not compile is left out). php.net
@@ -16,7 +18,9 @@ name: Upstream canary
 # A branch whose module list leaves extensions out is rebuilt with every extension
 # tried. One that compiles again is reported in its own issue, with the lines that
 # change in expected-modules/<branch>.txt; that pull request makes the watcher
-# rebuild the branch with it.
+# rebuild the branch with it. The list serves every platform, so a change is offered
+# as one line only when every platform reports it; otherwise each platform's line
+# is listed apart.
 on:
   schedule:
     - cron: "41 3,15 * * *"
@@ -63,28 +67,39 @@ jobs:
           echo "builds=$builds" >> "$GITHUB_OUTPUT"
 
   canary:
-    name: PHP ${{ matrix.build.version }} from its php-src tag (${{ matrix.build.mode }})
+    name: PHP ${{ matrix.build.version }} from its php-src tag (${{ matrix.build.mode }}, ${{ matrix.platform.name }})
     needs: select
     if: needs.select.outputs.builds != '[]'
-    runs-on: macos-26
+    runs-on: ${{ matrix.platform.runner }}
     # A discovery can take hours; it stops itself before GitHub's six-hour limit.
     timeout-minutes: 350
     strategy:
       fail-fast: false
       matrix:
         build: ${{ fromJSON(needs.select.outputs.builds) }}
+        platform:
+          - name: macos-aarch64
+            runner: macos-26
+          - name: linux-x86_64
+            runner: ubuntu-latest
+          - name: linux-aarch64
+            runner: ubuntu-24.04-arm
     env:
       GITHUB_TOKEN: ${{ github.token }}
       PHP_SOURCE: tag
       VERSION: ${{ matrix.build.version }}
       BRANCH: ${{ matrix.build.branch }}
       MODE: ${{ matrix.build.mode }}
+      PLATFORM: ${{ matrix.platform.name }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - name: Verify runner architecture
-        run: test "$(uname -s)" = Darwin && test "$(uname -m)" = arm64
+      - name: Verify runner platform
+        run: |
+          # shellcheck disable=SC1091
+          source scripts/lib.sh
+          test "$(build_platform)" = "$PLATFORM"
       - name: Install build dependencies
         run: scripts/install-build-deps.sh
       - name: Install pinned StaticPHP
@@ -96,8 +111,8 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: canary/resume
-          key: canary-discovery-${{ matrix.build.mode }}-${{ matrix.build.version }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: canary-discovery-${{ matrix.build.mode }}-${{ matrix.build.version }}-
+          key: canary-discovery-${{ matrix.platform.name }}-${{ matrix.build.mode }}-${{ matrix.build.version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: canary-discovery-${{ matrix.platform.name }}-${{ matrix.build.mode }}-${{ matrix.build.version }}-
       - name: Build and verify
         id: build
         run: |
@@ -123,7 +138,7 @@ jobs:
             # proves nothing, so the report leaves the canary issue as it is.
             mkdir -p canary/resume
             cp canary/modules.txt.pending canary/resume/pending.txt
-            echo "$VERSION ($MODE)" > "canary/incomplete-$BRANCH-$MODE.txt"
+            echo "$VERSION ($MODE, $PLATFORM)" > "canary/incomplete-$BRANCH-$MODE-$PLATFORM.txt"
             echo "save=true" >> "$GITHUB_OUTPUT"
             echo "Discovery for PHP $VERSION needs more than one job; the next canary run resumes it."
             exit 0
@@ -134,17 +149,24 @@ jobs:
             echo "save=true" >> "$GITHUB_OUTPUT"
           fi
           exit "$status"
+      # The release build of a Linux archive must also start and load its modules on
+      # every distribution it promises, as the publish build checks.
+      - name: Smoke test on Linux distributions
+        if: matrix.build.mode == 'release' && startsWith(matrix.platform.name, 'linux-')
+        run: |
+          ARTIFACT_DIR="$PWD/canary/package" scripts/package.sh ".build/$VERSION/s4/buildroot/bin/php" "$VERSION"
+          scripts/smoke-test-linux.sh "canary/package/php-$VERSION-cli-$PLATFORM.tar.gz" "expected-modules/$BRANCH.txt"
       - name: Save the discovery state for the next run
         if: steps.build.outputs.save == 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: canary/resume
-          key: canary-discovery-${{ matrix.build.mode }}-${{ matrix.build.version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: canary-discovery-${{ matrix.platform.name }}-${{ matrix.build.mode }}-${{ matrix.build.version }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Retain an unfinished discovery
         if: hashFiles('canary/incomplete-*.txt') != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: canary-incomplete-${{ matrix.build.branch }}-${{ matrix.build.mode }}
+          name: canary-incomplete-${{ matrix.build.branch }}-${{ matrix.build.mode }}-${{ matrix.platform.name }}
           path: canary/incomplete-*.txt
           if-no-files-found: error
           retention-days: 30
@@ -167,13 +189,13 @@ jobs:
             add="$(paste -sd, - < canary/adds.txt | sed 's/,/, /g')"
             echo "Left out of PHP $BRANCH but compiling again: $(paste -sd, - < canary/compiles.txt)"
             echo "expected-modules/$BRANCH.txt: remove ${remove}; add ${add:-no line}" \
-              > "canary/compiles-again-$BRANCH.txt"
+              > "canary/compiles-again-$BRANCH-$PLATFORM.txt"
           fi
       - name: Retain left-out extensions that compile again
         if: matrix.build.mode == 'recheck' && hashFiles('canary/compiles-again-*.txt') != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: canary-compiles-again-${{ matrix.build.branch }}
+          name: canary-compiles-again-${{ matrix.build.branch }}-${{ matrix.platform.name }}
           path: canary/compiles-again-*.txt
           if-no-files-found: error
           retention-days: 30
@@ -212,7 +234,24 @@ jobs:
       - name: Report left-out extensions that compile again
         run: |
           title="Upstream canary: a left-out PHP extension compiles again"
-          found="$(cat compiles-again/*.txt 2> /dev/null | LC_ALL=C sort || true)"
+          # One branch list serves every platform: a branch whose three platforms all
+          # report the same change gets that one line, and any other gets each
+          # platform's own line, to be applied only where every platform agrees.
+          found=""
+          for branch in $(find compiles-again -name 'compiles-again-*.txt' 2> /dev/null \
+            | sed -E 's#^.*/compiles-again-(.*)-(macos-aarch64|linux-x86_64|linux-aarch64)\.txt$#\1#' | LC_ALL=C sort -u); do
+            files=(compiles-again/compiles-again-"$branch"-*.txt)
+            lines="$(cat "${files[@]}" | LC_ALL=C sort -u)"
+            if [[ "${#files[@]}" == 3 && "$lines" != *$'\n'* ]]; then
+              found+="$lines"$'\n'
+            else
+              for file in "${files[@]}"; do
+                platform="${file##*/compiles-again-"$branch"-}"
+                found+="${platform%.txt} reports: $(cat "$file")"$'\n'
+              done
+            fi
+          done
+          found="${found%$'\n'}"
           number="$(gh issue list --repo "$REPOSITORY" --state open --search "\"$title\" in:title" --json number,title \
             | jq -r --arg title "$title" 'map(select(.title == $title)) | .[0].number // empty')"
           if [[ -n "$found" ]]; then

@@ -1,6 +1,7 @@
 # php-bin
 
-Reproducible, fat static PHP CLI binaries for Apple Silicon Macs.
+Reproducible, fat static PHP CLI binaries for Apple Silicon Macs and glibc
+Linux on x86_64 and aarch64.
 
 This repository owns the build recipe and release contract consumed by
 [`bigpixelrocket/mise-php`](https://github.com/bigpixelrocket/mise-php). It does
@@ -24,12 +25,19 @@ release, and whether php-bin is current; its shape is
 A dashboard should read that document and alert when its `checkedAt` is older
 than about 24 hours. A newly maintained branch needs its badge added here.
 
-Public macOS arm64 releases are available for every maintained PHP branch. See
+Public releases for macOS arm64, Linux x86_64, and Linux aarch64 are available
+for every maintained PHP branch. See
 [the releases page](https://github.com/bigpixelrocket/php-bin/releases) for the
 current set; it is published automatically, so any list repeated here would go
-stale on the next patch. Each release is rebuilt on macOS 26 arm64 and
-published only after its exact module baseline and deployment target checks
-pass.
+stale on the next patch. Each release builds every platform on its own native
+runner (macOS 26 arm64, Ubuntu x86_64, Ubuntu arm64) and is published only after
+every platform passes its exact module baseline and platform checks, and each
+Linux archive passes the distribution smoke test. A failure on any platform
+publishes nothing.
+
+The Linux archives need glibc 2.17 or newer. Every release is smoke-tested on
+Fedora, Ubuntu 16.04 and current, Debian stable, Gentoo, and, on x86_64, Arch
+Linux. musl distributions such as Alpine, and NixOS, are not supported.
 
 ## Autorelease
 
@@ -45,14 +53,24 @@ pause control, and maintainer commands.
 ## Release contract
 
 Published releases use a PHP version tag such as `8.4.5`, or `8.4.5-1` for a
-recipe-only rebuild. Each release contains:
+recipe-only rebuild. Each release contains one archive per platform and one
+checksum file:
 
 ```text
 php-<tag>-cli-macos-aarch64.tar.gz
+php-<tag>-cli-linux-x86_64.tar.gz
+php-<tag>-cli-linux-aarch64.tar.gz
 SHA256SUMS
 ```
 
-The archive layout is stable:
+`SHA256SUMS` holds one `<sha256>  <filename>` line per archive, sorted by file
+name. Releases published before Linux builds contain only the macOS archive and
+its one checksum line; they stay as published, so an exact version from before
+then installs on macOS only, and a branch shorthand on Linux resolves to the
+newest release that has a Linux archive.
+
+The archive layout is stable and identical on every platform, with the same
+`share/php-bin/manifest.json`:
 
 ```text
 bin/php                          static CLI binary
@@ -181,12 +199,13 @@ the next run. Older patch versions keep their original binaries.
 For a new branch such as PHP `8.6`:
 
 The watcher adds the branch to `support-policy.json` and writes
-`expected-modules/<branch>.txt` from a discovery build: whatever builds on the
-new branch, with a `!<extension>` line for each optional extension that does
-not compile there yet and was left out. `mise-php` regenerates its support
-snapshot from the new policy. The branch merges only after its first release
-builds and passes the exact module comparison against that list, and every
-later release of the branch is held to the same list. The upstream canary
+`expected-modules/<branch>.txt` from a discovery build on every platform:
+whatever builds on the new branch, with a `!<extension>` line for each optional
+extension that does not compile there yet on any platform and was left out
+everywhere. `mise-php` regenerates its support snapshot from the new policy. The
+branch merges only after its first release builds on every platform and passes
+the exact module comparison against that list, and every later release of the
+branch is held to the same list. The upstream canary
 reports when a left-out extension compiles again, with the list edit that
 adds it back by pull request. Publication waits for readiness
 records tied to the same action key, evidence digests, php-bin policy commit,

@@ -5,9 +5,13 @@ import argparse
 import json
 import pathlib
 import signal
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from autorelease.control import ControlError, validate_release_assets  # noqa: E402
 
 
 parser = argparse.ArgumentParser()
@@ -16,7 +20,13 @@ parser.add_argument("--assets", required=True, type=pathlib.Path)
 parser.add_argument("--version", required=True)
 args = parser.parse_args()
 assets = args.assets.resolve()
-archive_name = f"php-{args.version}-cli-macos-aarch64.tar.gz"
+# The staged release is served only once it is exactly a release: one archive per
+# platform and the SHA256SUMS binding them, so mise-php picks its platform's archive
+# from the same listing GitHub will publish.
+try:
+    asset_names = sorted(validate_release_assets(assets, args.version))
+except ControlError as error:
+    parser.exit(1, f"staged release rejected: {error}\n")
 
 
 def payload() -> dict:
@@ -25,10 +35,7 @@ def payload() -> dict:
         "tag_name": args.version,
         "draft": False,
         "prerelease": False,
-        "assets": [
-            {"name": archive_name, "browser_download_url": f"{base}/{archive_name}"},
-            {"name": "SHA256SUMS", "browser_download_url": f"{base}/SHA256SUMS"},
-        ],
+        "assets": [{"name": name, "browser_download_url": f"{base}/{name}"} for name in asset_names],
     }
 
 
@@ -43,7 +50,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(payload())
         if path.startswith("/assets/"):
             name = path.removeprefix("/assets/")
-            if name not in {archive_name, "SHA256SUMS"}:
+            if name not in asset_names:
                 return self.send_error(404)
             candidate = assets / name
             if not candidate.is_file():

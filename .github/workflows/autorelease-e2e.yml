@@ -180,16 +180,30 @@ jobs:
 
   # The canary runs a published binary, so it holds no environment and a token that
   # can only read contents; the token authenticates the plugin's GitHub API reads,
-  # which anonymous shared runners lose to rate limits.
+  # which anonymous shared runners lose to rate limits. Every platform installs on its
+  # own native runner. A release from before Linux builds holds only the macOS
+  # archive, so a Linux leg passes without installing only for exactly that shape.
   live-canary:
+    name: live-canary (${{ matrix.platform }})
     needs: preflight
     if: inputs.suite == 'live-canary'
-    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-aarch64
+            runner: macos-26
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     permissions:
       contents: read
     env:
       GITHUB_TOKEN: ${{ github.token }}
+      PLATFORM: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -204,6 +218,13 @@ jobs:
         env:
           LIVE_VERSION: ${{ needs.preflight.outputs.live_version }}
         run: |
+          assets="$(gh release view "$LIVE_VERSION" --repo bigpixelrocket/php-bin --json assets \
+            --jq '[.assets[].name] | sort | join(" ")')"
+          if [[ "$PLATFORM" != macos-aarch64 \
+            && "$assets" == "SHA256SUMS php-$LIVE_VERSION-cli-macos-aarch64.tar.gz" ]]; then
+            echo "PHP $LIVE_VERSION was published before Linux builds; nothing installs on $PLATFORM."
+            exit 0
+          fi
           branch="$LIVE_VERSION"
           branch="${branch%%-*}"
           branch="${branch%.*}"

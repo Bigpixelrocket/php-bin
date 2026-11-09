@@ -249,6 +249,30 @@ remove_unconfigurable_extension_dirs() {
   done
 }
 
+# Apply this branch's php-src patches from patches/php-src/<branch>/, in name
+# order, before StaticPHP runs buildconf, so a patch to build/*.m4 reaches
+# configure. Each is a backport of an upstream php-src commit that a branch
+# released before it needs; every other branch has no directory and applies
+# nothing. A patch already in the source, as when StaticPHP reuses an extracted
+# tree, is left as it is; one that does not apply stops the build.
+apply_php_src_patches() {
+  local patch_dir="$PROJECT_ROOT/patches/php-src/$PHP_MINOR" file
+
+  [[ -d "$patch_dir" ]] || return 0
+  for file in "$patch_dir"/*.patch; do
+    [[ -f "$file" ]] || continue
+    if (cd source/php-src && patch -p1 --dry-run --silent --force --reverse < "$file") > /dev/null 2>&1; then
+      echo "php-src patch ${file#"$PROJECT_ROOT/"} is already applied."
+      continue
+    fi
+    if ! (cd source/php-src && patch -p1 --forward --silent --force < "$file"); then
+      echo "php-src patch ${file#"$PROJECT_ROOT/"} does not apply to PHP $PHP_VERSION." >&2
+      return 1
+    fi
+    echo "Applied php-src patch ${file#"$PROJECT_ROOT/"}."
+  done
+}
+
 # StaticPHP's default micro patch list for this platform; an SPC_MICRO_PATCHES
 # already in the environment replaces it. Only the CLI is built, but the patches
 # still touch php-src (macos_iconv fixes iconv detection against the bundled
@@ -386,8 +410,9 @@ replace_links_into_source() {
 # libde265, the HEIC decoder imagick uses, picks AVX2 and AVX-512 kernels with
 # __builtin_cpu_supports, which needs GCC's or LLVM's CPU-detection runtime;
 # zig's runtime has none, so the library cannot link. Defining both builtins away
-# leaves the SSE4.1 kernels in use on every x86_64 CPU and never runs an AVX
-# instruction. The definitions hold no spaces because StaticPHP's zig wrapper
+# means no AVX instruction ever runs. The SSE4.1 kernels are chosen at runtime
+# from cpuid, so a CPU with SSE4.1 uses them and an older x86_64 CPU uses the
+# plain C kernels. The definitions hold no spaces because StaticPHP's zig wrapper
 # splits SPC_COMPILER_EXTRA on them.
 build_libraries_alone() {
   local extensions=",$EXTENSIONS,${SHARED_EXTENSIONS:+$SHARED_EXTENSIONS,}"
@@ -420,6 +445,7 @@ run_staticphp() {
     && { [[ "$PLATFORM" != linux-* ]] || build_libraries_alone; } \
     && "$SPC_BIN" extract php-src,micro \
     && remove_unconfigurable_extension_dirs \
+    && apply_php_src_patches \
     && micro_patches="$(resolve_micro_patches)" \
     && echo "Micro patches: ${micro_patches:-none}" \
     && SPC_MICRO_PATCHES="$micro_patches" "$SPC_BIN" craft craft-build.yml
@@ -546,11 +572,6 @@ verify_linux_elf() {
   ' | LC_ALL=C sort -u)
 }
 
-# Print the dynamic symbols an ELF file defines, one per line, without versions.
-elf_defined_symbols() {
-  readelf --dyn-syms -W "$1" | awk '$7 != "UND" && $8 != "" { sub(/@.*/, "", $8); print $8 }'
-}
-
 # Fail unless every unversioned symbol a Linux shared extension leaves undefined
 # is defined by bin/php or by a shared extension it requires. A shared object may
 # link with undefined symbols, so a call to a glibc function newer than the
@@ -566,8 +587,7 @@ verify_linux_symbols_resolve() {
     fi
   done
   missing="$(comm -23 \
-    <(readelf --dyn-syms -W "$so_file" \
-      | awk '$7 == "UND" && $5 != "WEAK" && $8 != "" && $8 !~ /@/ { print $8 }' | LC_ALL=C sort -u) \
+    <(elf_required_symbols "$so_file" | LC_ALL=C sort -u) \
     <(LC_ALL=C sort -u "$provided"))"
   if [[ -n "$missing" ]]; then
     echo "$label needs symbols neither bin/php nor its required extensions define, such as glibc functions newer than $LINUX_GLIBC_BASELINE:" >&2

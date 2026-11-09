@@ -130,14 +130,42 @@ def _archive_member_name(name: str) -> str:
     return name[2:] if name.startswith("./") else name
 
 
-def validate_archive(archive: pathlib.Path, version: str) -> None:
-    require(archive.name == f"php-{version}-cli-macos-aarch64.tar.gz", "unexpected archive name")
+# Every release publishes one archive per platform, named as `scripts/lib.sh`
+# `build_platform` spells the platform, and mise-php selects its archive by that
+# name. Each platform maps to the leading bytes its `bin/php` must start with: a
+# 64-bit little-endian Mach-O for arm64, or a 64-bit little-endian ELF and its
+# e_machine (offset 18) for Linux.
+RELEASE_PLATFORMS = ("macos-aarch64", "linux-x86_64", "linux-aarch64")
+_PLATFORM_EXECUTABLE_HEADERS = {
+    "macos-aarch64": ((0, b"\xcf\xfa\xed\xfe"), (4, b"\x0c\x00\x00\x01")),
+    "linux-x86_64": ((0, b"\x7fELF\x02\x01"), (18, b"\x3e\x00")),
+    "linux-aarch64": ((0, b"\x7fELF\x02\x01"), (18, b"\xb7\x00")),
+}
+# Releases published before Linux builds carry only the macOS archive. They stay
+# immutable, so the code that reads a published release back accepts this set too;
+# nothing that creates a release does.
+LEGACY_RELEASE_PLATFORMS = ("macos-aarch64",)
+
+
+def release_archive_name(version: str, platform: str) -> str:
+    require(platform in RELEASE_PLATFORMS, f"unknown release platform: {platform}")
+    return f"php-{version}-cli-{platform}.tar.gz"
+
+
+def _archive_platform(archive: pathlib.Path, version: str) -> str:
+    for platform in RELEASE_PLATFORMS:
+        if archive.name == release_archive_name(version, platform):
+            return platform
+    raise ControlError("unexpected archive name")
+
+
+def _archive_members(archive: pathlib.Path) -> dict[str, tarfile.TarInfo]:
     try:
         with tarfile.open(archive, "r:gz") as handle:
             members = handle.getmembers()
     except tarfile.TarError as error:
         raise ControlError(f"cannot read archive {archive}: {error}") from error
-    names = set()
+    names: dict[str, tarfile.TarInfo] = {}
     for member in members:
         normalized = pathlib.PurePosixPath(_archive_member_name(member.name))
         require(
@@ -147,5 +175,89 @@ def validate_archive(archive: pathlib.Path, version: str) -> None:
             f"unsafe archive path: {member.name}",
         )
         require(not member.issym() and not member.islnk(), "archive contains a link")
-        names.add(normalized.as_posix())
-    require("bin/php" in names, "archive does not contain bin/php")
+        names[normalized.as_posix()] = member
+    return names
+
+
+def _read_member(archive: pathlib.Path, member: tarfile.TarInfo, limit: int | None = None) -> bytes:
+    try:
+        with tarfile.open(archive, "r:gz") as handle:
+            stream = handle.extractfile(member)
+            require(stream is not None, f"archive member is not a file: {member.name}")
+            return stream.read() if limit is None else stream.read(limit)
+    except tarfile.TarError as error:
+        raise ControlError(f"cannot read archive {archive}: {error}") from error
+
+
+def validate_archive(archive: pathlib.Path, version: str) -> None:
+    """Reject an archive that is not one safe release archive of `version`.
+
+    The name must be one platform's archive name, every member must stay inside the
+    archive without links, and `bin/php` must be an executable for that platform, so
+    an archive can never be published under another platform's name.
+    """
+    platform = _archive_platform(archive, version)
+    members = _archive_members(archive)
+    require("bin/php" in members, "archive does not contain bin/php")
+    header = _read_member(archive, members["bin/php"], 32)
+    require(
+        all(header[offset : offset + len(expected)] == expected for offset, expected in _PLATFORM_EXECUTABLE_HEADERS[platform]),
+        f"bin/php is not a {platform} executable",
+    )
+
+
+def _archive_manifest(archive: pathlib.Path, version: str) -> bytes:
+    members = _archive_members(archive)
+    require("share/php-bin/manifest.json" in members, f"{archive.name} has no share/php-bin/manifest.json")
+    body = _read_member(archive, members["share/php-bin/manifest.json"])
+    try:
+        manifest = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ControlError(f"{archive.name} has an unreadable manifest: {error}") from error
+    require(
+        isinstance(manifest, dict)
+        and manifest.get("schemaVersion") == 1
+        and manifest.get("release") == version
+        and manifest.get("phpVersion") == version.split("-", 1)[0]
+        and isinstance(manifest.get("extensions"), list),
+        f"{archive.name} has a manifest for another release or schema",
+    )
+    return body
+
+
+def release_checksums(directory: pathlib.Path, names: Iterable[str]) -> bytes:
+    """Return the canonical SHA256SUMS for `names`: one `<hex>  <name>` line each, sorted by name."""
+    lines = [f"{sha256_file(directory / name).removeprefix('sha256:')}  {name}\n" for name in sorted(names)]
+    return "".join(lines).encode()
+
+
+def validate_release_assets(directory: pathlib.Path, version: str, allow_legacy: bool = False) -> dict[str, str]:
+    """Return the digest of every asset of one release staged in `directory`.
+
+    A release is exactly one archive per platform plus SHA256SUMS, nothing else. Every
+    archive passes `validate_archive`, carries the same `share/php-bin/manifest.json`,
+    and SHA256SUMS is byte for byte the canonical listing of the archives. With
+    `allow_legacy`, a published macOS-only release from before Linux builds is accepted
+    too, checked as it was published: its archive and its one checksum line.
+    """
+    require(bool(STABLE_VERSION_RE.fullmatch(version or "")), f"release version is invalid: {version}")
+    require(directory.is_dir(), f"release assets directory is missing: {directory}")
+    present = sorted(path.name for path in directory.iterdir())
+    full = [release_archive_name(version, platform) for platform in RELEASE_PLATFORMS]
+    legacy = [release_archive_name(version, platform) for platform in LEGACY_RELEASE_PLATFORMS]
+    if present == sorted([*full, "SHA256SUMS"]):
+        archives = full
+    elif allow_legacy and present == sorted([*legacy, "SHA256SUMS"]):
+        archives = legacy
+    else:
+        raise ControlError(f"release {version} assets are not exactly the expected set: {', '.join(present) or 'none'}")
+    for name in archives:
+        require((directory / name).is_file(), f"release asset is not a file: {name}")
+        validate_archive(directory / name, version)
+    if archives == full:
+        manifests = {_archive_manifest(directory / name, version) for name in archives}
+        require(len(manifests) == 1, "the release archives carry different manifests")
+    checksums = directory / "SHA256SUMS"
+    require(checksums.is_file(), "SHA256SUMS is not a file")
+    require(checksums.read_bytes() == release_checksums(directory, archives), "SHA256SUMS does not bind exactly the release archives")
+    return {name: sha256_file(directory / name) for name in sorted([*archives, "SHA256SUMS"])}

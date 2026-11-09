@@ -21,7 +21,7 @@ from autorelease.control import (  # noqa: E402
     release_recipe_identity,
     release_transition,
     sha256_file,
-    validate_archive,
+    validate_release_assets,
     write_json,
 )
 
@@ -38,15 +38,10 @@ def gh(*arguments: str, capture: bool = True) -> str:
 
 
 def expected_assets(directory: pathlib.Path, version: str) -> dict[str, str]:
-    archive = directory / f"php-{version}-cli-macos-aarch64.tar.gz"
-    checksums = directory / "SHA256SUMS"
-    validate_archive(archive, version)
-    if not checksums.is_file():
-        raise ControlError("SHA256SUMS is missing")
-    expected_line = f"{sha256_file(archive).removeprefix('sha256:')}  {archive.name}"
-    if expected_line not in checksums.read_text().splitlines():
-        raise ControlError("SHA256SUMS does not bind the staged archive")
-    return {archive.name: sha256_file(archive), "SHA256SUMS": sha256_file(checksums)}
+    # A transaction only ever creates a full release: one archive per platform and
+    # the SHA256SUMS that binds them. The macOS-only shape of older releases is
+    # accepted only where a published release is read back, never here.
+    return validate_release_assets(directory, version)
 
 
 def github_effect(
@@ -72,7 +67,7 @@ def github_effect(
                 {
                     "tag": version,
                     "message": (
-                        f"PHP {version} for macOS arm64\n\n"
+                        f"PHP {version}\n\n"
                         + "\n".join(f"{name}: {digest}" for name, digest in sorted(digests.items()))
                     ),
                     "object": commit,
@@ -139,7 +134,7 @@ def github_effect(
                 "--repo",
                 repo,
                 "--title",
-                f"PHP {version} for macOS arm64",
+                f"PHP {version}",
                 "--notes",
                 notes,
                 "--draft",

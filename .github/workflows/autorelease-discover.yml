@@ -1,19 +1,24 @@
 name: Autorelease module discovery pass
 
 # One pass of a new branch's module discovery (DISCOVER_MODULE_LIST in
-# scripts/build.sh): every stage extension is tried, and one that does not compile is
-# left out and named with a `!` line. autorelease-implement.yml calls this up to three
-# times, so a discovery longer than one job's time limit resumes from what the last
-# pass left out. Read-only like every build: StaticPHP and the built binary never see
-# a write token. A pass with nothing to do runs as a no-op on Linux, because a
-# skipped job would skip every job after it, even through the ones that ran.
+# scripts/build.sh) on every platform it names: every stage extension is tried, and
+# one that does not compile is left out and named with a `!` line. Each platform
+# discovers on its own native runner, because a release publishes every platform
+# from one module list. autorelease-implement.yml calls this up to three times, so a
+# discovery longer than one job's time limit resumes from what the last pass left
+# out, and once more as the `reconcile` pass, which rebuilds a platform with the
+# extensions any platform left out (the union) so every platform reports the list
+# for the same set. Read-only like every build: StaticPHP and the built binary never
+# see a write token. A platform this pass has nothing to do for runs as a no-op on
+# Linux, because a skipped job would skip every job after it, even through the ones
+# that ran.
 on:
   workflow_call:
     inputs:
-      needed:
-        description: Whether this pass has discovery to do
+      platforms:
+        description: JSON array of the platforms this pass discovers on, possibly empty
         required: true
-        type: boolean
+        type: string
       base_sha:
         description: Exact admitted php-bin base commit
         required: true
@@ -23,7 +28,7 @@ on:
         required: true
         type: string
       pass:
-        description: Pass number, 1 for the first
+        description: Pass number, 1 for the first, or reconcile
         required: true
         type: string
       final:
@@ -32,8 +37,8 @@ on:
         type: boolean
     outputs:
       pending:
-        description: "'true' when the pass reached its deadline and the next one resumes it"
-        value: ${{ jobs.discover.outputs.pending }}
+        description: JSON array of the platforms that reached the deadline, which the next pass resumes
+        value: ${{ jobs.collect.outputs.pending }}
 
 permissions:
   contents: read
@@ -44,48 +49,70 @@ defaults:
 
 jobs:
   discover:
-    name: Discover what the new branch builds (pass ${{ inputs.pass }})
-    runs-on: ${{ inputs.needed && 'macos-26' || 'ubuntu-latest' }}
+    name: Discover what the new branch builds on ${{ matrix.platform }} (pass ${{ inputs.pass }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-aarch64
+            runner: macos-26
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ contains(fromJSON(inputs.platforms), matrix.platform) && matrix.runner || 'ubuntu-latest' }}
     # GitHub stops a hosted job at six hours; the pass stops itself well before.
     timeout-minutes: 350
     permissions:
       contents: read
     outputs:
-      pending: ${{ steps.build.outputs.pending }}
+      pending_macos_aarch64: ${{ steps.build.outputs.pending_macos_aarch64 }}
+      pending_linux_x86_64: ${{ steps.build.outputs.pending_linux_x86_64 }}
+      pending_linux_aarch64: ${{ steps.build.outputs.pending_linux_aarch64 }}
     env:
       VERSION: ${{ inputs.version }}
       PASS: ${{ inputs.pass }}
       FINAL: ${{ inputs.final }}
+      PLATFORM: ${{ matrix.platform }}
+      NEEDED: ${{ contains(fromJSON(inputs.platforms), matrix.platform) }}
     steps:
       - name: Nothing to discover
-        if: ${{ !inputs.needed }}
-        run: echo "This pass has no discovery to do."
+        if: env.NEEDED != 'true'
+        run: echo "This pass has no discovery to do on $PLATFORM."
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        if: inputs.needed
+        if: env.NEEDED == 'true'
         with:
           ref: ${{ inputs.base_sha }}
           persist-credentials: false
       - name: Verify runner and inputs
-        if: inputs.needed
+        if: env.NEEDED == 'true'
         run: |
-          test "$(uname -s)" = Darwin && test "$(uname -m)" = arm64
+          # shellcheck disable=SC1091
+          source scripts/lib.sh
+          test "$(build_platform)" = "$PLATFORM"
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          [[ "$PASS" =~ ^[1-9]$ ]]
+          [[ "$PASS" =~ ^([1-9]|reconcile)$ ]]
       - name: Download what the previous pass left out
-        if: inputs.needed && inputs.pass != '1'
+        if: env.NEEDED == 'true' && inputs.pass != '1' && inputs.pass != 'reconcile'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: discovery-pending-${{ github.run_id }}-${{ inputs.pass }}
+          name: discovery-pending-${{ github.run_id }}-${{ inputs.pass }}-${{ matrix.platform }}
+          path: ${{ runner.temp }}/resume
+      - name: Download what any platform left out
+        if: env.NEEDED == 'true' && inputs.pass == 'reconcile'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: discovery-union-${{ github.run_id }}
           path: ${{ runner.temp }}/resume
       - name: Install build dependencies
-        if: inputs.needed
+        if: env.NEEDED == 'true'
         run: ./scripts/install-build-deps.sh
       - name: Install pinned StaticPHP
-        if: inputs.needed
+        if: env.NEEDED == 'true'
         run: ./scripts/install-spc.sh
       - name: Build, leaving out extensions that do not compile
         id: build
-        if: inputs.needed
+        if: env.NEEDED == 'true'
         env:
           # StaticPHP authenticates GitHub API calls only through this variable.
           GITHUB_TOKEN: ${{ github.token }}
@@ -103,7 +130,10 @@ jobs:
           set -e
           if [[ "$status" == "75" && "$FINAL" != "true" ]]; then
             cp discovered/modules.txt.pending pending/pending.txt
-            echo "pending=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "pending=true"
+              echo "pending_${PLATFORM//-/_}=true"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [[ "$status" == "75" ]]; then
@@ -114,15 +144,40 @@ jobs:
         if: steps.build.outputs.pending == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: discovery-pending-${{ github.run_id }}-${{ inputs.pass == '1' && '2' || '3' }}
+          name: discovery-pending-${{ github.run_id }}-${{ inputs.pass == '1' && '2' || '3' }}-${{ matrix.platform }}
           path: pending/pending.txt
           if-no-files-found: error
           retention-days: 7
       - name: Retain the discovered module list
-        if: inputs.needed && steps.build.outputs.pending != 'true'
+        if: env.NEEDED == 'true' && steps.build.outputs.pending != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: discovered-modules-${{ github.run_id }}
+          name: ${{ inputs.pass == 'reconcile' && 'reconciled' || 'discovered' }}-modules-${{ github.run_id }}-${{ matrix.platform }}
           path: discovered/modules.txt
           if-no-files-found: error
           retention-days: 90
+
+  # The platforms that reached the deadline, as the JSON array the next pass takes.
+  collect:
+    name: Collect the platforms the next pass resumes (pass ${{ inputs.pass }})
+    needs: discover
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      pending: ${{ steps.collect.outputs.pending }}
+    steps:
+      - name: Collect pending platforms
+        id: collect
+        env:
+          MACOS_AARCH64: ${{ needs.discover.outputs.pending_macos_aarch64 }}
+          LINUX_X86_64: ${{ needs.discover.outputs.pending_linux_x86_64 }}
+          LINUX_AARCH64: ${{ needs.discover.outputs.pending_linux_aarch64 }}
+        run: |
+          pending=()
+          [[ "$MACOS_AARCH64" != "true" ]] || pending+=(macos-aarch64)
+          [[ "$LINUX_X86_64" != "true" ]] || pending+=(linux-x86_64)
+          [[ "$LINUX_AARCH64" != "true" ]] || pending+=(linux-aarch64)
+          json="$(printf '%s\n' "${pending[@]}" | jq -R . | jq -cs 'map(select(length > 0))')"
+          echo "Pending platforms: $json"
+          echo "pending=$json" >> "$GITHUB_OUTPUT"

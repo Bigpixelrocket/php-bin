@@ -135,6 +135,8 @@ from autorelease._validation import (  # noqa: E402
     PROTECTED_PATHS,
     PROTECTED_PATTERNS,
     ROOT,
+    LEGACY_RELEASE_PLATFORMS,
+    RELEASE_PLATFORMS,
     SECRET_PATTERNS,
     SHA256_RE,
     STABLE_VERSION_RE,
@@ -145,12 +147,15 @@ from autorelease._validation import (  # noqa: E402
     load_json,
     path_is_allowed,
     path_is_protected,
+    release_archive_name,
+    release_checksums,
     require,
     resolve_json_pointer,
     sha256_bytes,
     sha256_file,
     utc_now,
     validate_archive,
+    validate_release_assets,
     write_json,
 )
 
@@ -378,9 +383,16 @@ def main(argv: list[str] | None = None) -> int:
     filename_parser.add_argument("action_key")
     filename_parser.add_argument("--suffix", default=".json")
 
+    # One archive, or with --release-dir every asset of one release: exactly one
+    # archive per platform plus their canonical SHA256SUMS, which --write-checksums
+    # first writes. --allow-legacy also accepts a published macOS-only release.
     archive_parser = subparsers.add_parser("validate-archive")
-    archive_parser.add_argument("--archive", required=True, type=pathlib.Path)
+    archive_target = archive_parser.add_mutually_exclusive_group(required=True)
+    archive_target.add_argument("--archive", type=pathlib.Path)
+    archive_target.add_argument("--release-dir", type=pathlib.Path)
     archive_parser.add_argument("--version", required=True)
+    archive_parser.add_argument("--allow-legacy", action="store_true")
+    archive_parser.add_argument("--write-checksums", action="store_true")
 
     email_parser = subparsers.add_parser("email-digest")
     email_parser.add_argument("--workflow", required=True)
@@ -497,8 +509,23 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "action-filename":
             print(action_filename(args.action_key, args.suffix))
         elif args.command == "validate-archive":
-            validate_archive(args.archive, args.version)
-            print(json.dumps({"valid": True}))
+            if args.archive is not None:
+                require(
+                    not args.allow_legacy and not args.write_checksums,
+                    "--allow-legacy and --write-checksums apply only to --release-dir",
+                )
+                validate_archive(args.archive, args.version)
+                print(json.dumps({"valid": True}))
+            else:
+                if args.write_checksums:
+                    require(not args.allow_legacy, "a new release is never written as a legacy release")
+                    require(bool(STABLE_VERSION_RE.fullmatch(args.version)), f"release version is invalid: {args.version}")
+                    archives = [release_archive_name(args.version, platform) for platform in RELEASE_PLATFORMS]
+                    present = sorted(path.name for path in args.release_dir.iterdir())
+                    require(present == sorted(archives), "checksums are written only over exactly one archive per platform")
+                    (args.release_dir / "SHA256SUMS").write_bytes(release_checksums(args.release_dir, archives))
+                digests = validate_release_assets(args.release_dir, args.version, args.allow_legacy)
+                print(json.dumps({"valid": True, "assetDigests": digests}, sort_keys=True))
         elif args.command == "email-digest":
             report = {
                 "workflow": args.workflow,

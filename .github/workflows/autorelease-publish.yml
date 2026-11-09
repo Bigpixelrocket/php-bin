@@ -72,34 +72,53 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   # StaticPHP resolves most sources through the GitHub API, which rate limits
-  # anonymous calls from shared macOS runners, and it runs third-party build
-  # scripts. The build therefore runs here, on its own runner with a read-only
+  # anonymous calls from shared runners, and it runs third-party build scripts.
+  # Each platform therefore builds here, on its own native runner with a read-only
   # token, so the release job's write token never shares a process, an
-  # environment, or a disk with it. The release job accepts only this job's
-  # artifact, by ID, service digest, and the file digests reported below.
+  # environment, or a disk with it. The release job accepts only these legs'
+  # artifacts, by ID, service digest, and the archive digest each leg reports
+  # under its own platform's output names; GitHub combines the legs' distinct
+  # outputs into this job's outputs. One failed leg fails the job, and with it
+  # the release: a version is published for every platform or for none.
   build:
-    name: Build exact patch
+    name: Build exact patch (${{ matrix.platform }})
     needs: preflight
-    runs-on: macos-26
-    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-aarch64
+            runner: macos-26
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
     permissions:
       contents: read
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
       EXACT_COMMIT: ${{ needs.preflight.outputs.exact_commit }}
+      PLATFORM: ${{ matrix.platform }}
     outputs:
-      artifact_id: ${{ steps.upload.outputs.artifact-id }}
-      archive_digest: ${{ steps.staged.outputs.archive_digest }}
-      checksums_digest: ${{ steps.staged.outputs.checksums_digest }}
+      artifact_id_macos_aarch64: ${{ steps.report.outputs.artifact_id_macos_aarch64 }}
+      archive_digest_macos_aarch64: ${{ steps.report.outputs.archive_digest_macos_aarch64 }}
+      artifact_id_linux_x86_64: ${{ steps.report.outputs.artifact_id_linux_x86_64 }}
+      archive_digest_linux_x86_64: ${{ steps.report.outputs.archive_digest_linux_x86_64 }}
+      artifact_id_linux_aarch64: ${{ steps.report.outputs.artifact_id_linux_aarch64 }}
+      archive_digest_linux_aarch64: ${{ steps.report.outputs.archive_digest_linux_aarch64 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.preflight.outputs.exact_commit }}
           persist-credentials: false
-      - name: Verify exact commit and runner architecture
+      - name: Verify exact commit and runner platform
         run: |
           test "$(git rev-parse HEAD)" = "$EXACT_COMMIT"
-          test "$(uname -s)" = Darwin && test "$(uname -m)" = arm64
+          # shellcheck disable=SC1091
+          source scripts/lib.sh
+          test "$(build_platform)" = "$PLATFORM"
       - name: Install build dependencies
         run: ./scripts/install-build-deps.sh
       - name: Install pinned StaticPHP
@@ -112,22 +131,44 @@ jobs:
       - name: Package and validate staged bytes
         id: staged
         run: |
-          archive=".artifacts/php-$VERSION-cli-macos-aarch64.tar.gz"
+          archive=".artifacts/php-$VERSION-cli-$PLATFORM.tar.gz"
           ./scripts/package.sh ".build/$VERSION/s4/buildroot/bin/php" "$VERSION"
           ./scripts/validate-autorelease-archive --archive "$archive" --version "$VERSION"
-          {
-            echo "archive_digest=sha256:$(shasum -a 256 "$archive" | awk '{print $1}')"
-            echo "checksums_digest=sha256:$(shasum -a 256 .artifacts/SHA256SUMS | awk '{print $1}')"
-          } >> "$GITHUB_OUTPUT"
-      - name: Hand the staged bytes to the release job
+          # Only the archive moves on; the release job writes the one SHA256SUMS
+          # that binds every platform's archive.
+          mkdir -p release-build
+          cp "$archive" release-build/
+          echo "archive_digest=sha256:$(shasum -a 256 "$archive" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+      # The archive must start, load its modules, and reach HTTPS on every glibc
+      # distribution it promises, not only on the runner that built it.
+      - name: Smoke test on Linux distributions
+        if: startsWith(matrix.platform, 'linux-')
+        run: |
+          branch="${VERSION%%-*}"
+          branch="${branch%.*}"
+          ./scripts/smoke-test-linux.sh "release-build/php-$VERSION-cli-$PLATFORM.tar.gz" \
+            "expected-modules/$branch.txt"
+      - name: Hand the staged archive to the release job
         id: upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: release-build-${{ github.run_id }}-${{ github.run_attempt }}
-          path: .artifacts/
+          name: release-build-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-build/
           if-no-files-found: error
           retention-days: 90
-          include-hidden-files: true
+      - name: Report this platform's artifact
+        id: report
+        env:
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          ARCHIVE_DIGEST: ${{ steps.staged.outputs.archive_digest }}
+        run: |
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$ARCHIVE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          key="${PLATFORM//-/_}"
+          {
+            echo "artifact_id_$key=$ARTIFACT_ID"
+            echo "archive_digest_$key=$ARCHIVE_DIGEST"
+          } >> "$GITHUB_OUTPUT"
 
 
   # The release transaction runs in three write-scoped jobs, and nothing the built
@@ -155,8 +196,6 @@ jobs:
       handoff_artifact_id: ${{ steps.handoff.outputs.artifact-id }}
       transaction_digest: ${{ steps.handoff_digests.outputs.transaction_digest }}
       event_digest: ${{ steps.handoff_digests.outputs.event_digest }}
-      archive_digest: ${{ steps.handoff_digests.outputs.archive_digest }}
-      checksums_digest: ${{ steps.handoff_digests.outputs.checksums_digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -235,11 +274,10 @@ jobs:
           mkdir -p .artifacts
           if gh release view "$VERSION" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             gh release download "$VERSION" --repo "${{ github.repository }}" --dir .artifacts
-            ./scripts/validate-autorelease-archive \
-              --archive ".artifacts/php-$VERSION-cli-macos-aarch64.tar.gz" \
-              --version "$VERSION"
-            archive_digest="$(shasum -a 256 ".artifacts/php-$VERSION-cli-macos-aarch64.tar.gz" | awk '{print $1}')"
-            grep -Fx "$archive_digest  php-$VERSION-cli-macos-aarch64.tar.gz" .artifacts/SHA256SUMS
+            # A release this transaction resumes is always a full one: every platform's
+            # archive and the SHA256SUMS binding them. A macOS-only release is history
+            # the watcher's record recovery reads; it is never completed here.
+            ./scripts/validate-autorelease-archive --release-dir .artifacts --version "$VERSION"
             echo "reuse=true" >> "$GITHUB_OUTPUT"
           else
             echo "reuse=false" >> "$GITHUB_OUTPUT"
@@ -248,36 +286,48 @@ jobs:
         if: steps.existing.outputs.reuse != 'true'
         env:
           BUILD_RESULT: ${{ needs.build.result }}
-          ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
-          ARCHIVE_DIGEST: ${{ needs.build.outputs.archive_digest }}
-          CHECKSUMS_DIGEST: ${{ needs.build.outputs.checksums_digest }}
+          MACOS_AARCH64_ID: ${{ needs.build.outputs.artifact_id_macos_aarch64 }}
+          LINUX_X86_64_ID: ${{ needs.build.outputs.artifact_id_linux_x86_64 }}
+          LINUX_AARCH64_ID: ${{ needs.build.outputs.artifact_id_linux_aarch64 }}
+          MACOS_AARCH64_DIGEST: ${{ needs.build.outputs.archive_digest_macos_aarch64 }}
+          LINUX_X86_64_DIGEST: ${{ needs.build.outputs.archive_digest_linux_x86_64 }}
+          LINUX_AARCH64_DIGEST: ${{ needs.build.outputs.archive_digest_linux_aarch64 }}
         run: |
           test "$BUILD_RESULT" = success
           # An empty ID would make the download below fetch every artifact of the run.
-          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
-          [[ "$ARCHIVE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          [[ "$CHECKSUMS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          for id in "$MACOS_AARCH64_ID" "$LINUX_X86_64_ID" "$LINUX_AARCH64_ID"; do
+            [[ "$id" =~ ^[1-9][0-9]*$ ]]
+          done
+          for digest in "$MACOS_AARCH64_DIGEST" "$LINUX_X86_64_DIGEST" "$LINUX_AARCH64_DIGEST"; do
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          done
       - name: Download the isolated build
         if: steps.existing.outputs.reuse != 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          artifact-ids: ${{ needs.build.outputs.artifact_id_macos_aarch64 }},${{ needs.build.outputs.artifact_id_linux_x86_64 }},${{ needs.build.outputs.artifact_id_linux_aarch64 }}
           path: .artifacts
+          merge-multiple: true
           digest-mismatch: error
+      # Writing SHA256SUMS requires exactly one archive per platform, and the release
+      # check then proves each archive's platform, a shared manifest, and the listing.
       - name: Verify the staged bytes the build reported
         if: steps.existing.outputs.reuse != 'true'
         env:
-          ARCHIVE_DIGEST: ${{ needs.build.outputs.archive_digest }}
-          CHECKSUMS_DIGEST: ${{ needs.build.outputs.checksums_digest }}
+          MACOS_AARCH64_DIGEST: ${{ needs.build.outputs.archive_digest_macos_aarch64 }}
+          LINUX_X86_64_DIGEST: ${{ needs.build.outputs.archive_digest_linux_x86_64 }}
+          LINUX_AARCH64_DIGEST: ${{ needs.build.outputs.archive_digest_linux_aarch64 }}
         run: |
-          archive="php-$VERSION-cli-macos-aarch64.tar.gz"
           test "$(find .artifacts -mindepth 1 -print | LC_ALL=C sort | paste -sd ' ' -)" \
-            = ".artifacts/SHA256SUMS .artifacts/$archive"
-          archive_hex="$(shasum -a 256 ".artifacts/$archive" | awk '{print $1}')"
-          test "sha256:$archive_hex" = "$ARCHIVE_DIGEST"
-          test "sha256:$(shasum -a 256 .artifacts/SHA256SUMS | awk '{print $1}')" = "$CHECKSUMS_DIGEST"
-          grep -Fx "$archive_hex  $archive" .artifacts/SHA256SUMS
-          ./scripts/validate-autorelease-archive --archive ".artifacts/$archive" --version "$VERSION"
+            = ".artifacts/php-$VERSION-cli-linux-aarch64.tar.gz .artifacts/php-$VERSION-cli-linux-x86_64.tar.gz .artifacts/php-$VERSION-cli-macos-aarch64.tar.gz"
+          reported() {
+            test "sha256:$(shasum -a 256 ".artifacts/php-$VERSION-cli-$1.tar.gz" | awk '{print $1}')" = "$2"
+          }
+          reported macos-aarch64 "$MACOS_AARCH64_DIGEST"
+          reported linux-x86_64 "$LINUX_X86_64_DIGEST"
+          reported linux-aarch64 "$LINUX_AARCH64_DIGEST"
+          ./scripts/validate-autorelease-archive --release-dir .artifacts --version "$VERSION" --write-checksums
+          cat .artifacts/SHA256SUMS
       - name: Initialize release transaction and event
         run: |
           mkdir -p release-run
@@ -336,24 +386,20 @@ jobs:
         run: |
           mkdir -p release-handoff/draft
           gh release download "$VERSION" --repo "${{ github.repository }}" --dir release-handoff/draft
-          archive="php-$VERSION-cli-macos-aarch64.tar.gz"
-          test "$(find release-handoff/draft -mindepth 1 -print | LC_ALL=C sort | paste -sd ' ' -)" \
-            = "release-handoff/draft/SHA256SUMS release-handoff/draft/$archive"
-          for name in "$archive" SHA256SUMS; do
-            test "sha256:$(shasum -a 256 "release-handoff/draft/$name" | awk '{print $1}')" \
-              = "$(jq -r --arg name "$name" '.assetDigests[$name]' release-run/transaction.json)"
-          done
+          ./scripts/validate-autorelease-archive --release-dir release-handoff/draft --version "$VERSION" \
+            > release-run/draft-assets.json
+          test "$(jq -cS .assetDigests release-run/draft-assets.json)" \
+            = "$(jq -cS .assetDigests release-run/transaction.json)"
           test "$(jq -r .state release-run/transaction.json)" = "draft_verified"
           cp release-run/transaction.json release-run/event.json release-handoff/
       - name: Record the handed-over digests
         id: handoff_digests
+        # The transaction names every draft asset's digest, so its digest binds the
+        # draft bytes too: each later job checks the files against the transaction.
         run: |
-          archive="php-$VERSION-cli-macos-aarch64.tar.gz"
           {
             echo "transaction_digest=sha256:$(shasum -a 256 release-handoff/transaction.json | awk '{print $1}')"
             echo "event_digest=sha256:$(shasum -a 256 release-handoff/event.json | awk '{print $1}')"
-            echo "archive_digest=sha256:$(shasum -a 256 "release-handoff/draft/$archive" | awk '{print $1}')"
-            echo "checksums_digest=sha256:$(shasum -a 256 release-handoff/draft/SHA256SUMS | awk '{print $1}')"
           } >> "$GITHUB_OUTPUT"
       - name: Hand the verified draft to the next jobs
         id: handoff
@@ -391,17 +437,33 @@ jobs:
   # The built binary runs only in the two install checks, each in a job whose token
   # can only read contents and that holds no environment. The token authenticates the
   # plugin's GitHub API reads, which anonymous shared runners lose to rate limits.
+  # Each platform's archive runs on a native runner of its own; every leg checks the
+  # bytes of every archive, and one failed leg keeps the whole draft unpublished.
   verify-draft:
-    name: Verify the draft through a temporary install
+    name: Verify the draft through a temporary install (${{ matrix.platform }})
     needs: [preflight, release]
     if: ${{ !cancelled() && needs.release.result == 'success' }}
-    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-aarch64
+            runner: macos-26
+            machine: Darwin/arm64
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+            machine: Linux/x86_64
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+            machine: Linux/aarch64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     permissions:
       contents: read
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
       GITHUB_TOKEN: ${{ github.token }}
+      MACHINE: ${{ matrix.machine }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -430,15 +492,16 @@ jobs:
           digest-mismatch: error
       - name: Verify the draft bytes the release job reported
         env:
-          ARCHIVE_DIGEST: ${{ needs.release.outputs.archive_digest }}
-          CHECKSUMS_DIGEST: ${{ needs.release.outputs.checksums_digest }}
+          TRANSACTION_DIGEST: ${{ needs.release.outputs.transaction_digest }}
         run: |
-          archive="php-$VERSION-cli-macos-aarch64.tar.gz"
-          test "$(find release-handoff/draft -mindepth 1 -print | LC_ALL=C sort | paste -sd ' ' -)" \
-            = "release-handoff/draft/SHA256SUMS release-handoff/draft/$archive"
-          test "sha256:$(shasum -a 256 "release-handoff/draft/$archive" | awk '{print $1}')" = "$ARCHIVE_DIGEST"
-          test "sha256:$(shasum -a 256 release-handoff/draft/SHA256SUMS | awk '{print $1}')" = "$CHECKSUMS_DIGEST"
-          ./scripts/validate-autorelease-archive --archive "release-handoff/draft/$archive" --version "$VERSION"
+          test "$(find release-handoff -type f -print | LC_ALL=C sort | paste -sd ' ' -)" \
+            = "release-handoff/draft/SHA256SUMS release-handoff/draft/php-$VERSION-cli-linux-aarch64.tar.gz release-handoff/draft/php-$VERSION-cli-linux-x86_64.tar.gz release-handoff/draft/php-$VERSION-cli-macos-aarch64.tar.gz release-handoff/event.json release-handoff/transaction.json"
+          test "sha256:$(shasum -a 256 release-handoff/transaction.json | awk '{print $1}')" = "$TRANSACTION_DIGEST"
+          test "$(jq -r .state release-handoff/transaction.json)" = "draft_verified"
+          ./scripts/validate-autorelease-archive --release-dir release-handoff/draft --version "$VERSION" \
+            > "$RUNNER_TEMP/draft-assets.json"
+          test "$(jq -cS .assetDigests "$RUNNER_TEMP/draft-assets.json")" \
+            = "$(jq -cS .assetDigests release-handoff/transaction.json)"
       - name: Verify draft installation through temporary artifact path
         run: |
           temporary="$RUNNER_TEMP/draft-install"
@@ -465,6 +528,8 @@ jobs:
           mise install "php@$VERSION"
           mise exec "php@$VERSION" -- php -v
           mise exec "php@$VERSION" -- php -m | grep -Fx Core
+          # The plugin installed this runner's own archive, not another platform's.
+          test "$(mise exec "php@$VERSION" -- php -r 'echo PHP_OS_FAMILY, "/", php_uname("m");')" = "$MACHINE"
           kill "$server_pid"
           wait "$server_pid" || true
           trap - EXIT
@@ -501,16 +566,15 @@ jobs:
         env:
           TRANSACTION_DIGEST: ${{ needs.release.outputs.transaction_digest }}
           EVENT_DIGEST: ${{ needs.release.outputs.event_digest }}
-          ARCHIVE_DIGEST: ${{ needs.release.outputs.archive_digest }}
-          CHECKSUMS_DIGEST: ${{ needs.release.outputs.checksums_digest }}
         run: |
-          archive="php-$VERSION-cli-macos-aarch64.tar.gz"
           test "$(find release-handoff -type f -print | LC_ALL=C sort | paste -sd ' ' -)" \
-            = "release-handoff/draft/SHA256SUMS release-handoff/draft/$archive release-handoff/event.json release-handoff/transaction.json"
+            = "release-handoff/draft/SHA256SUMS release-handoff/draft/php-$VERSION-cli-linux-aarch64.tar.gz release-handoff/draft/php-$VERSION-cli-linux-x86_64.tar.gz release-handoff/draft/php-$VERSION-cli-macos-aarch64.tar.gz release-handoff/event.json release-handoff/transaction.json"
           test "sha256:$(shasum -a 256 release-handoff/transaction.json | awk '{print $1}')" = "$TRANSACTION_DIGEST"
           test "sha256:$(shasum -a 256 release-handoff/event.json | awk '{print $1}')" = "$EVENT_DIGEST"
-          test "sha256:$(shasum -a 256 "release-handoff/draft/$archive" | awk '{print $1}')" = "$ARCHIVE_DIGEST"
-          test "sha256:$(shasum -a 256 release-handoff/draft/SHA256SUMS | awk '{print $1}')" = "$CHECKSUMS_DIGEST"
+          ./scripts/validate-autorelease-archive --release-dir release-handoff/draft --version "$VERSION" \
+            > "$RUNNER_TEMP/draft-assets.json"
+          test "$(jq -cS .assetDigests "$RUNNER_TEMP/draft-assets.json")" \
+            = "$(jq -cS .assetDigests release-handoff/transaction.json)"
           test "$(jq -r .state release-handoff/transaction.json)" = "draft_verified"
           test "$(jq -r .version release-handoff/transaction.json)" = "$VERSION"
           test "$(jq -r .commit release-handoff/transaction.json)" = "$EXACT_COMMIT"
@@ -657,17 +721,36 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
+  # Every platform installs the public release on its own native runner, and every
+  # leg first proves the public bytes are exactly the transaction's and that each
+  # asset carries the immutable release's attestation.
   verify-public:
-    name: Verify fresh public installs
+    name: Verify fresh public installs (${{ matrix.platform }})
     needs: [preflight, release, publish]
     if: ${{ !cancelled() && needs.publish.result == 'success' }}
-    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-aarch64
+            runner: macos-26
+            machine: Darwin/arm64
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+            machine: Linux/x86_64
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+            machine: Linux/aarch64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     permissions:
       contents: read
+      attestations: read
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
       GITHUB_TOKEN: ${{ github.token }}
+      MACHINE: ${{ matrix.machine }}
+      REPOSITORY: ${{ github.repository }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -679,6 +762,30 @@ jobs:
         with:
           github_token: ${{ github.token }}
           cache: false
+      - name: Download the published transaction
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ needs.publish.outputs.handoff_artifact_id }}
+          path: release-published
+          digest-mismatch: error
+      - name: Verify the public bytes and their attestation
+        env:
+          TRANSACTION_DIGEST: ${{ needs.publish.outputs.transaction_digest }}
+        run: |
+          test "$(find release-published -type f -print | LC_ALL=C sort | paste -sd ' ' -)" \
+            = "release-published/event.json release-published/transaction.json"
+          test "sha256:$(shasum -a 256 release-published/transaction.json | awk '{print $1}')" = "$TRANSACTION_DIGEST"
+          test "$(jq -r .state release-published/transaction.json)" = "complete"
+          expected="SHA256SUMS php-$VERSION-cli-linux-aarch64.tar.gz php-$VERSION-cli-linux-x86_64.tar.gz php-$VERSION-cli-macos-aarch64.tar.gz"
+          test "$(jq -r '.assetDigests | keys[]' release-published/transaction.json | LC_ALL=C sort | paste -sd ' ' -)" = "$expected"
+          public="$RUNNER_TEMP/public-release"
+          gh release download "$VERSION" --repo "$REPOSITORY" --dir "$public"
+          test "$(cd "$public" && find . -mindepth 1 -print | sed 's|^\./||' | LC_ALL=C sort | paste -sd ' ' -)" = "$expected"
+          for name in $expected; do
+            test "sha256:$(shasum -a 256 "$public/$name" | awk '{print $1}')" \
+              = "$(jq -r --arg name "$name" '.assetDigests[$name]' release-published/transaction.json)"
+            gh release verify-asset "$VERSION" "$public/$name" --repo "$REPOSITORY"
+          done
       - name: Verify fresh public exact-version and branch-shorthand installs
         run: |
           unset MISE_PHP_API_BASE_URL
@@ -695,6 +802,7 @@ jobs:
           mise install "php@$branch"
           mise exec "php@$VERSION" -- php -v
           mise exec "php@$branch" -- php -v
+          test "$(mise exec "php@$VERSION" -- php -r 'echo PHP_OS_FAMILY, "/", php_uname("m");')" = "$MACHINE"
 
   finalize:
     name: Record the verified release
@@ -750,7 +858,7 @@ jobs:
             --evidence release-run/evidence.json --output release-run/next-event.json
           mv release-run/next-event.json release-run/event.json
           jq --arg version "$VERSION" \
-            '.severity="info" | .summary="PHP \($version) was published and verified through fresh exact and branch-shorthand mise installs." | .finalResult="passed"' \
+            '.severity="info" | .summary="PHP \($version) was published for macOS arm64, Linux x86_64, and Linux aarch64 and verified through fresh exact and branch-shorthand mise installs on each." | .finalResult="passed"' \
             release-run/event.json > release-run/notification-event.json
       # A rerun of this job must neither file a second record nor trip over what an
       # earlier attempt of this run left behind. A record already on main that completes
