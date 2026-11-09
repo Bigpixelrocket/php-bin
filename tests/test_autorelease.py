@@ -4098,40 +4098,60 @@ class AutoreleaseControlTests(unittest.TestCase):
                 with self.subTest(checks=checks), self.assertRaises(ControlError):
                     verify_merge(repo, head, manifest, checks, {}, {})
 
-    def test_sealing_ignores_the_umask_s_write_bits_and_still_checks_the_executable_bit(self):
+    def test_sealing_and_merging_record_only_the_mode_git_records(self):
         # Debian and Ubuntu give new users umask 002, GitHub runners 022. Git records
-        # only whether a file is executable, so group and other write bits never
-        # reach the patch and must not decide whether it seals.
+        # only whether the owner may execute a file, so the other permission bits
+        # never reach the patch: they must not decide whether it seals, and a file
+        # sealed under one umask must still merge from a checkout made under another.
+        # Every mode is set explicitly, so this fails on a full-bit check under any umask.
+        def git_in(*arguments):
+            return subprocess.run(
+                ["git", *arguments], cwd=repo, check=True, capture_output=True, text=True
+            ).stdout.strip()
+
         with tempfile.TemporaryDirectory() as temporary:
             repo = pathlib.Path(temporary) / "repo"
             repo.mkdir()
-            for arguments in (("init", "-q"), ("config", "user.name", "Fixture"),
-                              ("config", "user.email", "fixture@invalid")):
-                subprocess.run(["git", *arguments], cwd=repo, check=True)
+            git_in("init", "-q")
+            git_in("config", "user.name", "Fixture")
+            git_in("config", "user.email", "fixture@invalid")
             (repo / "allowed.txt").write_text("before\n")
-            subprocess.run(["git", "add", "allowed.txt"], cwd=repo, check=True)
-            subprocess.run(["git", "commit", "-q", "-m", "baseline"], cwd=repo, check=True)
-            base = subprocess.run(
-                ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
-            ).stdout.strip()
+            git_in("add", "allowed.txt")
+            git_in("commit", "-q", "-m", "baseline")
+            base = git_in("rev-parse", "HEAD")
             (repo / "allowed.txt").write_text("after\n")
             (repo / "scripts").mkdir()
             (repo / "scripts/tool").write_text("#!/bin/sh\n")
             plan = {"actionKey": "new_branch:8.6", "allowedPaths": {"php-bin": ["allowed.txt", "scripts/tool"]}}
-            for text_mode, script_mode in ((0o664, 0o775), (0o666, 0o777), (0o644, 0o755)):
+            for text_mode, script_mode in ((0o664, 0o775), (0o666, 0o777), (0o600, 0o700), (0o644, 0o755)):
                 (repo / "allowed.txt").chmod(text_mode)
                 (repo / "scripts/tool").chmod(script_mode)
                 sealed = pathlib.Path(temporary) / f"sealed-{text_mode:o}"
-                seal_patch(repo, base, plan, sealed)
+                manifest = seal_patch(repo, base, plan, sealed)
+                self.assertEqual(
+                    {"allowed.txt": "0o644", "scripts/tool": "0o755"},
+                    {entry["path"]: entry["mode"] for entry in manifest["files"]},
+                )
                 patch = (sealed / "sealed.patch").read_text()
                 self.assertIn("new file mode 100755", patch)
                 self.assertNotIn("old mode", patch)
+            # Sealed under umask 022 above, then validated in a checkout that umask 002 wrote.
+            git_in("add", "allowed.txt", "scripts/tool")
+            git_in("commit", "-q", "-m", "validated")
+            head = git_in("rev-parse", "HEAD")
+            (repo / "allowed.txt").chmod(0o664)
+            (repo / "scripts/tool").chmod(0o775)
+            admitted = verify_merge(repo, head, manifest, {"Script checks": "success"}, {}, {})
+            self.assertEqual(head, admitted["headSha"])
+            # The executable bit itself is still bound on both sides.
+            (repo / "scripts/tool").chmod(0o664)
+            with self.assertRaisesRegex(ControlError, "validated file mode changed: scripts/tool"):
+                verify_merge(repo, head, manifest, {"Script checks": "success"}, {}, {})
+            git_in("reset", "-q", "--soft", base)
+            (repo / "scripts/tool").chmod(0o755)
             (repo / "allowed.txt").chmod(0o775)
             with self.assertRaisesRegex(ControlError, "unexpected executable path: allowed.txt"):
                 seal_patch(repo, base, plan, pathlib.Path(temporary) / "executable")
-            (repo / "allowed.txt").chmod(0o600)
-            with self.assertRaisesRegex(ControlError, "unexpected mode: allowed.txt"):
-                seal_patch(repo, base, plan, pathlib.Path(temporary) / "private")
 
     def test_sealed_patch_keeps_the_exact_bytes_git_wrote(self):
         def git_in(repo, *arguments):
