@@ -44,7 +44,7 @@ while (($#)); do
 done
 
 [[ "$pr_number" =~ ^[1-9][0-9]*$ ]] || usage
-((${#caller_checks[@]})) && [[ -n "$output" ]] || usage
+[[ ${#caller_checks[@]} -gt 0 && -n "$output" ]] || usage
 repository="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 # Only a test shortens the wait; a shorter wait can only fail sooner.
 timeout_seconds="${DISPATCH_PR_CHECKS_TIMEOUT:-900}"
