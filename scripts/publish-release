@@ -62,6 +62,18 @@ def tag_commit(repo: str, version: str) -> str | None:
     return target["sha"]
 
 
+def require_tag_names_commit(repo: str, version: str, commit: str) -> None:
+    """Fail unless the release tag exists and resolves to the admitted commit.
+
+    Publication binds the tag forever, and GitHub creates a missing tag from the
+    release's target branch when a draft is published. A stale-draft discard that
+    stopped after deleting the tag, or replaced the draft, must therefore stop an
+    older run's publication here rather than rely on its asset digests differing.
+    """
+    if tag_commit(repo, version) != commit:
+        raise ControlError("release tag does not name the admitted commit")
+
+
 def discard_stale_draft(repo: str, version: str, commit: str) -> bool:
     """Delete an unpublished draft whose tag no longer resolves to the admitted commit.
 
@@ -211,6 +223,8 @@ def github_effect(
     elif target in {"draft_verified", "publishing", "public_verified"}:
         # `publishing` re-reads the draft immediately before publication, because the
         # draft was verified by an earlier job and publication is irreversible.
+        if target == "publishing":
+            require_tag_names_commit(repo, version, commit)
         with tempfile.TemporaryDirectory(prefix="autorelease-download-") as temporary:
             gh(
                 "release",
@@ -229,6 +243,7 @@ def github_effect(
     elif target == "published":
         release = json.loads(gh("release", "view", version, "--repo", repo, "--json", "isDraft,databaseId"))
         if release["isDraft"]:
+            require_tag_names_commit(repo, version, commit)
             # Left to GitHub, the "Latest" badge follows the last publication, so a
             # rebuild of an older branch would take it from the newest version. The
             # publication therefore states it: latest only when no published release

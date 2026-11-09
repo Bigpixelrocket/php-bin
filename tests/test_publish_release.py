@@ -91,6 +91,12 @@ FAKE_GH = textwrap.dedent(
                 fail("HTTP 422: Cannot delete a tag of an immutable release")
             state["refs"].pop(name)
             reply({})
+        if method == "PATCH" and path.startswith("releases/"):
+            release = next(item for item in state["releases"] if item["id"] == int(path[len("releases/"):]))
+            release["draft"] = False
+            # GitHub tags the target branch's head when a draft without its tag is published.
+            state["refs"].setdefault(release["tag_name"], {"type": "commit", "sha": "f" * 40})
+            reply({})
         if method == "DELETE" and path.startswith("releases/"):
             release_id = int(path[len("releases/"):])
             state["releases"] = [item for item in state["releases"] if item["id"] != release_id]
@@ -99,7 +105,8 @@ FAKE_GH = textwrap.dedent(
         release = release_named(args[2])
         if release is None:
             fail("release not found")
-        reply({"isDraft": release["draft"], "tagName": release["tag_name"], "body": release["body"]})
+        reply({"isDraft": release["draft"], "tagName": release["tag_name"], "body": release["body"],
+               "databaseId": release["id"]})
     if args[:2] == ["release", "create"]:
         if args[2] not in state["refs"]:
             fail("tag does not exist")
@@ -169,14 +176,17 @@ class StaleDraftRecoveryTests(unittest.TestCase):
     def discard(self, commit: str | None = None) -> subprocess.CompletedProcess:
         return self.publish("--discard-stale-draft", "--commit", commit or self.commit)
 
-    def create_draft(self) -> subprocess.CompletedProcess:
+    def transition(self, state: str, target: str) -> subprocess.CompletedProcess:
         assets = release_directory(self.work / "assets", VERSION)
         transaction = self.work / "transaction.json"
-        transaction.write_text(json.dumps({"schemaVersion": 1, "state": "built", "history": []}))
+        transaction.write_text(json.dumps({"schemaVersion": 1, "state": state, "history": []}))
         return self.publish(
-            "--target", "draft_created", "--commit", self.commit, "--backend", "github",
+            "--target", target, "--commit", self.commit, "--backend", "github",
             "--transaction", str(transaction), "--assets", str(assets), "--output", str(self.work / "next.json"),
         )
+
+    def create_draft(self) -> subprocess.CompletedProcess:
+        return self.transition("built", "draft_created")
 
     def draft(self, commit_note: str = "sha256:" + "d" * 64, draft: bool = True) -> dict:
         return {"id": 7, "tag_name": VERSION, "draft": draft,
@@ -264,6 +274,30 @@ class StaleDraftRecoveryTests(unittest.TestCase):
         self.assertEqual(1, discarded.returncode)
         self.assertIn("stopped being an unpublished draft", discarded.stderr)
         self.assertEqual([], self.mutations())
+
+    def test_publication_refuses_a_draft_whose_tag_does_not_name_the_admitted_commit(self):
+        # A discard that stopped after deleting the tag leaves an older run's own draft,
+        # whose bytes still match that run's handoff, and publishing a tagless draft
+        # would tag the target branch's head. A replaced draft carries a newer commit's
+        # tag. Either way the run stops before publication, whatever the bytes are.
+        ref, objects = tagged(OLD_COMMIT)
+        for refs, tag_objects in (({}, {}), ({VERSION: ref}, objects)):
+            for state, target in (("draft_verified", "publishing"), ("publishing", "published")):
+                with self.subTest(tag=bool(refs), target=target):
+                    self.given([self.draft()], refs, tag_objects)
+                    refused = self.transition(state, target)
+                    self.assertEqual(1, refused.returncode)
+                    self.assertIn("release tag does not name the admitted commit", refused.stderr)
+                    self.assertEqual([], self.mutations())
+                    self.assertTrue(self.state()["releases"][0]["draft"])
+
+    def test_a_draft_tagged_at_the_admitted_commit_is_published(self):
+        ref, objects = tagged(self.commit)
+        self.given([self.draft(self.identity)], {VERSION: ref}, objects)
+        published = self.transition("publishing", "published")
+        self.assertEqual(0, published.returncode, published.stderr)
+        self.assertFalse(self.state()["releases"][0]["draft"])
+        self.assertEqual({VERSION: ref}, self.state()["refs"])
 
     def test_ambiguous_or_malformed_requests_fail_closed_without_effect(self):
         ref, objects = tagged(OLD_COMMIT)
