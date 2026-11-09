@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bigpixelrocket.dev/schemas/policy-invariants.schema.json",
+  "title": "php-bin reviewed policy invariants",
+  "description": "The owner-reviewed release invariants in autorelease/policy-invariants.json. support-policy.json binds to the file's exact digest (policyInvariantsDigest), and mise-php's consumer and readiness records carry that digest, so any edit is a coordinated change in both repositories.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "targets", "allowPrereleases", "historicalExactVersionsRemainInstallable", "immutablePublishedAssets"],
+  "properties": {
+    "schemaVersion": {"type": "integer", "const": 2},
+    "targets": {
+      "description": "Every platform each release publishes an archive for, in release platform order (macos-aarch64, linux-x86_64, linux-aarch64). A release missing any of them publishes nothing.",
+      "const": [
+        {"os": "macOS", "minimumVersion": "26.0", "architecture": "arm64", "sapi": "cli"},
+        {"os": "Linux", "minimumGlibcVersion": "2.17", "architecture": "x86_64", "sapi": "cli"},
+        {"os": "Linux", "minimumGlibcVersion": "2.17", "architecture": "aarch64", "sapi": "cli"}
+      ]
+    },
+    "allowPrereleases": {"type": "boolean", "const": false},
+    "historicalExactVersionsRemainInstallable": {"type": "boolean", "const": true},
+    "immutablePublishedAssets": {"type": "boolean", "const": true}
+  }
+}

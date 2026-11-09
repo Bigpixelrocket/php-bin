@@ -175,10 +175,12 @@ jobs:
   # binary could touch reaches any of them. This first one alone decides whether an
   # existing release is reconciled: only the write token can see a draft, and that
   # path reuses the release's own assets and never needs the build. It therefore runs
-  # even when the build failed, so a draft left by an earlier run can still be
-  # completed, while a fresh release stops at "Require the isolated build" before any
-  # effect. It ends at a verified draft and hands the draft bytes, the transaction, and
-  # the event over by artifact ID and digest.
+  # even when the build failed, so a draft left by an earlier run at this commit can
+  # still be completed, while a fresh release stops at "Require the isolated build"
+  # before any effect. A draft tagged at an older commit is discarded first, and the
+  # run then releases its own build like a fresh release. It ends at a verified
+  # draft and hands the draft bytes, the transaction, and the event over by
+  # artifact ID and digest.
   release:
     name: Stage and verify the draft
     needs: [preflight, build]
@@ -272,6 +274,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p .artifacts
+          # A draft left by an earlier attempt is resumed only while its tag names this
+          # admitted commit. Once main has moved, that draft and its tag belong to an
+          # older commit; it was never public, so it is deleted and this run releases
+          # its own build. A published release is never touched here.
+          gh api "repos/${{ github.repository }}/contents/.github/autorelease-operator.json?ref=main" \
+            --jq .content | base64 --decode > release-run/current-operator.json
+          ./autorelease/control.py operator-gate --operator-file release-run/current-operator.json --require-enabled
+          ./scripts/publish-release --discard-stale-draft \
+            --version "$VERSION" --commit "$EXACT_COMMIT" --repo "${{ github.repository }}"
           if gh release view "$VERSION" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             gh release download "$VERSION" --repo "${{ github.repository }}" --dir .artifacts
             # A release this transaction resumes is always a full one: every platform's
@@ -514,7 +525,8 @@ jobs:
           # listens, which takes several seconds on a hosted runner. A server that
           # refused the release exits, and its own error is already in this log.
           ready=false
-          deadline=$((SECONDS + 120))
+          ready_timeout=120
+          deadline=$((SECONDS + ready_timeout))
           while ((SECONDS < deadline)); do
             if curl --silent --fail --max-time 5 "http://127.0.0.1:$port/health"; then
               ready=true
@@ -528,7 +540,7 @@ jobs:
             fi
             sleep 0.5
           done
-          "$ready" || { echo "staged artifact server did not become healthy within 120 seconds" >&2; exit 1; }
+          "$ready" || { echo "staged artifact server did not become healthy within $ready_timeout seconds" >&2; exit 1; }
           export MISE_PHP_API_BASE_URL="http://127.0.0.1:$port"
           export MISE_DATA_DIR="$temporary/mise/data"
           export MISE_CACHE_DIR="$temporary/mise/cache"

@@ -2,7 +2,9 @@ import contextlib
 import copy
 import io
 import json
+import os
 import pathlib
+import subprocess
 import tempfile
 import unittest
 
@@ -640,6 +642,76 @@ class StatusWorkflowTests(unittest.TestCase):
         self.assertIn('gh_api(f"repos/{args.repo}/pages", allow_missing=True)', snapshot)
         settings = (ROOT / "docs/repository-settings.md").read_text()
         self.assertIn("--environment github-pages", settings)
+
+    def test_configuration_writes_every_required_check_and_refuses_a_silent_drop(self):
+        # gh answers from the ruleset the case names and logs every call; a write
+        # carries the JSON body it was given.
+        fake_gh = (
+            "#!/usr/bin/env python3\n"
+            "import json, os, pathlib, sys\n"
+            "args = sys.argv[1:]\n"
+            "body = json.loads(pathlib.Path(args[args.index('--input') + 1]).read_text()) if '--input' in args else None\n"
+            "with open(os.environ['FAKE_GH_LOG'], 'a') as log:\n"
+            "    log.write(json.dumps({'args': args, 'body': body}) + '\\n')\n"
+            "path = args[1] if args[0] == 'api' else ''\n"
+            "write = '--method' in args\n"
+            "if args[:2] == ['label', 'list']: print('[]')\n"
+            "elif path == 'repos/o/r' and write:\n"
+            "    print(json.dumps({'security_and_analysis': {k: {'status': 'enabled'} for k in body['security_and_analysis']}}))\n"
+            "elif path == 'repos/o/r/pages' and not write: print(json.dumps({'build_type': 'workflow'}))\n"
+            "elif '/environments/' in path: print(json.dumps({'can_admins_bypass': False}))\n"
+            "elif path == 'repos/o/r/rulesets' and not write: print(json.dumps([{'id': 5, 'name': 'protect_main'}]))\n"
+            "elif path == 'repos/o/r/rulesets/5' and not write: print(os.environ['FAKE_RULESET'])\n"
+            "elif path == 'repos/o/r/branches/main/protection' and not write: sys.exit('Branch not protected')\n"
+        )
+        linux = ["Plugin contract on ubuntu-latest", "Plugin contract on ubuntu-24.04-arm"]
+        current = {"rules": [{"type": "required_status_checks", "parameters": {"required_status_checks": [
+            {"context": name, "integration_id": 15368} for name in ["Plugin contract", *linux, "Protected controls"]
+        ]}}]}
+
+        def configure(*checks: str) -> tuple[subprocess.CompletedProcess, list]:
+            with tempfile.TemporaryDirectory() as temporary:
+                work = pathlib.Path(temporary)
+                (work / "gh").write_text(fake_gh)
+                (work / "gh").chmod(0o755)
+                log = work / "gh.log"
+                log.write_text("")
+                env = {**os.environ, "PATH": f"{work}:{os.environ['PATH']}", "FAKE_GH_LOG": str(log),
+                       "FAKE_RULESET": json.dumps(current)}
+                result = subprocess.run(
+                    [str(ROOT / "scripts/configure-github-autorelease"), "--repo", "o/r", "--owner", "owner",
+                     *checks, "--environment", "php-autorelease-publish"],
+                    env=env, capture_output=True, text=True,
+                )
+                return result, [json.loads(line) for line in log.read_text().splitlines()]
+
+        def written_checks(calls: list) -> list:
+            (ruleset,) = [call["body"] for call in calls if call["args"][1:4] == ["repos/o/r/rulesets/5", "--method", "PUT"]]
+            (rule,) = [rule for rule in ruleset["rules"] if rule["type"] == "required_status_checks"]
+            return [(check["context"], check["integration_id"]) for check in rule["parameters"]["required_status_checks"]]
+
+        every = ["--required-check", "Plugin contract"]
+        for name in linux:
+            every += ["--required-check", name]
+        result, calls = configure(*every)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            [(name, 15368) for name in ["Plugin contract", *linux, "Protected controls"]], written_checks(calls)
+        )
+        self.assertEqual(["Plugin contract", *linux, "Protected controls"],
+                         json.loads(result.stdout)["requiredChecks"])
+
+        # The old single-check invocation stops before it changes anything.
+        result, calls = configure("--required-check", "Plugin contract")
+        self.assertEqual(1, result.returncode)
+        self.assertIn(f"would drop: {linux[1]}, {linux[0]}", result.stderr)
+        self.assertFalse([call for call in calls if "--method" in call["args"] or call["args"][0] != "api"])
+
+        # Naming each dropped check removes it on purpose.
+        result, calls = configure("--required-check", "Plugin contract",
+                                  "--drop-required-check", linux[0], "--drop-required-check", linux[1])
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual([("Plugin contract", 15368), ("Protected controls", 15368)], written_checks(calls))
 
 
 if __name__ == "__main__":

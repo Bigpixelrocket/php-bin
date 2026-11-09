@@ -117,6 +117,24 @@ built, never what decides whether the build was correct, so the protected
 tests are the standing control on every product change. `mise-php` draws the
 same line over its own paths; its `AUTORELEASE.md` owns that list.
 
+The reviewed `autorelease/policy-invariants.json` (shape in
+`schemas/policy-invariants.schema.json`) states what every release must be:
+its `targets` list names macOS arm64 on macOS 26.0 or newer, and Linux x86_64
+and aarch64 against glibc 2.17 or newer, in release platform order; prereleases
+stay forbidden, historical exact versions stay installable, and published
+assets stay immutable. Admission asserts that list exactly. `support-policy.json`
+binds to the file's digest (`policyInvariantsDigest`), and so do mise-php's
+`support-snapshot.json` and its readiness records, while mise-php's consumer
+asserts the same target list. Changing the invariants is therefore a
+coordinated pair of reviewed pull requests: php-bin changes the file and
+rebinds `support-policy.json` by hand (a `bootstrap` policy, which no lifecycle
+action rewrites), and mise-php changes its consumer check and rebinds
+`support-snapshot.json`. The consumer refuses to synchronize a `bootstrap`
+policy on its own, so mise-php merges second, after its snapshot names
+php-bin's merge commit; until then its daily run fails closed. Land the pair
+while no `new_branch` or `branch_eol` event is in flight, since that event's
+readiness records carry the old digest.
+
 ```mermaid
 flowchart TD
   capture["Capture fixed raw evidence"] --> changed{"Digest or health changed?"}
@@ -141,10 +159,11 @@ flowchart TD
 
 The release transaction is the only component allowed to create an annotated
 tag, draft, assets, or publication. It advances one legal state at a time,
-reconciles existing state before acting, never replaces an existing release's
-assets with a fresh build, and never overwrites, deletes, or retags a published
-release. A first release on a new PHP branch also requires exact-commit
-`php_bin_ready` and `mise_ready` records.
+reconciles existing state before acting, and never overwrites, deletes, or
+retags a published release. It replaces a release's assets with a fresh build
+in one case only: an unpublished draft whose tag no longer names the admitted
+commit, described under `release` below. A first release on a new PHP branch
+also requires exact-commit `php_bin_ready` and `mise_ready` records.
 
 Every release carries one archive per platform, `php-<tag>-cli-macos-aarch64`,
 `-linux-x86_64`, and `-linux-aarch64` (each `.tar.gz`), and one `SHA256SUMS`
@@ -174,9 +193,17 @@ succeeded:
    every archive carries the same `share/php-bin/manifest.json`, and
    `SHA256SUMS` is exactly the sorted listing. Reconciling an existing release
    reuses the release's own assets, which must be such a full release, so it
-   discards the build and still runs when the build failed. It advances to a
-   verified draft titled `PHP <tag>`, downloads the draft (only the write
-   token can see one), and hands the draft bytes, the transaction, and the
+   discards the build and still runs when the build failed. A draft is reused
+   only while its tag names the admitted commit. A draft an earlier attempt left
+   before main moved, for example when a record pull request merged in between,
+   has its tag at an older commit; it was never public, so the job deletes the
+   tag and then the draft (`scripts/publish-release --discard-stale-draft`,
+   re-reading the draft before each deletion) and releases its own build of the
+   admitted commit. A draft tagged at a commit that is not an ancestor of the
+   admitted one, which only a rerun of an older run would meet, stops the job
+   instead. A published release, or a tag with no release, is never deleted,
+   and a mismatched tag there still stops the transaction. It advances to a verified draft titled `PHP <tag>`, downloads the draft (only
+   the write token can see one), and hands the draft bytes, the transaction, and the
    event record to the next jobs as one artifact, by ID and digests; the
    transaction names every asset's digest.
 2. `verify-draft`, a job whose token can only read contents and that holds no
@@ -188,9 +215,13 @@ succeeded:
    draft it recaptures and revalidates the admitted evidence, supersession
    included, because a rerun of the failed jobs reuses the release job's
    handoff without repeating that job's recapture. Evidence that moved stops
-   the run with the verified draft left in place, and the next admitted
-   dispatch reuses that draft. It then re-reads the draft
-   once more, records `publishing`, and only then makes the release public. The
+   the run with the verified draft left in place. The next admitted dispatch
+   reuses that draft while main is unchanged, and otherwise replaces it with a
+   build of the newer commit. It then re-reads the draft
+   once more, records `publishing`, and only then makes the release public,
+   refusing unless the tag still names the run's admitted commit: an older run
+   rerun after its draft was replaced, or left without its tag, stops here
+   whatever its asset digests say. The
    publication sets GitHub's "Latest" flag explicitly: on only when no published
    release sorts above this version, comparing major, minor, patch, and revision
    as numbers, so a rebuild of an older branch never takes the badge from the

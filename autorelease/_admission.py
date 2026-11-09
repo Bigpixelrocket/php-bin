@@ -218,6 +218,18 @@ def validate_recipe_rebuild_evidence(
     )
 
 
+# The platforms every release publishes, in `RELEASE_PLATFORMS` order: macOS
+# arm64 on macOS 26.0 or newer, and Linux x86_64 and aarch64 against glibc 2.17
+# or newer. `autorelease/policy-invariants.json` must state exactly this list, and
+# mise-php's consumer asserts the same list, so changing it is a reviewed edit in
+# both repositories.
+REVIEWED_POLICY_TARGETS = [
+    {"os": "macOS", "minimumVersion": "26.0", "architecture": "arm64", "sapi": "cli"},
+    {"os": "Linux", "minimumGlibcVersion": "2.17", "architecture": "x86_64", "sapi": "cli"},
+    {"os": "Linux", "minimumGlibcVersion": "2.17", "architecture": "aarch64", "sapi": "cli"},
+]
+
+
 def _validate_support_policy_document(
     policy: Any,
     invariants_path: pathlib.Path,
@@ -272,19 +284,15 @@ def validate_support_policy(root: pathlib.Path = ROOT) -> dict[str, Any]:
         set(invariants)
         == {
             "schemaVersion",
-            "target",
+            "targets",
             "allowPrereleases",
             "historicalExactVersionsRemainInstallable",
             "immutablePublishedAssets",
         },
         "policy invariants contain unknown or missing fields",
     )
-    require(invariants.get("schemaVersion") == 1, "unsupported policy invariants version")
-    require(
-        invariants.get("target")
-        == {"os": "macOS", "minimumVersion": "26.0", "architecture": "arm64", "sapi": "cli"},
-        "reviewed target invariant changed",
-    )
+    require(invariants.get("schemaVersion") == 2, "unsupported policy invariants version")
+    require(invariants.get("targets") == REVIEWED_POLICY_TARGETS, "reviewed target invariant changed")
     require(invariants.get("allowPrereleases") is False, "prereleases must remain forbidden")
     require(
         invariants.get("historicalExactVersionsRemainInstallable") is True,
@@ -671,6 +679,17 @@ def changed_paths(repo: pathlib.Path, base: str) -> list[str]:
     return sorted(set(paths + untracked))
 
 
+def git_mode(path: pathlib.Path) -> int:
+    """The mode git records for a regular file: 0o755 when its owner may execute
+    it, else 0o644.
+
+    Git stores only that bit, so the remaining permission bits come from the umask
+    of whichever checkout wrote the file (0o664 under umask 002, for example) and
+    must not decide admission or differ between the sealing and merging jobs.
+    """
+    return 0o755 if path.stat().st_mode & 0o100 else 0o644
+
+
 def seal_patch(
     repo: pathlib.Path,
     base: str,
@@ -710,8 +729,7 @@ def seal_patch(
             require(not candidate.is_symlink(), f"patch contains symlink: {path}")
             require(candidate.is_file(), f"patch contains unsupported entry: {path}")
             require(candidate.stat().st_size <= 2 * 1024 * 1024, f"patch file too large: {path}")
-            mode = candidate.stat().st_mode & 0o777
-            require(mode in {0o644, 0o755}, f"patch contains unexpected mode: {path}")
+            mode = git_mode(candidate)
             require(mode != 0o755 or path.startswith("scripts/"), f"unexpected executable path: {path}")
             body = candidate.read_bytes()
             require(b"\0" not in body, f"patch contains binary file: {path}")
@@ -770,7 +788,7 @@ def seal_patch(
             {
                 "path": path,
                 "digest": sha256_file(candidate) if candidate.is_file() else None,
-                "mode": oct(candidate.stat().st_mode & 0o777) if candidate.exists() else None,
+                "mode": oct(git_mode(candidate)) if candidate.exists() else None,
             }
         )
     manifest = {
@@ -869,6 +887,6 @@ def _verify_sealed_commit(
         if expected:
             require(sha256_file(candidate) == expected, f"validated file changed: {path}")
             require(
-                oct(candidate.stat().st_mode & 0o777) == file_record.get("mode"),
+                oct(git_mode(candidate)) == file_record.get("mode"),
                 f"validated file mode changed: {path}",
             )

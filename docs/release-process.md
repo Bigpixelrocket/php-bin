@@ -37,7 +37,9 @@ full contract.
    nothing. The built binary never runs in a job that holds the write token.
 4. It advances one legal state at a time, reuses an existing release's assets
    instead of the fresh build, and never overwrites, deletes, or retags a
-   published release.
+   published release. The one exception to reuse is an unpublished draft an
+   earlier attempt tagged at an older commit of main: the job deletes that
+   draft and its tag and releases its own build of the admitted commit.
 
 A first release on a new PHP branch additionally waits for exact-commit
 `php_bin_ready` and `mise_ready` records.
