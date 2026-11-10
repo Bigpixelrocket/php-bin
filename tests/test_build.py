@@ -480,6 +480,10 @@ class BuildScriptTests(unittest.TestCase):
             '  SPC_CMD_PREFIX_PHP_CONFIGURE: "./configure --prefix= --with-valgrind=no'
             ' --disable-shared --enable-static --disable-all --disable-phpdbg --enable-pic"\n'
         )
+        # The override copies StaticPHP 2.8.5's Linux command from its config/env.ini.
+        # Moving to another StaticPHP fails here until that copy is checked against
+        # the new env.ini and this pin moves with it.
+        self.assertEqual("2.8.5", (ROOT / ".spc-version").read_text().strip())
         for version, source, env, replaced in (
             ("8.6.0RC5", "tag", linux, True),
             ("9.0.0alpha1", "tag", linux, True),
@@ -845,6 +849,15 @@ class AttributionTests(unittest.TestCase):
         self.assertEqual(["intl"], self.attribute([*self.INTL_CHAIN, self.INTL_MAKE], extensions="intl,redis"))
         # The chain alone names it: every level counts, not only the last one printed.
         self.assertEqual(["intl"], self.attribute(self.INTL_CHAIN, extensions="intl,redis"))
+        # A chain no extension owns names nothing, however deep, so a broken core
+        # header still stops discovery instead of leaving an extension out.
+        self.assertEqual([], self.attribute([
+            "In file included from BUILD/source/php-src/main/main.c:1:",
+            "In file included from BUILD/source/php-src/main/php.h:35:",
+            "In file included from BUILD/source/php-src/Zend/zend.h:27:",
+            "BUILD/source/php-src/Zend/zend_types.h:10:1: error: x",
+            "make: *** [Makefile:1201: main/main.lo] Error 1",
+        ], extensions="intl,redis"))
         # The nearest file an extension owns wins over an outer one.
         self.assertEqual(["redis"], self.attribute([
             "In file included from BUILD/source/php-src/ext/igbinary/igbinary.c:3:",
