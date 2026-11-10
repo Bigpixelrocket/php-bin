@@ -1,0 +1,62 @@
+Local fix, not an upstream backport. Drop it once php-src fixes this upstream.
+
+PHP 8.6 compiles most of ext/intl as C++. Those files include php.h, whose
+main/snprintf.h has `#define vsnprintf ap_php_vsnprintf`, before
+<unicode/ucol.h>, which in C++ includes <functional> and through it libc++'s
+locale support. On Linux that is __locale_dir/support/linux.h, which calls
+std::vsnprintf; the macro turns it into std::ap_php_vsnprintf, and the collator
+and grapheme files fail to compile with zig's libc++. GCC's libstdc++ and
+macOS's libc++ never reach that call, so upstream CI does not see it.
+
+The macro is set aside only while ucol.h is read, at each place it is first
+included after php.h, and restored right after, so PHP's own code still calls
+ap_php_vsnprintf. No source token changes outside those headers.
+
+diff --git a/ext/intl/collator/collator_class.h b/ext/intl/collator/collator_class.h
+--- a/ext/intl/collator/collator_class.h
++++ b/ext/intl/collator/collator_class.h
+@@ -28,7 +28,12 @@
+ }
+ #endif
+ 
++/* snprintf.h's vsnprintf macro would rename std::vsnprintf in the libc++
++ * headers ucol.h includes in C++. */
++#pragma push_macro("vsnprintf")
++#undef vsnprintf
+ #include <unicode/ucol.h>
++#pragma pop_macro("vsnprintf")
+ 
+ typedef struct {
+ 	// error handling
+diff --git a/ext/intl/grapheme/grapheme_string.cpp b/ext/intl/grapheme/grapheme_string.cpp
+--- a/ext/intl/grapheme/grapheme_string.cpp
++++ b/ext/intl/grapheme/grapheme_string.cpp
+@@ -30,7 +30,12 @@
+ 
+ #include <unicode/utypes.h>
+ #include <unicode/utf8.h>
++/* snprintf.h's vsnprintf macro would rename std::vsnprintf in the libc++
++ * headers ucol.h includes in C++. */
++#pragma push_macro("vsnprintf")
++#undef vsnprintf
+ #include <unicode/ucol.h>
++#pragma pop_macro("vsnprintf")
+ #include <unicode/ustring.h>
+ #include <unicode/ubrk.h>
+ 
+diff --git a/ext/intl/grapheme/grapheme_util.cpp b/ext/intl/grapheme/grapheme_util.cpp
+--- a/ext/intl/grapheme/grapheme_util.cpp
++++ b/ext/intl/grapheme/grapheme_util.cpp
+@@ -30,7 +30,12 @@
+ }
+ 
+ #include <unicode/utypes.h>
++/* snprintf.h's vsnprintf macro would rename std::vsnprintf in the libc++
++ * headers ucol.h includes in C++. */
++#pragma push_macro("vsnprintf")
++#undef vsnprintf
+ #include <unicode/ucol.h>
++#pragma pop_macro("vsnprintf")
+ #include <unicode/ustring.h>
+ #include <unicode/ubrk.h>
+ #include <unicode/usearch.h>

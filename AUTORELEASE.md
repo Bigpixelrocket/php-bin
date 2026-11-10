@@ -456,7 +456,11 @@ upstream php-src fix it was released without carries the backport in
 buildconf; a patch that no longer applies stops the build. PHP 8.3 carries
 php-src `d7ddf83`, which lets StaticPHP's `php_cv_have_avx512=no` reach
 configure, so 8.3 leaves out the base64 AVX-512 kernels a baseline x86_64
-build cannot compile, as 8.4 and later do.
+build cannot compile, as 8.4 and later do. The one exception to backports only
+is PHP 8.6's local intl fix, kept until php-src fixes it upstream: 8.6 compiles
+most of ext/intl as C++, and php.h's `vsnprintf` macro renames the
+`std::vsnprintf` call in the libc++ headers `unicode/ucol.h` pulls in on Linux,
+so the patch sets the macro aside only while that header is read.
 
 ## Branch status
 
@@ -620,14 +624,17 @@ base on every platform, each on its own native runner (`DISCOVER_MODULE_LIST`
 in `scripts/build.sh`, read-only like every build). Every stage extension is tried. When the build fails and a compiler
 error points into an extension's source (`scripts/attribute-build-failure`),
 that extension is left out, with every shared extension that requires it, and
-the build is retried with the libraries already built. An error inside one of
-PHP's own headers belongs to the extension source that included it, a
+the build is retried with the libraries already built. An error inside a
+header, whether one of PHP's own, a library's, or a C++ standard header,
+belongs to the nearest file in its include chain that an extension owns, and a
+failed make target in `ext/<name>/` belongs to that extension; a
 `configure: error:` belongs to the shared extension whose own configure run
 failed (for example one that refuses an unsupported PHP version), and an
 error in an extension already left out means StaticPHP built it again as a
 dependency, so the tried extensions that depend on it (its own
-`spc dev:extensions` table) are left out instead. An error that names no
-extension, in PHP itself or a library, fails the run instead of guessing.
+`spc dev:extensions` table) are left out instead. An error whose file and
+include chain name no extension, as in PHP's own sources or a library's, fails
+the run instead of guessing.
 StaticPHP stops at the first extension that fails, so a branch most PECL
 extensions do not support yet takes one attempt per extension: PHP 8.6.0RC4
 needed about two dozen. Discovery therefore runs as up to three passes of

@@ -213,11 +213,25 @@ class BuildScriptTests(unittest.TestCase):
 
     def test_the_php_src_backports_apply_only_to_their_branch(self):
         directories = sorted(path.name for path in (ROOT / "patches/php-src").iterdir())
-        self.assertEqual(["8.3"], directories)
+        self.assertEqual(["8.3", "8.6"], directories)
         backport = (ROOT / "patches/php-src/8.3/0001-autotools-refactor-avx-512-checks.patch").read_text()
         self.assertIn("d7ddf83dde6bd0829d991a6c45aa8baa85705ff9", backport)
         self.assertIn("+[php_cv_have_avx512],", backport)
         self.assertIn("+[php_cv_have_avx512vbmi],", backport)
+        # 8.6 carries the one local fix, which says so and touches only intl's ucol.h includes.
+        (local_fix,) = sorted((ROOT / "patches/php-src/8.6").iterdir())
+        text = local_fix.read_text()
+        self.assertTrue(text.startswith("Local fix, not an upstream backport."))
+        self.assertEqual(
+            ["ext/intl/collator/collator_class.h", "ext/intl/grapheme/grapheme_string.cpp",
+             "ext/intl/grapheme/grapheme_util.cpp"],
+            re.findall(r"^\+\+\+ b/(\S+)$", text, re.M),
+        )
+        added = [line[1:] for line in text.splitlines() if line.startswith("+") and not line.startswith("+++")]
+        self.assertEqual(3, added.count('#pragma push_macro("vsnprintf")'))
+        self.assertEqual(3, added.count("#undef vsnprintf"))
+        self.assertEqual(3, added.count('#pragma pop_macro("vsnprintf")'))
+        self.assertFalse([line for line in text.splitlines() if line.startswith("-") and not line.startswith("---")])
 
     def calls_with(self, prefix):
         return [line[len(prefix):] for line in self.calls.read_text().splitlines() if line.startswith(prefix)]
@@ -452,6 +466,44 @@ class BuildScriptTests(unittest.TestCase):
                     f'    - "php-src:https://github.com/php/php-src/archive/refs/tags/php-{version}.tar.gz"\n',
                     download,
                 )
+
+    def test_only_php_8_6_and_later_on_linux_replace_staticphps_configure_command(self):
+        # A Linux build machine; the build stops after writing its craft files,
+        # since this recipe copy has no pinned zig.
+        linux_bin = self.scratch / "linux-bin"
+        linux_bin.mkdir()
+        for name in ("uname", "getconf"):
+            (linux_bin / name).write_text(FAKE_SMOKE_TOOLS[name])
+            (linux_bin / name).chmod(0o755)
+        linux = {"PATH": f"{linux_bin}:{self.env['PATH']}", "FAKE_ARCH": "x86_64"}
+        command = (
+            '  SPC_CMD_PREFIX_PHP_CONFIGURE: "./configure --prefix= --with-valgrind=no'
+            ' --disable-shared --enable-static --disable-all --disable-phpdbg --enable-pic"\n'
+        )
+        # The override copies StaticPHP 2.8.5's Linux command from its config/env.ini.
+        # Moving to another StaticPHP fails here until that copy is checked against
+        # the new env.ini and this pin moves with it.
+        self.assertEqual("2.8.5", (ROOT / ".spc-version").read_text().strip())
+        for version, source, env, replaced in (
+            ("8.6.0RC5", "tag", linux, True),
+            ("9.0.0alpha1", "tag", linux, True),
+            ("8.5.12", "release", linux, False),
+            ("8.2.30", "release", linux, False),
+            ("8.6.0RC5", "tag", {}, False),
+        ):
+            with self.subTest(version=version, linux=bool(env)):
+                self.build(version, PHP_SOURCE=source, **env)
+                build = (self.root / f".build/{version}/s4/craft-build.yml").read_text()
+                self.assertEqual(bool(env), "ac_cv_have_decl_gettid" in build)
+                self.assertEqual(replaced, command in build)
+                self.assertEqual(replaced, "SPC_CMD_PREFIX_PHP_CONFIGURE" in build)
+                self.assertNotIn("--with-pic", build)
+                # 8.6's epoll_pwait2 check, which glibc 2.17 cannot satisfy, is answered no.
+                self.assertEqual(
+                    replaced,
+                    '  ac_cv_func_epoll_pwait2: "no"\n  ac_cv_have_decl_epoll_pwait2: "no"\n' in build,
+                )
+                self.assertEqual(replaced, "epoll_pwait2" in build)
 
     def test_a_tag_build_needs_an_exact_tag_and_a_known_source(self):
         for version, source, message in (
@@ -773,6 +825,62 @@ class AttributionTests(unittest.TestCase):
             "BUILD/buildroot/include/php/Zend/zend_enum.h:39:9: warning: harmless",
             "BUILD/source/php-src/Zend/zend.c:1:1: error: core",
         ], extensions="mongodb"))
+
+    # Lines as StaticPHP 2.8.5 logged PHP 8.6.0RC5's intl failing against zig's libc++
+    # on Linux: clang's include chain, one line per level, then GNU make's target.
+    INTL_CHAIN = [
+        "In file included from BUILD/source/php-src/ext/intl/collator/collator_attr.cpp:28:",
+        "In file included from BUILD/source/php-src/ext/intl/collator/collator_class.h:31:",
+        "In file included from BUILD/buildroot/include/unicode/ucol.h:1524:",
+        "In file included from BUILD/pkgroot/x86_64-linux/zig/lib/libcxx/include/functional:601:",
+        "In file included from BUILD/pkgroot/x86_64-linux/zig/lib/libcxx/include/vector:363:",
+        "In file included from BUILD/pkgroot/x86_64-linux/zig/lib/libcxx/include/locale:197:",
+        "In file included from BUILD/pkgroot/x86_64-linux/zig/lib/libcxx/include/__locale:17:",
+        "In file included from BUILD/pkgroot/x86_64-linux/zig/lib/libcxx/include/__locale_dir/locale_base_api.h:126:",
+        "BUILD/pkgroot/x86_64-linux/zig/lib/libcxx/include/__locale_dir/support/linux.h:247:20: error: no member"
+        " named 'ap_php_vsnprintf' in namespace 'std'",
+        "  247 |   int __res = std::vsnprintf(__s, __n, __format, __va);",
+        "BUILD/source/php-src/main/snprintf.h:102:19: note: expanded from macro 'vsnprintf'",
+        "1 error generated.",
+    ]
+    INTL_MAKE = "make: *** [Makefile:1389: ext/intl/collator/collator_attr.lo] Error 1"
+
+    def test_an_error_deep_in_a_clang_include_chain_belongs_to_the_nearest_extension_file(self):
+        self.assertEqual(["intl"], self.attribute([*self.INTL_CHAIN, self.INTL_MAKE], extensions="intl,redis"))
+        # The chain alone names it: every level counts, not only the last one printed.
+        self.assertEqual(["intl"], self.attribute(self.INTL_CHAIN, extensions="intl,redis"))
+        # A core header failing inside an extension's file belongs to that extension,
+        # as it did when the extension included the header directly.
+        self.assertEqual(["redis"], self.attribute([
+            "In file included from BUILD/source/php-src/ext/redis/redis.c:1:",
+            "In file included from BUILD/source/php-src/main/php.h:35:",
+            "BUILD/source/php-src/Zend/zend_types.h:10:1: error: x",
+        ], extensions="intl,redis"))
+        # A chain no extension owns names nothing, however deep, so a core header
+        # that also breaks PHP's own files still stops discovery.
+        self.assertEqual([], self.attribute([
+            "In file included from BUILD/source/php-src/main/main.c:1:",
+            "In file included from BUILD/source/php-src/main/php.h:35:",
+            "In file included from BUILD/source/php-src/Zend/zend.h:27:",
+            "BUILD/source/php-src/Zend/zend_types.h:10:1: error: x",
+            "make: *** [Makefile:1201: main/main.lo] Error 1",
+        ], extensions="intl,redis"))
+        # The nearest file an extension owns wins over an outer one.
+        self.assertEqual(["redis"], self.attribute([
+            "In file included from BUILD/source/php-src/ext/igbinary/igbinary.c:3:",
+            "In file included from BUILD/source/php-src/ext/redis/library.h:5:",
+            "BUILD/buildroot/include/php/Zend/zend_enum.h:39:9: error: x",
+        ], extensions="igbinary,redis"))
+        # GCC prints the nearest file first and the outer ones on `from` lines.
+        self.assertEqual(["redis"], self.attribute([
+            "In file included from BUILD/source/php-src/ext/redis/library.h:5,",
+            "                 from BUILD/source/php-src/ext/igbinary/igbinary.c:3:",
+            "BUILD/buildroot/include/php/Zend/zend_enum.h:39:9: error: x",
+        ], extensions="igbinary,redis"))
+
+    def test_gnu_make_targets_with_their_makefile_line_name_their_extension(self):
+        self.assertEqual(["intl"], self.attribute([self.INTL_MAKE], extensions="intl,redis"))
+        self.assertEqual([], self.attribute(["make: *** [Makefile:1201: all] Error 2"], extensions="intl"))
 
     def test_a_left_out_extension_built_again_as_a_dependency_leaves_out_what_needs_it(self):
         # pdo_sqlsrv depends on sqlsrv in StaticPHP's own table, which php-bin never repeats.

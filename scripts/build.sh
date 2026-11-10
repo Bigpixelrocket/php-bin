@@ -305,6 +305,21 @@ EOF
     # are the ones a shipped extension uses (excimer); it has fallbacks for both.
     echo '  ac_cv_have_decl_gettid: "no"'
     echo '  ac_cv_have_decl_pthread_attr_setsigmask_np: "no"'
+    # StaticPHP's Linux configure command passes Libtool's --with-pic, which PHP
+    # 8.6's configure rejects as obsolete; --enable-pic is the same setting under
+    # its new name. This is StaticPHP's own command (config/env.ini in the
+    # version .spc-version pins) with only that flag changed, so recheck it when
+    # StaticPHP changes. Earlier branches keep StaticPHP's command untouched.
+    #
+    # PHP 8.6's poll API uses epoll_pwait2 (glibc 2.35) when configure finds it,
+    # and its check accepts a declaration alone, which zig's headers always have;
+    # the binary would then not link. With both answers no, it uses epoll_wait,
+    # its own fallback. Earlier branches never check for it.
+    if (( PHP_MAJOR > 8 || (PHP_MAJOR == 8 && PHP_MINOR_NUMBER >= 6) )); then
+      echo '  SPC_CMD_PREFIX_PHP_CONFIGURE: "./configure --prefix= --with-valgrind=no --disable-shared --enable-static --disable-all --disable-phpdbg --enable-pic"'
+      echo '  ac_cv_func_epoll_pwait2: "no"'
+      echo '  ac_cv_have_decl_epoll_pwait2: "no"'
+    fi
   fi
   cat <<EOF
   ac_cv_func_memset_s: "no"
@@ -335,7 +350,8 @@ remove_unconfigurable_extension_dirs() {
 # Apply this branch's php-src patches from patches/php-src/<branch>/, in name
 # order, before StaticPHP runs buildconf, so a patch to build/*.m4 reaches
 # configure. Each is a backport of an upstream php-src commit that a branch
-# released before it needs; every other branch has no directory and applies
+# released before it needs, or, with its header saying so, a local fix kept
+# until upstream has one; every other branch has no directory and applies
 # nothing. A patch already in the source, as when StaticPHP reuses an extracted
 # tree, is left as it is; one that does not apply stops the build.
 apply_php_src_patches() {
