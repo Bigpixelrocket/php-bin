@@ -849,8 +849,15 @@ class AttributionTests(unittest.TestCase):
         self.assertEqual(["intl"], self.attribute([*self.INTL_CHAIN, self.INTL_MAKE], extensions="intl,redis"))
         # The chain alone names it: every level counts, not only the last one printed.
         self.assertEqual(["intl"], self.attribute(self.INTL_CHAIN, extensions="intl,redis"))
-        # A chain no extension owns names nothing, however deep, so a broken core
-        # header still stops discovery instead of leaving an extension out.
+        # A core header failing inside an extension's file belongs to that extension,
+        # as it did when the extension included the header directly.
+        self.assertEqual(["redis"], self.attribute([
+            "In file included from BUILD/source/php-src/ext/redis/redis.c:1:",
+            "In file included from BUILD/source/php-src/main/php.h:35:",
+            "BUILD/source/php-src/Zend/zend_types.h:10:1: error: x",
+        ], extensions="intl,redis"))
+        # A chain no extension owns names nothing, however deep, so a core header
+        # that also breaks PHP's own files still stops discovery.
         self.assertEqual([], self.attribute([
             "In file included from BUILD/source/php-src/main/main.c:1:",
             "In file included from BUILD/source/php-src/main/php.h:35:",

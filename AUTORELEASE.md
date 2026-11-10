@@ -624,14 +624,17 @@ base on every platform, each on its own native runner (`DISCOVER_MODULE_LIST`
 in `scripts/build.sh`, read-only like every build). Every stage extension is tried. When the build fails and a compiler
 error points into an extension's source (`scripts/attribute-build-failure`),
 that extension is left out, with every shared extension that requires it, and
-the build is retried with the libraries already built. An error inside one of
-PHP's own headers belongs to the extension source that included it, a
+the build is retried with the libraries already built. An error inside a
+header, whether one of PHP's own, a library's, or a C++ standard header,
+belongs to the nearest file in its include chain that an extension owns, and a
+failed make target in `ext/<name>/` belongs to that extension; a
 `configure: error:` belongs to the shared extension whose own configure run
 failed (for example one that refuses an unsupported PHP version), and an
 error in an extension already left out means StaticPHP built it again as a
 dependency, so the tried extensions that depend on it (its own
-`spc dev:extensions` table) are left out instead. An error that names no
-extension, in PHP itself or a library, fails the run instead of guessing.
+`spc dev:extensions` table) are left out instead. An error whose file and
+include chain name no extension, as in PHP's own sources or a library's, fails
+the run instead of guessing.
 StaticPHP stops at the first extension that fails, so a branch most PECL
 extensions do not support yet takes one attempt per extension: PHP 8.6.0RC4
 needed about two dozen. Discovery therefore runs as up to three passes of
