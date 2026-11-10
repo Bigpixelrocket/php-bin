@@ -494,6 +494,12 @@ class BuildScriptTests(unittest.TestCase):
                 self.assertEqual(replaced, command in build)
                 self.assertEqual(replaced, "SPC_CMD_PREFIX_PHP_CONFIGURE" in build)
                 self.assertNotIn("--with-pic", build)
+                # 8.6's epoll_pwait2 check, which glibc 2.17 cannot satisfy, is answered no.
+                self.assertEqual(
+                    replaced,
+                    '  ac_cv_func_epoll_pwait2: "no"\n  ac_cv_have_decl_epoll_pwait2: "no"\n' in build,
+                )
+                self.assertEqual(replaced, "epoll_pwait2" in build)
 
     def test_a_tag_build_needs_an_exact_tag_and_a_known_source(self):
         for version, source, message in (

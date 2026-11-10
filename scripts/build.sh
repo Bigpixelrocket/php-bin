@@ -310,8 +310,15 @@ EOF
     # its new name. This is StaticPHP's own command (config/env.ini in the
     # version .spc-version pins) with only that flag changed, so recheck it when
     # StaticPHP changes. Earlier branches keep StaticPHP's command untouched.
+    #
+    # PHP 8.6's poll API uses epoll_pwait2 (glibc 2.35) when configure finds it,
+    # and its check accepts a declaration alone, which zig's headers always have;
+    # the binary would then not link. With both answers no, it uses epoll_wait,
+    # its own fallback. Earlier branches never check for it.
     if (( PHP_MAJOR > 8 || (PHP_MAJOR == 8 && PHP_MINOR_NUMBER >= 6) )); then
       echo '  SPC_CMD_PREFIX_PHP_CONFIGURE: "./configure --prefix= --with-valgrind=no --disable-shared --enable-static --disable-all --disable-phpdbg --enable-pic"'
+      echo '  ac_cv_func_epoll_pwait2: "no"'
+      echo '  ac_cv_have_decl_epoll_pwait2: "no"'
     fi
   fi
   cat <<EOF
