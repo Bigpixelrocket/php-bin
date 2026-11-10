@@ -343,7 +343,8 @@ remove_unconfigurable_extension_dirs() {
 # Apply this branch's php-src patches from patches/php-src/<branch>/, in name
 # order, before StaticPHP runs buildconf, so a patch to build/*.m4 reaches
 # configure. Each is a backport of an upstream php-src commit that a branch
-# released before it needs; every other branch has no directory and applies
+# released before it needs, or, with its header saying so, a local fix kept
+# until upstream has one; every other branch has no directory and applies
 # nothing. A patch already in the source, as when StaticPHP reuses an extracted
 # tree, is left as it is; one that does not apply stops the build.
 apply_php_src_patches() {

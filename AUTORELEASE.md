@@ -456,7 +456,11 @@ upstream php-src fix it was released without carries the backport in
 buildconf; a patch that no longer applies stops the build. PHP 8.3 carries
 php-src `d7ddf83`, which lets StaticPHP's `php_cv_have_avx512=no` reach
 configure, so 8.3 leaves out the base64 AVX-512 kernels a baseline x86_64
-build cannot compile, as 8.4 and later do.
+build cannot compile, as 8.4 and later do. The one exception to backports only
+is PHP 8.6's local intl fix, kept until php-src fixes it upstream: 8.6 compiles
+most of ext/intl as C++, and php.h's `vsnprintf` macro renames the
+`std::vsnprintf` call in the libc++ headers `unicode/ucol.h` pulls in on Linux,
+so the patch sets the macro aside only while that header is read.
 
 ## Branch status
 

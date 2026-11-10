@@ -3,10 +3,14 @@
 
 Reads the logs StaticPHP wrote for the failed invocation and prints, one per line,
 every extension from `--extensions` that a compiler error (`<file>:<line>: error:`)
-or a failed make target (`*** [<file>] Error`) names by its source directory. An
-error inside a shared header, such as one of PHP's own installed headers, belongs to
-the source file that included it: clang prints that chain (`In file included from
-<file>:<line>:`) right before the diagnostic it applies to. A `configure: error:`
+or a failed make target (`*** [<file>] Error`, or GNU make's
+`*** [Makefile:<line>: <file>] Error`) names by its source directory. An error inside
+a shared header, such as one of PHP's own installed headers or a C++ standard
+header, belongs to the nearest file in its include chain that an extension owns.
+The compiler prints that chain right before the diagnostic it applies to: clang one
+`In file included from <file>:<line>:` line per level, outermost first, and GCC one
+such line for the nearest file followed by `from <file>:<line>` lines outward. A
+`configure: error:`
 belongs to the extension the configure run before it builds, when that run names
 exactly one (`--enable-<ext>=shared` or `--with-<ext>=shared`, as a shared
 extension's own configure does); PHP's own configure names many and stays
@@ -40,7 +44,7 @@ import sys
 ERROR_RE = re.compile(r"(?P<path>[^\s'\"():]+):\d+(?::\d+)?: (?:fatal )?error:")
 DIAGNOSTIC_RE = re.compile(r"[^\s'\"():]+:\d+(?::\d+)?: (?:fatal error|error|warning|note):")
 INCLUDED_RE = re.compile(r"^(?:In file included from|\s+from) (?P<path>[^\s'\"():]+):\d+[:,]")
-MAKE_RE = re.compile(r"\*\*\* \[(?P<path>[^\]\s]+)\] Error \d+")
+MAKE_RE = re.compile(r"\*\*\* \[(?:[^\]\s:]+:\d+: )?(?P<path>[^\]\s]+)\] Error \d+")
 CONFIGURE_RUN_RE = re.compile(r"\./configure\b")
 CONFIGURE_FLAG_RE = re.compile(r"--(?:enable|with)-(?P<name>[a-z0-9][a-z0-9_-]*)=shared\b")
 EXTENSION_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -113,7 +117,10 @@ def extension_for(directory: str, extensions: set[str]) -> str | None:
 
 def attribute(lines, source_dir: str, extensions: set[str], libraries: set[str] | None = None) -> list[str]:
     found = set()
-    included_from: list[str] = []
+    # The pending include chain as printed: one group per `In file included from`
+    # line, each nearer the error than the one before, and within a group the
+    # nearest file first.
+    included_from: list[list[str]] = []
     configuring: str | None = None
 
     def owner(path: str) -> str | None:
@@ -128,14 +135,15 @@ def attribute(lines, source_dir: str, extensions: set[str], libraries: set[str] 
             found.add(configuring)
         included = INCLUDED_RE.match(line)
         if included:
-            if line.startswith("In file included from"):
-                included_from = []
-            included_from.append(included.group("path"))
+            if line.startswith("In file included from") or not included_from:
+                included_from.append([])
+            included_from[-1].append(included.group("path"))
             continue
         error = ERROR_RE.search(line)
         if error:
-            # The error's own file first, then the files that included it.
-            for path in (error.group("path"), *included_from):
+            # The error's own file first, then the files that included it, nearest first.
+            chain = [path for group in reversed(included_from) for path in group]
+            for path in (error.group("path"), *chain):
                 extension = owner(path)
                 if extension:
                     found.add(extension)
