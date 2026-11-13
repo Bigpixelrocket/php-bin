@@ -106,7 +106,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Install pinned mise
-        uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
           version: 2026.10.19
           sha256: 7dc61dfa71abbcda1c40d18440bc556b5d58b80e6042bc4f95fd106fa1bb3c66
@@ -127,7 +127,7 @@ jobs:
             --output ./verification-results
       - name: Retain production-parity report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: autorelease-production-parity-${{ github.run_id }}
           path: verification-results/
@@ -170,7 +170,7 @@ jobs:
           jq '.state="complete" | .finalResult="passed"' canary/event.json > canary/complete.json
           ./scripts/notify-autorelease --event canary/complete.json --state canary/state.json --output canary/closed.json \
             --backend github --repo "${{ github.repository }}" --owner "${{ vars.AUTORELEASE_OWNER }}"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: autorelease-notification-canary-${{ github.run_id }}
@@ -210,7 +210,7 @@ jobs:
           repository: bigpixelrocket/mise-php
           ref: ${{ needs.preflight.outputs.mise_php_sha }}
           persist-credentials: false
-      - uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4
+      - uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
           github_token: ${{ github.token }}
           cache: false

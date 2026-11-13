@@ -164,7 +164,7 @@ jobs:
           key: canary-discovery-${{ matrix.platform.name }}-${{ matrix.build.mode }}-${{ matrix.build.version }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Retain an unfinished discovery
         if: hashFiles('canary/incomplete-*.txt') != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: canary-incomplete-${{ matrix.build.branch }}-${{ matrix.build.mode }}-${{ matrix.platform.name }}
           path: canary/incomplete-*.txt
@@ -193,7 +193,7 @@ jobs:
           fi
       - name: Retain left-out extensions that compile again
         if: matrix.build.mode == 'recheck' && hashFiles('canary/compiles-again-*.txt') != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: canary-compiles-again-${{ matrix.build.branch }}-${{ matrix.platform.name }}
           path: canary/compiles-again-*.txt
@@ -218,7 +218,7 @@ jobs:
     steps:
       - name: Download left-out extensions that compile again
         continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: canary-compiles-again-*
           merge-multiple: true
@@ -226,7 +226,7 @@ jobs:
       # No continue-on-error: a pattern with no match downloads nothing and passes, so a
       # failure here is a lost marker, which must stop the issue from closing.
       - name: Download unfinished discoveries
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: canary-incomplete-*
           merge-multiple: true
