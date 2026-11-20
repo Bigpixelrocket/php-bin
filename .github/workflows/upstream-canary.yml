@@ -56,7 +56,7 @@ jobs:
         run: |
           git ls-remote --tags --refs https://github.com/php/php-src.git 'refs/tags/php-*' \
             | awk '{ sub("^refs/tags/php-", "", $2); print $2 }' > "$RUNNER_TEMP/tags.txt"
-          gh api --paginate "repos/$REPOSITORY/releases?per_page=100" \
+          ./scripts/retry-gh-read.sh api --paginate "repos/$REPOSITORY/releases?per_page=100" \
             --jq '.[] | select(.draft | not) | .tag_name' > "$RUNNER_TEMP/releases.txt"
           builds="$(./scripts/select-canary-builds \
             --policy support-policy.json \

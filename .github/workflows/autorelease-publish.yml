@@ -193,6 +193,7 @@ jobs:
       EXACT_COMMIT: ${{ needs.preflight.outputs.exact_commit }}
       ACTION_KEY: ${{ needs.preflight.outputs.action_key }}
       INVESTIGATION_RUN_ID: ${{ needs.preflight.outputs.investigation_run_id }}
+      GH_READ: gh
     outputs:
       mise_commit: ${{ steps.plugin.outputs.commit }}
       handoff_artifact_id: ${{ steps.handoff.outputs.artifact-id }}
@@ -204,6 +205,11 @@ jobs:
           ref: ${{ needs.preflight.outputs.exact_commit }}
           fetch-depth: 0
           persist-credentials: false
+      - name: Enable GitHub read retries when present at the admitted commit
+        run: |
+          if [[ -x scripts/retry-gh-read.sh ]]; then
+            echo 'GH_READ=./scripts/retry-gh-read.sh' >> "$GITHUB_ENV"
+          fi
       - name: Download admitted plan and retained evidence
         env:
           GH_TOKEN: ${{ github.token }}
@@ -224,7 +230,7 @@ jobs:
           test "$(jq -r .preconditions.supportPolicyDigest admitted-run/autorelease-plan.json)" = "$(./autorelease/control.py digest support-policy.json)"
           ./autorelease/control.py operator-gate --operator-file .github/autorelease-operator.json --require-enabled
           mkdir -p release-run
-          gh api "repos/${{ github.repository }}/contents/.github/autorelease-operator.json?ref=main" \
+          "$GH_READ" api "repos/${{ github.repository }}/contents/.github/autorelease-operator.json?ref=main" \
             --jq .content | base64 --decode > release-run/current-operator.json
           ./autorelease/control.py operator-gate --operator-file release-run/current-operator.json --require-enabled
       - name: Re-capture authoritative evidence
@@ -250,7 +256,7 @@ jobs:
             event="autorelease-events/$filename"
             test -f "$event"
             test "$(jq -r .state "$event")" = "php_bin_ready"
-            gh api "repos/bigpixelrocket/mise-php/contents/readiness/$filename?ref=main" \
+            "$GH_READ" api "repos/bigpixelrocket/mise-php/contents/readiness/$filename?ref=main" \
               --jq .content | base64 --decode > release-run/mise-readiness.json
             test "$(jq -r .actionKey release-run/mise-readiness.json)" = "$ACTION_KEY"
             test "$(jq -r .ready release-run/mise-readiness.json)" = "true"
@@ -262,10 +268,10 @@ jobs:
             # it. The plugin is then verified at exactly the commit readiness validated.
             ready_commit="$(jq -r .misePhpCommit release-run/mise-readiness.json)"
             [[ "$ready_commit" =~ ^[0-9a-f]{40}$ ]]
-            ancestry="$(gh api "repos/bigpixelrocket/mise-php/compare/$ready_commit...$mise_commit" --jq .status)"
+            ancestry="$("$GH_READ" api "repos/bigpixelrocket/mise-php/compare/$ready_commit...$mise_commit" --jq .status)"
             [[ "$ancestry" == "identical" || "$ancestry" == "ahead" ]]
             mise_commit="$ready_commit"
-            gh api "repos/${{ github.repository }}/contents/support-policy.json?ref=$policy_commit" \
+            "$GH_READ" api "repos/${{ github.repository }}/contents/support-policy.json?ref=$policy_commit" \
               --jq .content | base64 --decode > release-run/readiness-policy.json
             test "sha256:$(shasum -a 256 release-run/readiness-policy.json | awk '{print $1}')" = "$(jq -r .policyDigest release-run/mise-readiness.json)"
           fi
@@ -280,7 +286,7 @@ jobs:
           # admitted commit. Once main has moved, that draft and its tag belong to an
           # older commit; it was never public, so it is deleted and this run releases
           # its own build. A published release is never touched here.
-          gh api "repos/${{ github.repository }}/contents/.github/autorelease-operator.json?ref=main" \
+          "$GH_READ" api "repos/${{ github.repository }}/contents/.github/autorelease-operator.json?ref=main" \
             --jq .content | base64 --decode > release-run/current-operator.json
           ./autorelease/control.py operator-gate --operator-file release-run/current-operator.json --require-enabled
           ./scripts/publish-release --discard-stale-draft \
@@ -376,7 +382,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api "repos/${{ github.repository }}/contents/.github/autorelease-operator.json?ref=main" \
+          "$GH_READ" api "repos/${{ github.repository }}/contents/.github/autorelease-operator.json?ref=main" \
             --jq .content | base64 --decode > release-run/current-operator.json
           ./autorelease/control.py operator-gate --operator-file release-run/current-operator.json --require-enabled
           for target in built draft_created draft_verified; do
@@ -571,6 +577,7 @@ jobs:
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
       EXACT_COMMIT: ${{ needs.preflight.outputs.exact_commit }}
+      GH_READ: gh
     outputs:
       handoff_artifact_id: ${{ steps.handoff.outputs.artifact-id }}
       transaction_digest: ${{ steps.handoff_digests.outputs.transaction_digest }}
@@ -580,6 +587,11 @@ jobs:
         with:
           ref: ${{ needs.preflight.outputs.exact_commit }}
           persist-credentials: false
+      - name: Enable GitHub read retries when present at the admitted commit
+        run: |
+          if [[ -x scripts/retry-gh-read.sh ]]; then
+            echo 'GH_READ=./scripts/retry-gh-read.sh' >> "$GITHUB_ENV"
+          fi
       - name: Download the verified draft transaction
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -637,7 +649,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api "repos/${{ github.repository }}/contents/.github/autorelease-operator.json?ref=main" \
+          "$GH_READ" api "repos/${{ github.repository }}/contents/.github/autorelease-operator.json?ref=main" \
             --jq .content | base64 --decode > release-run/current-operator.json
           ./autorelease/control.py operator-gate --operator-file release-run/current-operator.json --require-enabled
           for target in publishing published public_verified complete; do
