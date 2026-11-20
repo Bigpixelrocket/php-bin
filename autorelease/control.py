@@ -429,7 +429,10 @@ def main(argv: list[str] | None = None) -> int:
     route_parser = subparsers.add_parser("route-watch-action")
     for name in ("--action", "--action-key", "--record-action-key"):
         route_parser.add_argument(name, default="")
-    for name in ("--edits-required", "--recovery-merged", "--evidence-already-recorded", "--publish-in-flight"):
+    for name in (
+        "--edits-required", "--recovery-merged", "--evidence-already-recorded",
+        "--publish-in-flight", "--implementation-in-flight",
+    ):
         route_parser.add_argument(name, default="")
 
     operator_parser = subparsers.add_parser("operator-gate")
@@ -550,6 +553,7 @@ def main(argv: list[str] | None = None) -> int:
                                 args.evidence_already_recorded, "--evidence-already-recorded"
                             ),
                             "publishInFlight": cli_flag(args.publish_in_flight, "--publish-in-flight"),
+                            "implementationInFlight": cli_flag(args.implementation_in_flight, "--implementation-in-flight"),
                         }
                     )
                 )
@@ -620,19 +624,22 @@ def main(argv: list[str] | None = None) -> int:
             # status table, which was loaded apart from the rejected run state.
             try:
                 publish_in_flight = False
+                implementation_in_flight = False
                 if args.publish_in_flight and args.publish_in_flight.exists():
                     retained = load_json(args.publish_in_flight)
                     require(
                         isinstance(retained, dict)
-                        and set(retained) == {"schemaVersion", "publishInFlight"}
+                        and set(retained) - {"implementationInFlight"} == {"schemaVersion", "publishInFlight"}
                         and retained["schemaVersion"] == 1,
                         "retained publish in flight state has an unknown shape",
                     )
                     publish_in_flight = retained["publishInFlight"]
+                    implementation_in_flight = retained.get("implementationInFlight", False)
                 message = email_digest(
                     {
                         **report,
                         "publishInFlight": publish_in_flight,
+                        "implementationInFlight": implementation_in_flight,
                         "decision": load_json(args.decision) if args.decision and args.decision.exists() else None,
                         "plan": load_json(args.plan) if args.plan and args.plan.exists() else None,
                         "transaction": load_json(args.transaction)
