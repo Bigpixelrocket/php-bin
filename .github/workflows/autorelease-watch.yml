@@ -54,12 +54,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          runs="$(gh run list --repo "$REPOSITORY" --workflow autorelease-publish.yml --limit 20 \
-            --json databaseId,status --jq '.[] | select(.status != "completed") | .databaseId')"
+          mkdir -p autorelease-run
+          lookup_log=autorelease-run/publish-lookup.log
+          echo "Checking for publish runs in $REPOSITORY." > "$lookup_log"
+          trap 'cat "$lookup_log"' EXIT
+          runs="$(./scripts/retry-gh-read.sh run list --repo "$REPOSITORY" --workflow autorelease-publish.yml --limit 20 \
+            --json databaseId,status --jq '.[] | select(.status != "completed") | .databaseId' 2>> "$lookup_log")"
           in_flight=false
           for run_id in $runs; do
-            recorded="$(gh api "repos/$REPOSITORY/actions/runs/$run_id/jobs" \
-              --jq '[.jobs[] | select(.name == "Record the verified release" and .status == "completed")] | length')"
+            echo "Checking record job for publish run $run_id." >> "$lookup_log"
+            recorded="$(./scripts/retry-gh-read.sh api "repos/$REPOSITORY/actions/runs/$run_id/jobs" \
+              --jq '[.jobs[] | select(.name == "Record the verified release" and .status == "completed")] | length' 2>> "$lookup_log")"
             if [[ "$recorded" == "0" ]]; then
               echo "Publish run $run_id has not recorded its release yet."
               in_flight=true
@@ -67,7 +72,6 @@ jobs:
           done
           echo "in_flight=$in_flight" >> "$GITHUB_OUTPUT"
           # Retained beside the plan, so the digest says the run held its work back.
-          mkdir -p autorelease-run
           jq -n --argjson inFlight "$in_flight" '{schemaVersion:1,publishInFlight:$inFlight}' \
             > autorelease-run/publish-in-flight.json
       - name: Capture fixed raw evidence
@@ -262,7 +266,7 @@ jobs:
           fi
           test "$(gh release view "$version" --repo "${{ github.repository }}" --json isDraft --jq .isDraft)" = "false"
           test "$(gh release view "$version" --repo "${{ github.repository }}" --json isImmutable --jq .isImmutable)" = "true"
-          release_commit="$(gh api "repos/${{ github.repository }}/commits/$version" --jq .sha)"
+          release_commit="$(./scripts/retry-gh-read.sh api "repos/${{ github.repository }}/commits/$version" --jq .sha)"
           [[ "$release_commit" =~ ^[0-9a-f]{40}$ ]]
           # A hand-made release supplies both its assets and its own checksums, so the
           # bytes are only trusted once an attestation ties them to a build of this
@@ -573,7 +577,7 @@ jobs:
             test "$(jq -r .supportPolicyDigest "$event")" = "$(jq -r .policyDigest autorelease-plan-download/mise-readiness.json)"
             test "$(jq -r .policyInvariantsDigest "$event")" = "$(jq -r .policyInvariantsDigest autorelease-plan-download/mise-readiness.json)"
             policy_commit="$(jq -r .phpBinPolicyCommit autorelease-plan-download/mise-readiness.json)"
-            gh api "repos/${{ github.repository }}/contents/support-policy.json?ref=$policy_commit" \
+            ./scripts/retry-gh-read.sh api "repos/${{ github.repository }}/contents/support-policy.json?ref=$policy_commit" \
               --jq .content | base64 --decode > autorelease-plan-download/readiness-policy.json
             test "sha256:$(shasum -a 256 autorelease-plan-download/readiness-policy.json | awk '{print $1}')" = "$(jq -r .policyDigest autorelease-plan-download/mise-readiness.json)"
             jq -n --slurpfile ready autorelease-plan-download/mise-readiness.json \

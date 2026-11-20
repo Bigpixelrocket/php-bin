@@ -257,6 +257,7 @@ fetch_pinned_sources() {
 # ac_cv_header_unix_h stops configure from picking up c-client's unix.h, which
 # would otherwise leave HAVE_UNIX_H in the shipped php_config.h and break
 # user-built extensions.
+# StaticPHP's craft command only forwards string-valued options like retry.
 craft_file() {
   cat <<EOF
 php-version: "${PHP_VERSION%%[!0-9.]*}"
@@ -276,7 +277,7 @@ build-options:
   with-config-file-path: "/dev/null/php-bin"
   with-config-file-scan-dir: ""
 download-options:
-  retry: 5
+  retry: "5"
 EOF
   # Stages without a shared list leave SHARED_ROWS empty, which awk still
   # reads as one blank record; NF skips it.
@@ -297,6 +298,11 @@ EOF
     done <<< "$SHARED_ROWS"
   fi
   echo "extra-env:"
+  if [[ "$PHP_SOURCE" == "tag" ]]; then
+    # Tag archives leave Bison to generate the Zend parsers. The absolute paths
+    # in its line directives otherwise reach the installed PHP headers.
+    echo '  YACC: "bison --no-lines"'
+  fi
   if [[ "$PLATFORM" == macos-* ]]; then
     echo '  MACOSX_DEPLOYMENT_TARGET: "26.0"'
   else

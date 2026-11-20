@@ -35,6 +35,7 @@
     "scripts/check-public-language.sh",
     "tests/*",
     "scripts/lib.sh",
+    "scripts/retry-gh-read.sh",
     "scripts/install-spc.sh",
     "scripts/install-build-deps.sh",
     "scripts/attribute-build-failure",

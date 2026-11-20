@@ -352,6 +352,8 @@ class BuildScriptTests(unittest.TestCase):
             capture_output=True, check=False).returncode)
 
     def test_only_the_download_craft_downloads_and_only_the_build_craft_builds(self):
+        from autorelease.verify import load_workflow
+
         self.build("8.4.27")
         build_dir = self.root / ".build/8.4.27/s4"
         download = (build_dir / "craft-download.yml").read_text()
@@ -360,6 +362,9 @@ class BuildScriptTests(unittest.TestCase):
         self.assertIn("craft-options:\n  download: true\n  build: false\n", download)
         self.assertIn("craft-options:\n  download: false\n  build: true\n", build)
         self.assertNotIn("php-src:", download)
+        download_config = load_workflow(build_dir / "craft-download.yml")
+        self.assertEqual("5", download_config["download-options"]["retry"])
+        self.assertNotIn("YACC", load_workflow(build_dir / "craft-build.yml")["extra-env"])
 
     def curl_calls(self):
         return (self.scratch / "curl.txt").read_text().splitlines()
@@ -457,6 +462,8 @@ class BuildScriptTests(unittest.TestCase):
         self.assertEqual([], git_config())
 
     def test_a_tag_build_pins_php_src_to_the_exact_tag(self):
+        from autorelease.verify import load_workflow
+
         for version, numeric in (("8.5.12", "8.5.12"), ("8.6.0RC4", "8.6.0"), ("9.0.0alpha1", "9.0.0")):
             with self.subTest(version=version):
                 self.build(version, PHP_SOURCE="tag")
@@ -466,6 +473,8 @@ class BuildScriptTests(unittest.TestCase):
                     f'    - "php-src:https://github.com/php/php-src/archive/refs/tags/php-{version}.tar.gz"\n',
                     download,
                 )
+                craft = load_workflow(self.root / f".build/{version}/s4/craft-build.yml")
+                self.assertEqual("bison --no-lines", craft["extra-env"]["YACC"])
 
     def test_only_php_8_6_and_later_on_linux_replace_staticphps_configure_command(self):
         # A Linux build machine; the build stops after writing its craft files,

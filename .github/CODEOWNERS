@@ -31,6 +31,7 @@
 /scripts/check-public-language.sh @loadinglucian
 /tests/ @loadinglucian
 /scripts/lib.sh @loadinglucian
+/scripts/retry-gh-read.sh @loadinglucian
 /scripts/install-spc.sh @loadinglucian
 /scripts/install-build-deps.sh @loadinglucian
 /scripts/attribute-build-failure @loadinglucian
