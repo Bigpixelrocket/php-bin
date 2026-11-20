@@ -2546,6 +2546,13 @@ class AutoreleaseControlTests(unittest.TestCase):
 
         root = pathlib.Path(__file__).resolve().parents[1]
         jobs = load_workflow(root / ".github/workflows/autorelease-implement.yml")["jobs"]
+        base_policy = json.loads((root / "support-policy.json").read_text())
+        previous_branches = base_policy["maintainedBranches"]
+        newest = previous_branches[-1]
+        major, minor = newest.split(".")
+        branch = f"{major}.{int(minor) + 1}"
+        action_key = f"new_branch:{branch}"
+        version = f"{branch}.0"
 
         def step(job, name):
             return next(item for item in jobs[job]["steps"] if item.get("name") == name)
@@ -2588,22 +2595,26 @@ class AutoreleaseControlTests(unittest.TestCase):
             ).stdout.strip()
 
         def fixture(work):
-            """Return a clone of an origin whose main already carries new_branch:8.6."""
+            """Return a clone of an origin whose main already carries the new branch edit."""
             source = work / "source"
             tracked = git_in(root, "ls-files", "-z").split("\0")
             for path in filter(None, tracked):
                 if (root / path).is_file():
                     (source / path).parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(root / path, source / path)
-            policy = json.loads((source / "support-policy.json").read_text())
-            maintained = [*policy["maintainedBranches"], "8.6"]
-            policy.update(maintainedBranches=maintained, sourceEvidenceDigests=["sha256:" + "e" * 64],
-                          actionKey="new_branch:8.6", acceptedAt="2026-09-27T00:00:00Z")
-            (source / "support-policy.json").write_text(render_support_policy(policy))
-            shutil.copy(source / f"expected-modules/{maintained[-2]}.txt", source / "expected-modules/8.6.txt")
+            maintained = [*previous_branches, branch]
+            updated_policy = {
+                **base_policy,
+                "maintainedBranches": maintained,
+                "sourceEvidenceDigests": ["sha256:" + "e" * 64],
+                "actionKey": action_key,
+                "acceptedAt": "2026-09-27T00:00:00Z",
+            }
+            (source / "support-policy.json").write_text(render_support_policy(updated_policy))
+            shutil.copy(source / f"expected-modules/{newest}.txt", source / f"expected-modules/{branch}.txt")
             git_in(work, "init", "-q", "-b", "main", str(source))
             git_in(source, "add", "-A")
-            git_in(source, "commit", "-q", "-m", "chore: new_branch:8.6")
+            git_in(source, "commit", "-q", "-m", f"chore: {action_key}")
             origin = work / "origin.git"
             git_in(work, "clone", "-q", "--bare", str(source), str(origin))
             clone = work / "clone"
@@ -2611,17 +2622,16 @@ class AutoreleaseControlTests(unittest.TestCase):
             base = git_in(clone, "rev-parse", "HEAD")
             git_in(clone, "checkout", "-q", "--detach", base)
             # The admitted resume plan, exactly as the watcher retains it.
-            feeds = {branch: f"{branch}.1" for branch in maintained}
-            feeds["8.6"] = "8.6.0"
-            rows = {branch: ("stable", "31 Dec 2030") for branch in maintained}
+            feeds = {item: f"{item}.1" for item in previous_branches}
+            rows = {item: ("stable", "31 Dec 2030") for item in maintained}
             manifest = fixture_capture(
-                clone / "autorelease-run", branch_feeds=feeds, aggregate="8.6.0", page=support_page(rows),
-                releases=[{"tag_name": f"{branch}.1"} for branch in maintained[:-1]],
+                clone / "autorelease-run", branch_feeds={**feeds, branch: version}, aggregate=version,
+                page=support_page(rows), releases=[{"tag_name": tag} for tag in feeds.values()],
             )
             preconditions = {**FIXTURE_HEADS, "phpBinHead": base,
                              "supportPolicyDigest": sha256_file(clone / "support-policy.json")}
-            plan = classify_evidence(manifest, preconditions, [], maintained, "new_branch:8.6")
-            self.assertEqual(("new_branch:8.6", True, []), (plan["actionKey"], plan["editsRequired"], plan["allowedPaths"]["php-bin"]))
+            plan = classify_evidence(manifest, preconditions, [], maintained, action_key)
+            self.assertEqual((action_key, True, []), (plan["actionKey"], plan["editsRequired"], plan["allowedPaths"]["php-bin"]))
             (clone / "autorelease-run/autorelease-plan.json").write_text(json.dumps(plan))
             (work / "bin").mkdir()
             (work / "bin/gh").write_text(
@@ -2670,11 +2680,13 @@ class AutoreleaseControlTests(unittest.TestCase):
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual(base, outputs["commit"])
             # An earlier attempt's readiness PR for this key is closed; nothing else is.
+            title = f"chore: record {action_key} php-bin readiness"
+            other_title = f"chore: record new_branch:{major}.{int(minor) + 2} php-bin readiness"
             open_prs = [
-                {"number": 5, "headRefName": "autorelease/readiness-41", "title": "chore: record new_branch:8.6 php-bin readiness"},
-                {"number": 6, "headRefName": "autorelease/readiness-42", "title": "chore: record new_branch:8.7 php-bin readiness"},
-                {"number": 7, "headRefName": "autorelease/new_branch-8.6", "title": "chore: record new_branch:8.6 php-bin readiness"},
-                {"number": 8, "headRefName": "autorelease/readiness-77", "title": "chore: record new_branch:8.6 php-bin readiness"},
+                {"number": 5, "headRefName": "autorelease/readiness-41", "title": title},
+                {"number": 6, "headRefName": "autorelease/readiness-42", "title": other_title},
+                {"number": 7, "headRefName": f"autorelease/new_branch-{branch}", "title": title},
+                {"number": 8, "headRefName": "autorelease/readiness-77", "title": title},
             ]
             result, outputs = run_step(work, clone, scripts[6], MERGED_COMMIT=outputs["commit"], FAKE_PRS=json.dumps(open_prs),
                                        GITHUB_REPOSITORY="o/r")
@@ -2692,7 +2704,7 @@ class AutoreleaseControlTests(unittest.TestCase):
             head = git_in(origin, "rev-parse", "autorelease/readiness-77")
             self.assertEqual((base, head), (outputs["base_sha"], outputs["head_sha"]))
             self.assertEqual(f"{head} {base}", git_in(origin, "rev-list", "--parents", "-n", "1", head))
-            record_path = "autorelease-events/new_branch-8.6.json"
+            record_path = f"autorelease-events/new_branch-{branch}.json"
             self.assertEqual(record_path, git_in(origin, "diff", "--name-only", base, head))
             record = json.loads(git_in(origin, "show", f"{head}:{record_path}"))
             # The record binds the validated main commit and the policy of that tree.
