@@ -352,6 +352,8 @@ class BuildScriptTests(unittest.TestCase):
             capture_output=True, check=False).returncode)
 
     def test_only_the_download_craft_downloads_and_only_the_build_craft_builds(self):
+        from autorelease.verify import load_workflow
+
         self.build("8.4.27")
         build_dir = self.root / ".build/8.4.27/s4"
         download = (build_dir / "craft-download.yml").read_text()
@@ -360,6 +362,9 @@ class BuildScriptTests(unittest.TestCase):
         self.assertIn("craft-options:\n  download: true\n  build: false\n", download)
         self.assertIn("craft-options:\n  download: false\n  build: true\n", build)
         self.assertNotIn("php-src:", download)
+        download_config = load_workflow(build_dir / "craft-download.yml")
+        self.assertEqual("5", download_config["download-options"]["retry"])
+        self.assertNotIn("YACC", load_workflow(build_dir / "craft-build.yml")["extra-env"])
 
     def curl_calls(self):
         return (self.scratch / "curl.txt").read_text().splitlines()
@@ -467,7 +472,9 @@ class BuildScriptTests(unittest.TestCase):
                     download,
                 )
 
-    def test_only_php_8_6_and_later_on_linux_replace_staticphps_configure_command(self):
+    def test_craft_configure_overrides_match_the_platform_version_and_source(self):
+        from autorelease.verify import load_workflow
+
         # A Linux build machine; the build stops after writing its craft files,
         # since this recipe copy has no pinned zig.
         linux_bin = self.scratch / "linux-bin"
@@ -487,13 +494,17 @@ class BuildScriptTests(unittest.TestCase):
         for version, source, env, replaced in (
             ("8.6.0RC5", "tag", linux, True),
             ("9.0.0alpha1", "tag", linux, True),
+            ("8.5.13", "tag", linux, False),
             ("8.5.12", "release", linux, False),
             ("8.2.30", "release", linux, False),
             ("8.6.0RC5", "tag", {}, False),
         ):
             with self.subTest(version=version, linux=bool(env)):
                 self.build(version, PHP_SOURCE=source, **env)
-                build = (self.root / f".build/{version}/s4/craft-build.yml").read_text()
+                craft_file = self.root / f".build/{version}/s4/craft-build.yml"
+                build = craft_file.read_text()
+                yacc = load_workflow(craft_file)["extra-env"].get("YACC")
+                self.assertEqual("bison --no-lines" if env and source == "tag" else None, yacc)
                 self.assertEqual(bool(env), "ac_cv_have_decl_gettid" in build)
                 self.assertEqual(replaced, command in build)
                 self.assertEqual(replaced, "SPC_CMD_PREFIX_PHP_CONFIGURE" in build)
