@@ -462,8 +462,6 @@ class BuildScriptTests(unittest.TestCase):
         self.assertEqual([], git_config())
 
     def test_a_tag_build_pins_php_src_to_the_exact_tag(self):
-        from autorelease.verify import load_workflow
-
         for version, numeric in (("8.5.12", "8.5.12"), ("8.6.0RC4", "8.6.0"), ("9.0.0alpha1", "9.0.0")):
             with self.subTest(version=version):
                 self.build(version, PHP_SOURCE="tag")
@@ -473,10 +471,10 @@ class BuildScriptTests(unittest.TestCase):
                     f'    - "php-src:https://github.com/php/php-src/archive/refs/tags/php-{version}.tar.gz"\n',
                     download,
                 )
-                craft = load_workflow(self.root / f".build/{version}/s4/craft-build.yml")
-                self.assertEqual("bison --no-lines", craft["extra-env"]["YACC"])
 
-    def test_only_php_8_6_and_later_on_linux_replace_staticphps_configure_command(self):
+    def test_craft_configure_overrides_match_the_platform_version_and_source(self):
+        from autorelease.verify import load_workflow
+
         # A Linux build machine; the build stops after writing its craft files,
         # since this recipe copy has no pinned zig.
         linux_bin = self.scratch / "linux-bin"
@@ -496,13 +494,17 @@ class BuildScriptTests(unittest.TestCase):
         for version, source, env, replaced in (
             ("8.6.0RC5", "tag", linux, True),
             ("9.0.0alpha1", "tag", linux, True),
+            ("8.5.13", "tag", linux, False),
             ("8.5.12", "release", linux, False),
             ("8.2.30", "release", linux, False),
             ("8.6.0RC5", "tag", {}, False),
         ):
             with self.subTest(version=version, linux=bool(env)):
                 self.build(version, PHP_SOURCE=source, **env)
-                build = (self.root / f".build/{version}/s4/craft-build.yml").read_text()
+                craft_file = self.root / f".build/{version}/s4/craft-build.yml"
+                build = craft_file.read_text()
+                yacc = load_workflow(craft_file)["extra-env"].get("YACC")
+                self.assertEqual("bison --no-lines" if env and source == "tag" else None, yacc)
                 self.assertEqual(bool(env), "ac_cv_have_decl_gettid" in build)
                 self.assertEqual(replaced, command in build)
                 self.assertEqual(replaced, "SPC_CMD_PREFIX_PHP_CONFIGURE" in build)

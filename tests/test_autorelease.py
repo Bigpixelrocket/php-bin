@@ -3059,13 +3059,13 @@ class AutoreleaseControlTests(unittest.TestCase):
                 "esac\n"
                 'if [[ -n "$FAKE_FAIL" && "$*" == *"$FAKE_FAIL"* ]] &&\n'
                 '   (( $(grep -Fc -- "$FAKE_FAIL" "$FAKE_LOG") <= FAKE_FAILURES )); then\n'
-                '  echo 999; echo "gh: request failed (HTTP $FAKE_STATUS)" >&2; exit 4\n'
+                '  echo 999; echo "$FAKE_ERROR" >&2; exit 4\n'
                 'fi\n'
                 'jq -r "$filter" <<< "$body"\n'
             )
             (work / "bin/gh").chmod(0o755)
 
-            def in_flight(runs, fail="", *, status=404, failures=4, **jobs):
+            def in_flight(runs, fail="", *, error="", failures=4, **jobs):
                 output = work / "output.txt"
                 output.write_text("")
                 for path in (artifact, gh_log, sleeps):
@@ -3075,7 +3075,7 @@ class AutoreleaseControlTests(unittest.TestCase):
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     env={**os.environ, "PATH": f"{work / 'bin'}:{os.environ['PATH']}", "FAKE_LOG": str(gh_log),
                          "GITHUB_OUTPUT": str(output), "REPOSITORY": "o/r", "FAKE_FAIL": fail,
-                         "FAKE_STATUS": str(status), "FAKE_FAILURES": str(failures), "FAKE_SLEEPS": str(sleeps),
+                         "FAKE_ERROR": error, "FAKE_FAILURES": str(failures), "FAKE_SLEEPS": str(sleeps),
                          "FAKE_RUNS": json.dumps(runs), **{f"FAKE_JOBS_{key[1:]}": json.dumps(value) for key, value in jobs.items()}},
                 )
                 return result, output.read_text()
@@ -3102,17 +3102,22 @@ class AutoreleaseControlTests(unittest.TestCase):
                         json.loads(artifact.read_text()),
                     )
             runs = [{"databaseId": 7, "status": "in_progress"}]
-            for fail in ("run list", "actions/runs/7/jobs"):
-                with self.subTest(fail=fail):
-                    result, output = in_flight(runs, fail, status=502, failures=1, r7=recording)
+            http_502 = "gh: request failed (HTTP 502)"
+            for fail, error in (
+                ("run list", http_502),
+                ("actions/runs/7/jobs", http_502),
+                ("run list", "error connecting to api.github.com"),
+            ):
+                with self.subTest(fail=fail, error=error):
+                    result, output = in_flight(runs, fail, error=error, failures=1, r7=recording)
                     self.assertEqual(0, result.returncode, result.stdout)
                     self.assertEqual("in_flight=true\n", output)
                     self.assertEqual("2\n", sleeps.read_text())
                     self.assertNotIn("999", gh_log.read_text())
-                    self.assertIn("HTTP 502", lookup_log.read_text())
-            for status, attempts in ((502, 4), (404, 1)):
-                with self.subTest(status=status):
-                    result, output = in_flight(runs, "run list", status=status, r7=recording)
+                    self.assertIn(error, lookup_log.read_text())
+            for error, attempts in ((http_502, 4), ("gh: Not Found (HTTP 404)", 1)):
+                with self.subTest(error=error):
+                    result, output = in_flight(runs, "run list", error=error, r7=recording)
                     self.assertEqual(4, result.returncode)
                     self.assertEqual("", output)
                     self.assertFalse(artifact.exists())

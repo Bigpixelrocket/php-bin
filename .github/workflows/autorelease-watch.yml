@@ -209,7 +209,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh run download "${{ github.run_id }}" \
+          ./scripts/retry-gh-read.sh run download "${{ github.run_id }}" \
             --repo "${{ github.repository }}" \
             --name "autorelease-investigation-${{ github.run_id }}" \
             --dir autorelease-plan-download
@@ -264,8 +264,8 @@ jobs:
             echo "The event record for $ACTION_KEY reached main after the decision was taken."
             exit 0
           fi
-          test "$(gh release view "$version" --repo "${{ github.repository }}" --json isDraft --jq .isDraft)" = "false"
-          test "$(gh release view "$version" --repo "${{ github.repository }}" --json isImmutable --jq .isImmutable)" = "true"
+          test "$(./scripts/retry-gh-read.sh release view "$version" --repo "${{ github.repository }}" --json isDraft --jq .isDraft)" = "false"
+          test "$(./scripts/retry-gh-read.sh release view "$version" --repo "${{ github.repository }}" --json isImmutable --jq .isImmutable)" = "true"
           release_commit="$(./scripts/retry-gh-read.sh api "repos/${{ github.repository }}/commits/$version" --jq .sha)"
           [[ "$release_commit" =~ ^[0-9a-f]{40}$ ]]
           # A hand-made release supplies both its assets and its own checksums, so the

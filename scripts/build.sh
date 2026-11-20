@@ -298,14 +298,15 @@ EOF
     done <<< "$SHARED_ROWS"
   fi
   echo "extra-env:"
-  if [[ "$PHP_SOURCE" == "tag" ]]; then
-    # Tag archives leave Bison to generate the Zend parsers. The absolute paths
-    # in its line directives otherwise reach the installed PHP headers.
-    echo '  YACC: "bison --no-lines"'
-  fi
   if [[ "$PLATFORM" == macos-* ]]; then
     echo '  MACOSX_DEPLOYMENT_TARGET: "26.0"'
   else
+    if [[ "$PHP_SOURCE" == "tag" ]]; then
+      # Tag archives leave Bison to generate the Zend parsers. Its line directives
+      # otherwise put absolute paths in the installed PHP headers. On macOS,
+      # StaticPHP sets YACC to Homebrew's yacc.
+      echo '  YACC: "bison --no-lines"'
+    fi
     # zig carries current glibc headers whatever version it links against, so a
     # configure check for a declaration finds functions glibc 2.17 lacks. These
     # are the ones a shipped extension uses (excimer); it has fallbacks for both.
