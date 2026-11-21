@@ -16,6 +16,10 @@ permissions:
   contents: read
   actions: read
 
+concurrency:
+  group: php-autorelease-implementation
+  cancel-in-progress: false
+
 defaults:
   run:
     shell: bash

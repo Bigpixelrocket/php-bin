@@ -21,7 +21,7 @@ jobs:
     name: Capture and classify
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Read-only: actions read only lists the publish runs still in flight.
+    # Read-only: actions read lists the autorelease runs still in flight.
     permissions:
       actions: read
       contents: read
@@ -35,21 +35,18 @@ jobs:
       # carries its own key rather than competing for the plan's.
       record_action_key: ${{ steps.decision.outputs.action_key }}
       status_artifact: ${{ steps.pages.outcome == 'success' && format('github-pages-{0}', github.run_attempt) || '' }}
-      publish_in_flight: ${{ steps.publishing.outputs.in_flight }}
+      publish_in_flight: ${{ steps.in-flight.outputs.in_flight }}
+      implementation_in_flight: ${{ steps.in-flight.outputs.implementation_in_flight }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Find a publish run still in flight
-        id: publishing
-        # A publish run that has not recorded its release yet would be admitted again from
-        # this run's capture, and the duplicate fails its recapture once the first one
-        # lands. Only watcher runs dispatch publish runs and they share one concurrency
-        # group, so no publish starts while this run lives: the set read here can only
-        # shrink, and reading it before the capture is the conservative moment. A run whose
-        # `Record the verified release` job has completed has nothing left to publish or
-        # record; the publish run that started this one is always such a run.
+      - name: Find autorelease runs still in flight
+        id: in-flight
+        # Read before capturing evidence, so a run that records its work during the
+        # capture still holds this watcher back. Watcher dispatches are serialized.
+        # A publish run can start the next watcher after its record job finishes.
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
@@ -70,9 +67,22 @@ jobs:
               in_flight=true
             fi
           done
-          echo "in_flight=$in_flight" >> "$GITHUB_OUTPUT"
+          echo "Checking for implementation runs in $REPOSITORY." >> "$lookup_log"
+          implementations="$(./scripts/retry-gh-read.sh api --paginate \
+            "repos/$REPOSITORY/actions/workflows/autorelease-implement.yml/runs?per_page=100" \
+            --jq '.workflow_runs[] | select(.status != "completed") | .id' 2>> "$lookup_log")"
+          implementation_in_flight=false
+          if [[ -n "$implementations" ]]; then
+            echo "Implementation runs still in flight: $implementations"
+            implementation_in_flight=true
+          fi
+          {
+            echo "in_flight=$in_flight"
+            echo "implementation_in_flight=$implementation_in_flight"
+          } >> "$GITHUB_OUTPUT"
           # Retained beside the plan, so the digest says the run held its work back.
-          jq -n --argjson inFlight "$in_flight" '{schemaVersion:1,publishInFlight:$inFlight}' \
+          jq -n --argjson publish "$in_flight" --argjson implementation "$implementation_in_flight" \
+            '{schemaVersion:1,publishInFlight:$publish,implementationInFlight:$implementation}' \
             > autorelease-run/publish-in-flight.json
       - name: Capture fixed raw evidence
         env:
@@ -229,15 +239,19 @@ jobs:
         env:
           ACTION_KEY: ${{ needs.investigate.outputs.record_action_key }}
           PUBLISH_IN_FLIGHT: ${{ needs.investigate.outputs.publish_in_flight }}
+          IMPLEMENTATION_IN_FLIGHT: ${{ needs.investigate.outputs.implementation_in_flight }}
           GH_TOKEN: ${{ github.token }}
         run: |
           # The same table that routes the dispatch decides whether a repair is due; this
           # step owns the recovery overlay, which runs beside any admitted plan route.
           route="$(./autorelease/control.py route-watch-action --record-action-key "$ACTION_KEY" \
-            --publish-in-flight "$PUBLISH_IN_FLIGHT" | jq -r .recoveryRoute)"
+            --publish-in-flight "$PUBLISH_IN_FLIGHT" \
+            --implementation-in-flight "$IMPLEMENTATION_IN_FLIGHT" | jq -r .recoveryRoute)"
           case "$route" in
             none)
-              if [[ -n "$ACTION_KEY" ]]; then
+              if [[ -n "$ACTION_KEY" && "$IMPLEMENTATION_IN_FLIGHT" == "true" ]]; then
+                echo "Recovering the record for $ACTION_KEY waits for the implementation in flight."
+              elif [[ -n "$ACTION_KEY" ]]; then
                 echo "The record for $ACTION_KEY is left to the publish run still in flight."
               else
                 echo "No published release is missing its event record."
@@ -396,7 +410,7 @@ jobs:
             --backend github --repo "${{ github.repository }}" --owner "${{ vars.AUTORELEASE_OWNER }}"
       - name: Prepare deterministic no-change evidence
         id: evidence
-        if: needs.investigate.outputs.action == 'no_change' && steps.operator.outputs.enabled == 'true'
+        if: needs.investigate.outputs.action == 'no_change' && steps.operator.outputs.enabled == 'true' && needs.investigate.outputs.implementation_in_flight != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -441,6 +455,7 @@ jobs:
           RECORD_ACTION_KEY: ${{ needs.investigate.outputs.record_action_key }}
           RECOVERY_MERGED: ${{ steps.recover.outputs.merged }}
           PUBLISH_IN_FLIGHT: ${{ needs.investigate.outputs.publish_in_flight }}
+          IMPLEMENTATION_IN_FLIGHT: ${{ needs.investigate.outputs.implementation_in_flight }}
           GH_TOKEN: ${{ github.token }}
         run: |
           if [[ "$(./autorelease/control.py operator-gate --operator-file .github/autorelease-operator.json)" != "enabled" ]]; then
@@ -456,10 +471,10 @@ jobs:
             --edits-required "$EDITS_REQUIRED" \
             --recovery-merged "$RECOVERY_MERGED" \
             --evidence-already-recorded "$EVIDENCE_ALREADY_RECORDED" \
-            --publish-in-flight "$PUBLISH_IN_FLIGHT")"
+            --publish-in-flight "$PUBLISH_IN_FLIGHT" \
+            --implementation-in-flight "$IMPLEMENTATION_IN_FLIGHT")"
           route="$(jq -r .route <<< "$decision")"
           reason="$(jq -r .reason <<< "$decision")"
-          # Lifecycle actions announce themselves whichever route then carries them.
           if [[ "$(jq -r .notify <<< "$decision")" == "lifecycle" ]]; then
             jq -n \
               --arg actionKey "$ACTION_KEY" \

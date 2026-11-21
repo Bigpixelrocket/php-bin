@@ -396,6 +396,16 @@ the watcher by hand stays safe but is no longer how a cascade drains.
   reads still only shrinks. Classification, admission, and
   notifications still run as usual, and the digest of such a run says it held
   the admitted action back.
+- The same investigation holds those routes and record recovery while any
+  `autorelease-implement.yml` run is unfinished. A lifecycle implementation
+  can write to main, so even a different action would start from a base the
+  implementation can move. The watcher retains `implementationInFlight` in
+  `publish-in-flight.json` for the digest and skips lifecycle announcements
+  during the hold. Nothing starts a watcher when an implementation ends, so
+  the next scheduled watcher run (within 12 hours) takes whatever is due.
+  Implementation runs also share their own `php-autorelease-implementation`
+  concurrency group to prevent overlap if an implementation is dispatched
+  directly.
 - `autorelease-implement.yml` does not chain. After its edit, a new branch or
   a retirement waits for `mise-php` readiness, which that repository's own
   daily consumer records, so a watcher run started then would only find the
@@ -672,7 +682,7 @@ already on the base, such as one corrected by pull request, is used as it is
 and never rediscovered. A run that still fails stops without merging, and the
 owner issue for the `new_branch:<branch>` key carries the failure; the next
 watcher run with no patch due retries it, and patches on maintained branches
-go first and never wait for it.
+take priority once no implementation is in flight.
 `mise-php` then regenerates `support-snapshot.json` and `lib/policy.lua`
 from the merged policy with its own deterministic scripts. The readiness and
 event records then merge on their own: `autorelease-events/`, `autorelease-state/`, and `mise-php`'s

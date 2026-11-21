@@ -1876,8 +1876,18 @@ class AutoreleaseControlTests(unittest.TestCase):
             self.assertEqual("recipe_rebuild_started", template())
             flag.write_text('{"schemaVersion":1,"publishInFlight":true}\n')
             self.assertEqual("held_for_publish", template())
+            for publish_in_flight in (False, True):
+                flag.write_text(json.dumps({
+                    "schemaVersion": 1,
+                    "publishInFlight": publish_in_flight,
+                    "implementationInFlight": True,
+                }))
+                self.assertEqual("held_for_implementation", template())
+            flag.write_text('{"schemaVersion":1,"publishInFlight":false,"implementationInFlight":false}\n')
+            self.assertEqual("recipe_rebuild_started", template())
             # A flag of any other shape is reported, never read as either answer.
             for corrupt in ('{"schemaVersion":1,"publishInFlight":"true"}', '{"publishInFlight":true}',
+                            '{"schemaVersion":1,"publishInFlight":false,"implementationInFlight":"true"}',
                             '{"schemaVersion":2,"publishInFlight":true}', "{not json"):
                 with self.subTest(corrupt=corrupt):
                     flag.write_text(corrupt)
@@ -2125,10 +2135,15 @@ class AutoreleaseControlTests(unittest.TestCase):
                 self.assertEqual("deferred_to_publish_in_flight", decision["reason"])
                 # A lifecycle action still announces itself.
                 self.assertEqual(route(**held)["notify"], decision["notify"])
+                decision = route(implementationInFlight=True, **held)
+                self.assertEqual("none", decision["route"])
+                self.assertEqual("deferred_to_implementation_in_flight", decision["reason"])
+                self.assertEqual("none", decision["notify"])
         # The publish in flight files its own record, so a missing one is not recovered
         # beside it: a recovered record merged first would move main under its record PR.
         # The recover step supplies only these two fields, and they decide the overlay.
         self.assertEqual("none", route(recordActionKey="new_patch:8.5.9", publishInFlight=True)["recoveryRoute"])
+        self.assertEqual("none", route(recordActionKey="new_patch:8.5.9", implementationInFlight=True)["recoveryRoute"])
         self.assertEqual("recover_record", route(recordActionKey="new_patch:8.5.9")["recoveryRoute"])
         self.assertEqual(
             "none",
@@ -2201,6 +2216,14 @@ class AutoreleaseControlTests(unittest.TestCase):
                 "--publish-in-flight", flag,
             )
             self.assertEqual((0, route), (status, json.loads(output)["route"]), flag)
+        for flag, route, notify in (("true", "none", "none"), ("false", "dispatch_implementation", "lifecycle")):
+            status, output = run_control(
+                "route-watch-action", "--action", "new_branch", "--action-key", "new_branch:8.6",
+                "--edits-required", "true", "--implementation-in-flight", flag,
+            )
+            self.assertEqual(0, status)
+            decision = json.loads(output)
+            self.assertEqual((route, notify), (decision["route"], decision["notify"]))
 
     def test_invariants_and_durable_state_are_protected(self):
         self.assertTrue(path_is_protected("autorelease/policy-invariants.json"))
@@ -3006,22 +3029,36 @@ class AutoreleaseControlTests(unittest.TestCase):
                 self.assertIn(results["email"], {"success", "failure"})
         self.assertEqual(["finalize"], needs_of(chain))
 
-    def test_watcher_runs_find_publish_runs_that_have_not_recorded_their_release(self):
+    def test_watcher_runs_find_unfinished_implementation_and_unrecorded_publish_runs(self):
         from autorelease.verify import load_workflow
 
         root = pathlib.Path(__file__).resolve().parents[1]
         workflows = root / ".github/workflows"
-        watch = load_workflow(workflows / "autorelease-watch.yml")["jobs"]
-        publish = load_workflow(workflows / "autorelease-publish.yml")["jobs"]
+        watcher_workflow = load_workflow(workflows / "autorelease-watch.yml")
+        publish_workflow = load_workflow(workflows / "autorelease-publish.yml")
+        implementation_workflow = load_workflow(workflows / "autorelease-implement.yml")
+        watch = watcher_workflow["jobs"]
+        publish = publish_workflow["jobs"]
+        implementation_group = implementation_workflow["concurrency"]
+        self.assertFalse(implementation_group["cancel-in-progress"])
+        for workflow in (watcher_workflow, publish_workflow):
+            self.assertNotEqual(implementation_group["group"], workflow["concurrency"]["group"])
+        # The hold ends only because an implementation never starts the watcher or a
+        # publish: a watcher it started would see its own trigger in flight and hold.
+        for job_id, job in implementation_workflow["jobs"].items():
+            for item in job.get("steps", []):
+                for chained in ("autorelease-watch.yml", "autorelease-publish.yml"):
+                    self.assertNotIn(chained, item.get("run", ""), f"{job_id} starts {chained}")
         investigate = watch["investigate"]
         self.assertEqual({"actions": "read", "contents": "read"}, investigate["permissions"])
         names = [step.get("name") for step in investigate["steps"]]
-        step = investigate["steps"][names.index("Find a publish run still in flight")]
+        step = investigate["steps"][names.index("Find autorelease runs still in flight")]
         # Read before the capture: no publish can start while this run lives, so the set
         # only shrinks, and a publish that recorded between the two would otherwise be
         # admitted again from a capture taken before its record.
-        self.assertLess(names.index("Find a publish run still in flight"), names.index("Capture fixed raw evidence"))
-        self.assertEqual("${{ steps.publishing.outputs.in_flight }}", investigate["outputs"]["publish_in_flight"])
+        self.assertLess(names.index(step["name"]), names.index("Capture fixed raw evidence"))
+        self.assertEqual("${{ steps.in-flight.outputs.in_flight }}", investigate["outputs"]["publish_in_flight"])
+        self.assertEqual("${{ steps.in-flight.outputs.implementation_in_flight }}", investigate["outputs"]["implementation_in_flight"])
         # The job it waits on is the one that files the record and precedes the chain.
         self.assertIn(f'"{publish["finalize"]["name"]}"', step["run"])
         dispatch = next(
@@ -3033,8 +3070,10 @@ class AutoreleaseControlTests(unittest.TestCase):
         for routed in (dispatch, recover):
             self.assertEqual("${{ needs.investigate.outputs.publish_in_flight }}", routed["env"]["PUBLISH_IN_FLIGHT"])
             self.assertIn('--publish-in-flight "$PUBLISH_IN_FLIGHT"', routed["run"])
+            self.assertEqual("${{ needs.investigate.outputs.implementation_in_flight }}", routed["env"]["IMPLEMENTATION_IN_FLIGHT"])
+            self.assertIn('--implementation-in-flight "$IMPLEMENTATION_IN_FLIGHT"', routed["run"])
         # The flag is retained before the artifact upload and reaches the digest.
-        self.assertLess(names.index("Find a publish run still in flight"), names.index("Retain evidence and admitted plan"))
+        self.assertLess(names.index(step["name"]), names.index("Retain evidence and admitted plan"))
         render = next(
             item for item in load_workflow(workflows / "autorelease-email.yml")["jobs"]["digest"]["steps"]
             if item.get("name") == "Render the deterministic digest"
@@ -3066,6 +3105,8 @@ class AutoreleaseControlTests(unittest.TestCase):
                 'for ((i = 0; i < ${#args[@]}; i++)); do [[ "${args[i]}" == --jq ]] && filter="${args[i+1]}"; done\n'
                 'case "$1 $2" in\n'
                 '  "run list") [[ "$*" == *"--workflow autorelease-publish.yml"* ]] || exit 3; body="$FAKE_RUNS" ;;\n'
+                '  "api --paginate") [[ "$3" == "repos/o/r/actions/workflows/autorelease-implement.yml/runs?per_page=100" ]] || exit 3;\n'
+                '    body="$FAKE_IMPLEMENTATION_RUNS" ;;\n'
                 '  "api repos/o/r/actions/runs/"*) id="${2#repos/o/r/actions/runs/}"; var="FAKE_JOBS_${id%/jobs}"; body="${!var}" ;;\n'
                 "  *) exit 3 ;;\n"
                 "esac\n"
@@ -3077,7 +3118,7 @@ class AutoreleaseControlTests(unittest.TestCase):
             )
             (work / "bin/gh").chmod(0o755)
 
-            def in_flight(runs, fail="", *, error="", failures=4, **jobs):
+            def in_flight(runs, fail="", *, implementations=(), error="", failures=4, **jobs):
                 output = work / "output.txt"
                 output.write_text("")
                 for path in (artifact, gh_log, sleeps):
@@ -3088,6 +3129,7 @@ class AutoreleaseControlTests(unittest.TestCase):
                     env={**os.environ, "PATH": f"{work / 'bin'}:{os.environ['PATH']}", "FAKE_LOG": str(gh_log),
                          "GITHUB_OUTPUT": str(output), "REPOSITORY": "o/r", "FAKE_FAIL": fail,
                          "FAKE_ERROR": error, "FAKE_FAILURES": str(failures), "FAKE_SLEEPS": str(sleeps),
+                         "FAKE_IMPLEMENTATION_RUNS": json.dumps({"workflow_runs": implementations}),
                          "FAKE_RUNS": json.dumps(runs), **{f"FAKE_JOBS_{key[1:]}": json.dumps(value) for key, value in jobs.items()}},
                 )
                 return result, output.read_text()
@@ -3107,10 +3149,20 @@ class AutoreleaseControlTests(unittest.TestCase):
                 with self.subTest(case=case):
                     result, output = in_flight(runs, **jobs)
                     self.assertEqual(0, result.returncode, result.stderr)
-                    self.assertEqual(f"in_flight={expected}\n", output)
+                    self.assertEqual(f"in_flight={expected}\nimplementation_in_flight=false\n", output)
                     # The same answer is retained for the digest.
                     self.assertEqual(
-                        {"schemaVersion": 1, "publishInFlight": expected == "true"},
+                        {"schemaVersion": 1, "publishInFlight": expected == "true", "implementationInFlight": False},
+                        json.loads(artifact.read_text()),
+                    )
+            for status in ("in_progress", "queued", "pending", "completed"):
+                with self.subTest(implementation_status=status):
+                    result, output = in_flight([], implementations=[{"id": 42, "status": status}])
+                    self.assertEqual(0, result.returncode, result.stdout)
+                    held = status != "completed"
+                    self.assertEqual(f"in_flight=false\nimplementation_in_flight={str(held).lower()}\n", output)
+                    self.assertEqual(
+                        {"schemaVersion": 1, "publishInFlight": False, "implementationInFlight": held},
                         json.loads(artifact.read_text()),
                     )
             runs = [{"databaseId": 7, "status": "in_progress"}]
@@ -3123,18 +3175,28 @@ class AutoreleaseControlTests(unittest.TestCase):
                 with self.subTest(fail=fail, error=error):
                     result, output = in_flight(runs, fail, error=error, failures=1, r7=recording)
                     self.assertEqual(0, result.returncode, result.stdout)
-                    self.assertEqual("in_flight=true\n", output)
+                    self.assertEqual("in_flight=true\nimplementation_in_flight=false\n", output)
                     self.assertEqual("2\n", sleeps.read_text())
                     self.assertNotIn("999", gh_log.read_text())
                     self.assertIn(error, lookup_log.read_text())
-            for error, attempts in ((http_502, 4), ("gh: Not Found (HTTP 404)", 1)):
-                with self.subTest(error=error):
-                    result, output = in_flight(runs, "run list", error=error, r7=recording)
-                    self.assertEqual(4, result.returncode)
-                    self.assertEqual("", output)
-                    self.assertFalse(artifact.exists())
-                    self.assertEqual(attempts, len(gh_log.read_text().splitlines()))
-                    self.assertIn(f"failed after {attempts} attempt(s)", lookup_log.read_text())
+            implementation_read = "workflows/autorelease-implement.yml/runs"
+            result, output = in_flight(
+                [], implementation_read, implementations=[{"id": 42, "status": "queued"}], error=http_502, failures=1,
+            )
+            self.assertEqual(0, result.returncode, result.stdout)
+            self.assertEqual("in_flight=false\nimplementation_in_flight=true\n", output)
+            self.assertEqual("2\n", sleeps.read_text())
+            self.assertIn("Implementation runs still in flight: 42\n", result.stdout)
+            self.assertNotIn("999", result.stdout)
+            for fail in ("run list", implementation_read):
+                for error, attempts in ((http_502, 4), ("gh: Not Found (HTTP 404)", 1)):
+                    with self.subTest(fail=fail, error=error):
+                        result, output = in_flight(runs, fail, error=error, r7=recording)
+                        self.assertEqual(4, result.returncode)
+                        self.assertEqual("", output)
+                        self.assertFalse(artifact.exists())
+                        self.assertEqual(attempts, gh_log.read_text().count(fail))
+                        self.assertIn(f"failed after {attempts} attempt(s)", lookup_log.read_text())
 
     def test_automation_pull_requests_are_filed_with_real_newlines_and_exact_leases(self):
         root = pathlib.Path(__file__).resolve().parents[1]

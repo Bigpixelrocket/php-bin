@@ -310,9 +310,8 @@ def retained_notification_issue(prior: dict[str, Any] | None) -> dict[str, Any] 
 EMAIL_SUBJECT_PREFIX = "[php-bin autorelease]"
 # A publish run only succeeds once it has dispatched the next watcher run.
 EMAIL_NEXT_WATCHER_SENTENCE = "The next watcher run was started to take the next due release, if any."
-# The admitted actions whose route moves main or starts work, all of which wait while a
-# publish run has not recorded its release (WATCH_ROUTES_HELD_FOR_PUBLISH).
-EMAIL_HELD_FOR_PUBLISH_ACTIONS = frozenset({"no_change", "new_patch", "new_branch", "branch_eol", "recipe_rebuild"})
+# The admitted actions whose routes can move main or start work (WATCH_ROUTES_HELD).
+EMAIL_HELD_ACTIONS = frozenset({"no_change", "new_patch", "new_branch", "branch_eol", "recipe_rebuild"})
 # Repository slugs reach the digest from `github.repository`, never from run state.
 EMAIL_REPOSITORY_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
 # ACTION_KEY_RE fixes key syntax only, so each version-deriving action also pins
@@ -872,8 +871,20 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
     )
     version = action_key.split(":")[1] if ":" in action_key else ""
     publish_in_flight = report.get("publishInFlight", False)
+    implementation_in_flight = report.get("implementationInFlight", False)
     require(isinstance(publish_in_flight, bool), "publish in flight flag is invalid")
-    if publish_in_flight and action in EMAIL_HELD_FOR_PUBLISH_ACTIONS:
+    require(isinstance(implementation_in_flight, bool), "implementation in flight flag is invalid")
+    if implementation_in_flight and action in EMAIL_HELD_ACTIONS:
+        return _email(
+            "held_for_implementation",
+            f"Watcher: {action_key} waits for the implementation in flight",
+            f"An implementation run was still active, so the watcher held {action_key}. "
+            "Nothing starts a watcher when an implementation ends, so the next scheduled watcher run (within 12 hours) "
+            "will capture fresh evidence and take whatever is due.",
+            status_paragraph,
+            run_url=run_url,
+        )
+    if publish_in_flight and action in EMAIL_HELD_ACTIONS:
         return _email(
             "held_for_publish",
             f"Watcher: {action_key} waits for the publish in flight",
@@ -1277,12 +1288,9 @@ WATCH_LIFECYCLE_NOTIFICATION_ACTIONS = frozenset({"new_branch", "branch_eol"})
 # owns that repair, so it is a route the plan never takes rather than an unrouted one.
 WATCH_RECOVERY_ACTION = "record_completed_event"
 WATCH_PUBLISH_ACTIONS = frozenset({"new_patch", "new_branch", "recipe_rebuild"})
-# The plan routes that move main or start work that does. A publish run still in flight
-# recaptures `php_bin_state` before publication, and a plan admitted meanwhile was
-# classified before that run's record existed, so each of these waits for the watcher
-# run the publish starts once its record is on main. The recovery overlay, which also
-# moves main, waits under the same flag in `route_watch_action`.
-WATCH_ROUTES_HELD_FOR_PUBLISH = frozenset(
+# The plan routes that move main or start work that does wait while another run
+# can still change main. The recovery overlay waits under the same flags.
+WATCH_ROUTES_HELD = frozenset(
     {"no_change_evidence", "dispatch_implementation", "dispatch_publish", "complete_branch_eol"}
 )
 
@@ -1300,9 +1308,8 @@ def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:
     Anything else raises instead of falling through to a silent success, which is what an
     unrouted combination used to do.
 
-    Invariant: `recoveryRoute` must depend on `recordActionKey` and `publishInFlight`
-    alone. The watch workflow calls this function twice in one run — the recover step
-    reads `recoveryRoute` from a call that supplies only those two fields, then the
+    Invariant: `recoveryRoute` depends only on the recovery key and both in-flight
+    flags. The recover step supplies only those inputs, then the
     dispatch step reads `route` from a call that supplies the whole decision. Both agree
     only because the recovery overlay ignores every other field. A field added to the
     recovery decision would make the first call answer from an incomplete decision and
@@ -1315,8 +1322,11 @@ def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:
     re-admitting the release in flight from evidence captured before its record; a
     publish that fails starts nothing, which leaves the work to the next scheduled run. The
     record recovery waits too: that publish files the record itself, and a recovered
-    record merged first would move main under its record pull request. The deferral
-    replaces only the routes; validation and notification are unchanged.
+    record merged first would move main under its record pull request.
+
+    `implementationInFlight` holds those same routes while any implementation can
+    still change main. It also suppresses lifecycle announcements for that watcher
+    run. An implementation does not chain, so a later watcher run checks again.
     """
     action = str(decision.get("action") or "")
     action_key = str(decision.get("actionKey") or "")
@@ -1325,23 +1335,27 @@ def route_watch_action(decision: dict[str, Any]) -> dict[str, Any]:
     recovery_merged = bool(decision.get("recoveryMerged"))
     evidence_recorded = bool(decision.get("evidenceAlreadyRecorded"))
     publish_in_flight = bool(decision.get("publishInFlight"))
+    implementation_in_flight = bool(decision.get("implementationInFlight"))
 
     # The workflow passes the recovery key separately, but a caller handing this function
     # a raw `watch_decision` carries it as that decision's own key, so both are accepted.
     recovery_key = record_action_key or (action_key if action == WATCH_RECOVERY_ACTION else "")
 
     def routed(route: str, reason: str, notify: str = "none") -> dict[str, Any]:
-        if publish_in_flight and route in WATCH_ROUTES_HELD_FOR_PUBLISH:
-            route, reason = "none", "deferred_to_publish_in_flight"
+        if route in WATCH_ROUTES_HELD:
+            if implementation_in_flight:
+                route, reason = "none", "deferred_to_implementation_in_flight"
+            elif publish_in_flight:
+                route, reason = "none", "deferred_to_publish_in_flight"
         return {
             "schemaVersion": 1,
             "route": route,
             "reason": reason,
-            "notify": notify,
+            "notify": "none" if implementation_in_flight else notify,
             "action": action,
             "actionKey": action_key,
             "recordActionKey": recovery_key,
-            "recoveryRoute": "recover_record" if recovery_key and not publish_in_flight else "none",
+            "recoveryRoute": "recover_record" if recovery_key and not (publish_in_flight or implementation_in_flight) else "none",
         }
 
     if action in {"", "none"}:
