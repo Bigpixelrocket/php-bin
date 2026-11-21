@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "policyInvariantsDigest": "sha256:c2fc006288a73e4b9f1634cdfe1b7b48c3133de5b0c8612b02eb272417ad0c6d",
-  "maintainedBranches": ["8.2", "8.3", "8.4", "8.5"],
-  "sourceEvidenceDigests": [],
-  "actionKey": "bootstrap",
-  "acceptedAt": "2026-07-27T00:00:00Z"
+  "maintainedBranches": ["8.2", "8.3", "8.4", "8.5", "8.6"],
+  "sourceEvidenceDigests": ["sha256:007a2958b62e0ffb7a4348483715487536870c955199b8fd6a4d8c9bf03ae4f7", "sha256:80b9ff00946f8607ce0bd97b0fdd25fb41052c5ee789ff0d8dad408dc3b62489"],
+  "actionKey": "new_branch:8.6",
+  "acceptedAt": "2026-11-20T21:35:20Z"
 }
