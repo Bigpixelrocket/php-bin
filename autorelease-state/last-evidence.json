@@ -1,51 +1,56 @@
 {
   "schemaVersion": 1,
-  "manifestDigest": "sha256:223c5bb9b767e3d65e6986d31b01923609e3daf2812e8d07b3109448d20ca5e7",
-  "planDigest": "sha256:3a464f6fcfd191610b1b88ba799f92347097871d4fed4926132f7f9fd83f2517",
+  "manifestDigest": "sha256:465f4ea9ac606ac47d2df0a61cce1b05b16bc6c5321811a6f93a5e7d084367e8",
+  "planDigest": "sha256:5847cebbaa8978f44a0746133d2de953ac3331ef76c19c8f43cd303c90612205",
   "captures": [
     {
       "captureId": "php_supported_versions",
-      "digest": "sha256:ad6fe0cbda2f1e35d8b80d8b4c077511759c044f935392c9dffc5497024610c9",
+      "digest": "sha256:007a2958b62e0ffb7a4348483715487536870c955199b8fd6a4d8c9bf03ae4f7",
       "status": 200
     },
     {
       "captureId": "php_release_feed",
-      "digest": "sha256:fcd8b43f566bf97ffb4285693aa72c7d762c75d90735f9abc36c9522d85639c0",
+      "digest": "sha256:80b9ff00946f8607ce0bd97b0fdd25fb41052c5ee789ff0d8dad408dc3b62489",
       "status": 200
     },
     {
       "captureId": "php_release_feed_8.2",
-      "digest": "sha256:47eeb45b8b4c201139bcc16458308bcc52441383bb1517db62aba6b284f6b20f",
+      "digest": "sha256:deae4b10e49d1082f0a02f35970414a0c73b7f807627ef8285e89b3af87e38a8",
       "status": 200
     },
     {
       "captureId": "php_release_feed_8.3",
-      "digest": "sha256:a5ffb2e3ef72d5643fc82cb86063fb9f194a2927679cddec3e2c135c6238b9a7",
+      "digest": "sha256:ca83abe912c4e527c7205a3a003b949d73cbc6dbb3617bf1f8354d97918b67a1",
       "status": 200
     },
     {
       "captureId": "php_release_feed_8.4",
-      "digest": "sha256:853e78efcc306820a89d40efccfedb9ef1a5bc5aa0dcb449b7da2879bb6f836f",
+      "digest": "sha256:5846eb87ffc0ebe09e1da5a8858a494f4664b97bd9f83b6caace1a6470fdcce4",
       "status": 200
     },
     {
       "captureId": "php_release_feed_8.5",
-      "digest": "sha256:daefedf879e64f5b5922c36250e78f07b77171eff7bc0cdb09fe56a930abe97b",
+      "digest": "sha256:053c192f5c15cfdb4de87840ecc00a2e75d6461839c983a4b3f95e5adc411cf9",
+      "status": 200
+    },
+    {
+      "captureId": "php_release_feed_8.6",
+      "digest": "sha256:b810703e87c663af378424c537fdecba9fb1f7d8a153ba241895ef30ddc04612",
       "status": 200
     },
     {
       "captureId": "php_source_tags",
-      "digest": "sha256:c97398e704662db1527d10b940220ca8f7ee5a8c61b8814b5598b45cfb442b9a",
+      "digest": "sha256:f882bc56d6869de2fb619ac2384f0f7b436be59d574252c8fbbc9abb3473977e",
       "status": 200
     },
     {
       "captureId": "php_bin_releases",
-      "digest": "sha256:edac54327f0f5df90dda920df4bf79a0323a83e33726b545a9bca7d8ba7aa6a6",
+      "digest": "sha256:3822c1521a429901923bed01320a14601aeaf56b595050c6adc214892ca72140",
       "status": 200
     },
     {
       "captureId": "php_bin_state",
-      "digest": "sha256:3db6ea1f2ac4c468e05bc8a49dcbdf1ba86fa48ccb369c9f87cbda396291c281",
+      "digest": "sha256:4138b425e822b2ee10bbf682aff3de2a1bd4e7b4bd635dc4507ec645fdbba4c5",
       "status": 200
     },
     {
@@ -55,7 +60,7 @@
     },
     {
       "captureId": "mise_php_state",
-      "digest": "sha256:3a239a6477384b750990e182c8b436f3a1bf7f40ea61d546a7cd58efce8be2bc",
+      "digest": "sha256:6041007f2be2a4a64650309bc009319b71d5505275fdb90d5988907e4a923ebe",
       "status": 200
     }
   ]
