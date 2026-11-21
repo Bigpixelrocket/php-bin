@@ -879,7 +879,8 @@ def email_digest(report: dict[str, Any]) -> dict[str, Any]:
             "held_for_implementation",
             f"Watcher: {action_key} waits for the implementation in flight",
             f"An implementation run was still active, so the watcher held {action_key}. "
-            "The next watcher run after implementation finishes will capture fresh evidence and take whatever is due.",
+            "Nothing starts a watcher when an implementation ends, so the next scheduled watcher run (within 12 hours) "
+            "will capture fresh evidence and take whatever is due.",
             status_paragraph,
             run_url=run_url,
         )

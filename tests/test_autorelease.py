@@ -3043,6 +3043,12 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertFalse(implementation_group["cancel-in-progress"])
         for workflow in (watcher_workflow, publish_workflow):
             self.assertNotEqual(implementation_group["group"], workflow["concurrency"]["group"])
+        # The hold ends only because an implementation never starts the watcher or a
+        # publish: a watcher it started would see its own trigger in flight and hold.
+        for job_id, job in implementation_workflow["jobs"].items():
+            for item in job.get("steps", []):
+                for chained in ("autorelease-watch.yml", "autorelease-publish.yml"):
+                    self.assertNotIn(chained, item.get("run", ""), f"{job_id} starts {chained}")
         investigate = watch["investigate"]
         self.assertEqual({"actions": "read", "contents": "read"}, investigate["permissions"])
         names = [step.get("name") for step in investigate["steps"]]

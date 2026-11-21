@@ -401,10 +401,11 @@ the watcher by hand stays safe but is no longer how a cascade drains.
   can write to main, so even a different action would start from a base the
   implementation can move. The watcher retains `implementationInFlight` in
   `publish-in-flight.json` for the digest and skips lifecycle announcements
-  during the hold. The next watcher run after implementation finishes takes
-  whatever is due. Implementation runs also share their own
-  `php-autorelease-implementation` concurrency group to prevent overlap if
-  an implementation is dispatched directly.
+  during the hold. Nothing starts a watcher when an implementation ends, so
+  the next scheduled watcher run (within 12 hours) takes whatever is due.
+  Implementation runs also share their own `php-autorelease-implementation`
+  concurrency group to prevent overlap if an implementation is dispatched
+  directly.
 - `autorelease-implement.yml` does not chain. After its edit, a new branch or
   a retirement waits for `mise-php` readiness, which that repository's own
   daily consumer records, so a watcher run started then would only find the
