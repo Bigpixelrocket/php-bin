@@ -500,7 +500,8 @@ class AutoreleaseControlTests(unittest.TestCase):
     def test_rotating_headsup_banner_does_not_change_capture_identity(self):
         def with_banner(banner: bytes) -> bytes:
             page = supported_versions_page("514.34454057606", "15 Aug 2026", ("7 months ago",))
-            return b'<div class="headsup">' + banner + b"</div>\n" + page
+            # The live page renders the banner directly after the navbar.
+            return b'</nav>\n<div class="headsup">' + banner + b"</div>\n" + page
 
         release = with_banner(b"<a href='/index.php#2026-11-19-5'>PHP 8.6.0 Released!</a>")
         conference = with_banner(
@@ -519,23 +520,33 @@ class AutoreleaseControlTests(unittest.TestCase):
             strip_supported_versions_date_presentation(with_banner(b"<div>PHP Conference</div>")),
         )
         self.assertNotIn(b'<div class="headsup"></div>', strip_supported_versions_date_presentation(nested))
-        unclosed = b'<div class="headsup"><a href="/">PHP 8.6.0 Released!</a>\n<html>service unavailable</html>'
+        unclosed = b'</nav><div class="headsup"><a href="/">PHP 8.6.0 Released!</a>\n<html>service unavailable</html>'
         self.assertEqual(unclosed, strip_supported_versions_date_presentation(unclosed))
         # A banner marker in a comment must not reach past it into the table up to an
         # enclosing layout </div>, which would mask a support-date change.
         def commented(page: bytes) -> bytes:
-            return b'<div id="layout"><!-- <div class="headsup"> Announcement disabled -->\n' + page + b"</div>"
+            return b'<div id="layout"></nav><!-- <div class="headsup"> Announcement disabled -->\n' + page + b"</div>"
 
         page = supported_versions_page("514.34454057606", "15 Aug 2026", ("7 months ago",))
         self.assertNotEqual(
             strip_supported_versions_date_presentation(commented(page)),
             strip_supported_versions_date_presentation(commented(page.replace(b"31 Dec 2025", b"31 Dec 2026"))),
         )
+        # Only the banner after the navbar is projected: a headsup block inside the table
+        # wraps lifecycle content, so a branch change inside it stays covered.
+        def in_table(branch: bytes) -> bytes:
+            cell = b'<td><div class="headsup"><a href="/downloads">' + branch + b"</a></div></td>"
+            return with_banner(b"<a href='/'>PHP 8.6.0 Released!</a>").replace(b"<td>PHP 8.4</td>", cell)
+
+        self.assertNotEqual(
+            strip_supported_versions_date_presentation(in_table(b"PHP 8.4")),
+            strip_supported_versions_date_presentation(in_table(b"PHP 8.5")),
+        )
 
     def test_rotating_headsup_banner_keeps_the_watcher_quiet(self):
         def capture(banner: bytes):
             body = (
-                b'<div class="headsup">' + banner + b"</div>\n"
+                b'</nav>\n<div class="headsup">' + banner + b"</div>\n"
                 + supported_versions_page("514.34454057606", "15 Aug 2026", ("7 months ago",))
             )
             response = mock.Mock(status=200, headers={})
