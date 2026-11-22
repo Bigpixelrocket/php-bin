@@ -410,12 +410,15 @@ jobs:
             --backend github --repo "${{ github.repository }}" --owner "${{ vars.AUTORELEASE_OWNER }}"
       - name: Prepare deterministic no-change evidence
         id: evidence
-        if: needs.investigate.outputs.action == 'no_change' && steps.operator.outputs.enabled == 'true' && needs.investigate.outputs.implementation_in_flight != 'true'
+        # Skipped exactly when route-watch-action holds the no_change_evidence route (an
+        # implementation or publish in flight, or a recovery that just moved main), so a
+        # deferred record never requests an attestation it will not commit.
+        if: needs.investigate.outputs.action == 'no_change' && steps.operator.outputs.enabled == 'true' && needs.investigate.outputs.implementation_in_flight != 'true' && needs.investigate.outputs.publish_in_flight != 'true' && steps.recover.outputs.merged != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # A recovered record may have just moved main, and the evidence commit asserts
-          # an untouched base, so the branch is always cut from the current origin/main.
+          # The evidence commit asserts an untouched base, so the branch is cut from the
+          # current origin/main rather than the revision this job checked out.
           gh auth setup-git
           git fetch origin main
           git checkout -B "autorelease/evidence-${{ github.run_id }}" origin/main
@@ -438,8 +441,40 @@ jobs:
             --arg manifestDigest "$(jq -r .manifestDigest autorelease-plan-download/evidence/evidence-manifest.json)" \
             '{schemaVersion:1,runId:$runId,sourceSha:$sourceSha,actionKey:$actionKey,manifestDigest:$manifestDigest}' \
             > autorelease-plan-download/evidence-attestation-predicate.json
+      # Signing records the attestation in the Sigstore transparency log, whose fetch
+      # fails transiently (a 404 on the new entry). One flake must not fail the watcher
+      # and file a critical issue, so the identical attestation is tried up to three
+      # times with a pause between. Each retry runs only after the previous attempt
+      # failed, and under the default success() gate, so a cancelled job stops at once;
+      # the last attempt fails the job. The protected check accepts any attestation
+      # matching this run's predicate, so one left by a partly failed attempt is harmless.
       - name: Attest deterministic no-change evidence
+        id: attest-1
         if: needs.investigate.outputs.action == 'no_change' && steps.operator.outputs.enabled == 'true' && steps.evidence.outputs.already_recorded == 'false'
+        continue-on-error: true
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: autorelease-state/last-evidence.json
+          predicate-type: https://bigpixelrocket.dev/autorelease/evidence-state/v1
+          predicate-path: autorelease-plan-download/evidence-attestation-predicate.json
+      - name: Wait before the second no-change evidence attestation
+        if: steps.attest-1.outcome == 'failure'
+        run: sleep 10
+      - name: Attest deterministic no-change evidence (attempt 2)
+        id: attest-2
+        if: needs.investigate.outputs.action == 'no_change' && steps.operator.outputs.enabled == 'true' && steps.evidence.outputs.already_recorded == 'false' && steps.attest-1.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: autorelease-state/last-evidence.json
+          predicate-type: https://bigpixelrocket.dev/autorelease/evidence-state/v1
+          predicate-path: autorelease-plan-download/evidence-attestation-predicate.json
+      - name: Wait before the final no-change evidence attestation
+        if: steps.attest-2.outcome == 'failure'
+        run: sleep 30
+      - name: Attest deterministic no-change evidence (attempt 3)
+        id: attest-3
+        if: needs.investigate.outputs.action == 'no_change' && steps.operator.outputs.enabled == 'true' && steps.evidence.outputs.already_recorded == 'false' && steps.attest-2.outcome == 'failure'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: autorelease-state/last-evidence.json

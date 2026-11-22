@@ -3746,6 +3746,70 @@ class AutoreleaseControlTests(unittest.TestCase):
             with self.subTest(compare=compare):
                 self.assertNotEqual(0, scenario(compare)[0])
 
+    def test_deferred_no_change_evidence_is_neither_prepared_nor_attested(self):
+        from autorelease.verify import load_workflow
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        steps = load_workflow(root / ".github/workflows/autorelease-watch.yml")["jobs"]["coordinate"]["steps"]
+        prepare = next(step for step in steps if step.get("name") == "Prepare deterministic no-change evidence")
+        # Each flag that makes route-watch-action hold the no_change_evidence route also
+        # skips preparation, so a deferred record requests no attestation.
+        for held in (
+            "needs.investigate.outputs.implementation_in_flight != 'true'",
+            "needs.investigate.outputs.publish_in_flight != 'true'",
+            "steps.recover.outputs.merged != 'true'",
+        ):
+            self.assertIn(held, prepare["if"])
+        for flags in ({"implementationInFlight": True}, {"publishInFlight": True}, {"recoveryMerged": True}):
+            self.assertEqual("none", route_watch_action({"action": "no_change", **flags})["route"], flags)
+        # A skipped preparation leaves already_recorded empty, which the router accepts.
+        decision = json.loads(
+            subprocess.run(
+                [
+                    str(root / "autorelease/control.py"), "route-watch-action", "--action", "no_change",
+                    "--evidence-already-recorded", "", "--publish-in-flight", "true",
+                ],
+                check=True, text=True, stdout=subprocess.PIPE,
+            ).stdout
+        )
+        self.assertEqual(("none", "deferred_to_publish_in_flight"), (decision["route"], decision["reason"]))
+
+    def test_no_change_evidence_attestation_retries_a_bounded_number_of_times(self):
+        from autorelease.verify import load_workflow
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        pin = json.loads((root / ".github/autorelease-pins.json").read_text())["actions"]["actions/attest"]
+        steps = load_workflow(root / ".github/workflows/autorelease-watch.yml")["jobs"]["coordinate"]["steps"]
+        attests = [step for step in steps if str(step.get("uses", "")).startswith("actions/attest@")]
+        self.assertEqual(["attest-1", "attest-2", "attest-3"], [step["id"] for step in attests])
+        precondition = (
+            "needs.investigate.outputs.action == 'no_change' && steps.operator.outputs.enabled == 'true'"
+            " && steps.evidence.outputs.already_recorded == 'false'"
+        )
+        for step in attests:
+            self.assertEqual(f"actions/attest@{pin}", step["uses"])
+            self.assertEqual(attests[0]["with"], step["with"])
+            self.assertTrue(step["if"].startswith(precondition), step["id"])
+            # The default success() gate stays in force, so a cancelled job stops retrying.
+            self.assertNotIn("always()", step["if"])
+            self.assertNotIn("!cancelled()", step["if"])
+        self.assertEqual(precondition, attests[0]["if"])
+        self.assertIs(True, attests[0]["continue-on-error"])
+        self.assertIs(True, attests[1]["continue-on-error"])
+        # The final attempt fails the job.
+        self.assertNotIn("continue-on-error", attests[2])
+        self.assertTrue(attests[1]["if"].endswith("&& steps.attest-1.outcome == 'failure'"))
+        self.assertTrue(attests[2]["if"].endswith("&& steps.attest-2.outcome == 'failure'"))
+        positions = [steps.index(step) for step in attests]
+        for (before, after), previous, seconds in zip(zip(positions, positions[1:]), ("attest-1", "attest-2"), (10, 30)):
+            between = steps[before + 1:after]
+            self.assertEqual(1, len(between), previous)
+            self.assertEqual(f"steps.{previous}.outcome == 'failure'", between[0]["if"])
+            self.assertEqual(f"sleep {seconds}", between[0]["run"])
+        prepare = steps.index(next(step for step in steps if step.get("id") == "evidence"))
+        dispatch = steps.index(next(step for step in steps if step.get("name") == "Dispatch implementation or no-edit release"))
+        self.assertEqual(list(range(prepare + 1, dispatch)), list(range(positions[0], positions[-1] + 1)))
+
     def test_recovered_event_records_use_the_trusted_watcher_branch_prefix(self):
         root = pathlib.Path(__file__).resolve().parents[1]
         watcher = (root / ".github/workflows/autorelease-watch.yml").read_text()
