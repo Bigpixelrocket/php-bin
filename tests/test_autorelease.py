@@ -497,6 +497,58 @@ class AutoreleaseControlTests(unittest.TestCase):
         for body in (b"<html>service unavailable</html>", b'{"message": "API rate limit exceeded"}'):
             self.assertEqual(body, strip_supported_versions_date_presentation(body))
 
+    def test_rotating_headsup_banner_does_not_change_capture_identity(self):
+        def with_banner(banner: bytes) -> bytes:
+            page = supported_versions_page("514.34454057606", "15 Aug 2026", ("7 months ago",))
+            return b'<div class="headsup">' + banner + b"</div>\n" + page
+
+        release = with_banner(b"<a href='/index.php#2026-11-19-5'>PHP 8.6.0 Released!</a>")
+        conference = with_banner(
+            b"<a href='/conferences/index.php#2026-11-20-1'>PHP Conference Kansai 2026 (JAPAN)</a>"
+        )
+        projected = strip_supported_versions_date_presentation(release)
+        self.assertEqual(projected, strip_supported_versions_date_presentation(conference))
+        self.assertIn(b'<div class="headsup"></div>', projected)
+        # Branch rows and absolute support dates beside the banner stay covered.
+        for old, new in ((b"31 Dec 2025", b"31 Dec 2026"), (b"PHP 8.4", b"PHP 8.5")):
+            self.assertNotEqual(projected, strip_supported_versions_date_presentation(release.replace(old, new)))
+        # A banner wrapping its own <div> is an unexpected shape, so it stays covered.
+        nested = with_banner(b"<div>PHP 8.6.0 Released!</div>")
+        self.assertNotEqual(
+            strip_supported_versions_date_presentation(nested),
+            strip_supported_versions_date_presentation(with_banner(b"<div>PHP Conference</div>")),
+        )
+        self.assertNotIn(b'<div class="headsup"></div>', strip_supported_versions_date_presentation(nested))
+        unclosed = b'<div class="headsup"><a href="/">PHP 8.6.0 Released!</a>\n<html>service unavailable</html>'
+        self.assertEqual(unclosed, strip_supported_versions_date_presentation(unclosed))
+
+    def test_rotating_headsup_banner_keeps_the_watcher_quiet(self):
+        def capture(banner: bytes):
+            body = (
+                b'<div class="headsup">' + banner + b"</div>\n"
+                + supported_versions_page("514.34454057606", "15 Aug 2026", ("7 months ago",))
+            )
+            response = mock.Mock(status=200, headers={})
+            response.read.return_value = body
+            opener = mock.MagicMock()
+            opener.open.return_value.__enter__.return_value = response
+            source = EvidenceSource(
+                "php_supported_versions",
+                "https://www.php.net/supported-versions.php",
+                1_000_000,
+                normalize=strip_supported_versions_date_presentation,
+            )
+            with tempfile.TemporaryDirectory() as tmp:
+                with mock.patch("autorelease._evidence.urllib.request.build_opener", return_value=opener):
+                    return capture_evidence(pathlib.Path(tmp), [source])
+
+        previous = capture(b"<a href='/index.php#2026-11-19-5'>PHP 8.6.0 Released!</a>")
+        current = capture(b"<a href='/conferences/index.php#2026-11-20-1'>PHP Conference Kansai 2026 (JAPAN)</a>")
+        self.assertEqual(previous["manifestDigest"], current["manifestDigest"])
+        decision = watch_decision(current, previous, [], {"healthy": True})
+        self.assertEqual("quiet", decision["trigger"])
+        self.assertFalse(decision["classify"])
+
     def test_adjacent_date_captures_keep_the_watcher_quiet(self):
         def capture(body):
             response = mock.Mock(status=200, headers={})
@@ -3745,6 +3797,70 @@ class AutoreleaseControlTests(unittest.TestCase):
         for compare in (("behind", 0), ("diverged", 2), ("ahead", 1)):
             with self.subTest(compare=compare):
                 self.assertNotEqual(0, scenario(compare)[0])
+
+    def test_deferred_no_change_evidence_is_neither_prepared_nor_attested(self):
+        from autorelease.verify import load_workflow
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        steps = load_workflow(root / ".github/workflows/autorelease-watch.yml")["jobs"]["coordinate"]["steps"]
+        prepare = next(step for step in steps if step.get("name") == "Prepare deterministic no-change evidence")
+        # Each flag that makes route-watch-action hold the no_change_evidence route also
+        # skips preparation, so a deferred record requests no attestation.
+        for held in (
+            "needs.investigate.outputs.implementation_in_flight != 'true'",
+            "needs.investigate.outputs.publish_in_flight != 'true'",
+            "steps.recover.outputs.merged != 'true'",
+        ):
+            self.assertIn(held, prepare["if"])
+        for flags in ({"implementationInFlight": True}, {"publishInFlight": True}, {"recoveryMerged": True}):
+            self.assertEqual("none", route_watch_action({"action": "no_change", **flags})["route"], flags)
+        # A skipped preparation leaves already_recorded empty, which the router accepts.
+        decision = json.loads(
+            subprocess.run(
+                [
+                    str(root / "autorelease/control.py"), "route-watch-action", "--action", "no_change",
+                    "--evidence-already-recorded", "", "--publish-in-flight", "true",
+                ],
+                check=True, text=True, stdout=subprocess.PIPE,
+            ).stdout
+        )
+        self.assertEqual(("none", "deferred_to_publish_in_flight"), (decision["route"], decision["reason"]))
+
+    def test_no_change_evidence_attestation_retries_a_bounded_number_of_times(self):
+        from autorelease.verify import load_workflow
+
+        root = pathlib.Path(__file__).resolve().parents[1]
+        pin = json.loads((root / ".github/autorelease-pins.json").read_text())["actions"]["actions/attest"]
+        steps = load_workflow(root / ".github/workflows/autorelease-watch.yml")["jobs"]["coordinate"]["steps"]
+        attests = [step for step in steps if str(step.get("uses", "")).startswith("actions/attest@")]
+        self.assertEqual(["attest-1", "attest-2", "attest-3"], [step["id"] for step in attests])
+        precondition = (
+            "needs.investigate.outputs.action == 'no_change' && steps.operator.outputs.enabled == 'true'"
+            " && steps.evidence.outputs.already_recorded == 'false'"
+        )
+        for step in attests:
+            self.assertEqual(f"actions/attest@{pin}", step["uses"])
+            self.assertEqual(attests[0]["with"], step["with"])
+            self.assertTrue(step["if"].startswith(precondition), step["id"])
+            # The default success() gate stays in force, so a cancelled job stops retrying.
+            self.assertNotIn("always()", step["if"])
+            self.assertNotIn("!cancelled()", step["if"])
+        self.assertEqual(precondition, attests[0]["if"])
+        self.assertIs(True, attests[0]["continue-on-error"])
+        self.assertIs(True, attests[1]["continue-on-error"])
+        # The final attempt fails the job.
+        self.assertNotIn("continue-on-error", attests[2])
+        self.assertTrue(attests[1]["if"].endswith("&& steps.attest-1.outcome == 'failure'"))
+        self.assertTrue(attests[2]["if"].endswith("&& steps.attest-2.outcome == 'failure'"))
+        positions = [steps.index(step) for step in attests]
+        for (before, after), previous, seconds in zip(zip(positions, positions[1:]), ("attest-1", "attest-2"), (10, 30)):
+            between = steps[before + 1:after]
+            self.assertEqual(1, len(between), previous)
+            self.assertEqual(f"steps.{previous}.outcome == 'failure'", between[0]["if"])
+            self.assertEqual(f"sleep {seconds}", between[0]["run"])
+        prepare = steps.index(next(step for step in steps if step.get("id") == "evidence"))
+        dispatch = steps.index(next(step for step in steps if step.get("name") == "Dispatch implementation or no-edit release"))
+        self.assertEqual(list(range(prepare + 1, dispatch)), list(range(positions[0], positions[-1] + 1)))
 
     def test_recovered_event_records_use_the_trusted_watcher_branch_prefix(self):
         root = pathlib.Path(__file__).resolve().parents[1]
