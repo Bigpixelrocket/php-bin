@@ -218,9 +218,10 @@ def strip_supported_versions_date_presentation(body: bytes) -> bytes:
     them wakes the watcher with no lifecycle consequence, forcing a
     classification and an evidence-state PR on otherwise quiet days. The
     projection empties only those three renderings, and a banner only when it
-    holds no nested `<div>`; branch rows and their absolute support dates stay
-    covered, and the capture client retains the unprojected bytes beside the
-    digested body. A body without the markers is returned unchanged so an
+    holds nothing but text and links, its reviewed shape, so a banner marker
+    in a comment or one wrapping other markup can never reach past it into
+    the table; branch rows and their absolute support dates stay covered, and
+    the capture client retains the unprojected bytes beside the digested body. A body without the markers is returned unchanged so an
     unexpected page format still registers as changed evidence. This projects
     identity only: lifecycle state is read from the stored body by the
     reviewed parser in `_classifier`, which fails closed on any other page
@@ -228,7 +229,7 @@ def strip_supported_versions_date_presentation(body: bytes) -> bytes:
     """
     body = re.sub(rb'<g class="today">.*?</g>', b'<g class="today"></g>', body, flags=re.DOTALL)
     body = re.sub(
-        rb'<div class="headsup">(?:(?!</?div\b).)*</div>', b'<div class="headsup"></div>', body, flags=re.DOTALL
+        rb'<div class="headsup">(?:[^<]|<a\s[^<>]*>|</a>)*</div>', b'<div class="headsup"></div>', body
     )
     return re.sub(rb'(<td class="collapse-phone">)<em>[^<]*</em>(</td>)', rb"\1\2", body)
 

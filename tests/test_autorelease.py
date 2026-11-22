@@ -521,6 +521,16 @@ class AutoreleaseControlTests(unittest.TestCase):
         self.assertNotIn(b'<div class="headsup"></div>', strip_supported_versions_date_presentation(nested))
         unclosed = b'<div class="headsup"><a href="/">PHP 8.6.0 Released!</a>\n<html>service unavailable</html>'
         self.assertEqual(unclosed, strip_supported_versions_date_presentation(unclosed))
+        # A banner marker in a comment must not reach past it into the table up to an
+        # enclosing layout </div>, which would mask a support-date change.
+        def commented(page: bytes) -> bytes:
+            return b'<div id="layout"><!-- <div class="headsup"> Announcement disabled -->\n' + page + b"</div>"
+
+        page = supported_versions_page("514.34454057606", "15 Aug 2026", ("7 months ago",))
+        self.assertNotEqual(
+            strip_supported_versions_date_presentation(commented(page)),
+            strip_supported_versions_date_presentation(commented(page.replace(b"31 Dec 2025", b"31 Dec 2026"))),
+        )
 
     def test_rotating_headsup_banner_keeps_the_watcher_quiet(self):
         def capture(banner: bytes):
