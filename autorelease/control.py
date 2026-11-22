@@ -213,26 +213,18 @@ def strip_supported_versions_date_presentation(body: bytes) -> bytes:
     The page renders the capture date into every response: an SVG "today"
     marker whose coordinates and label move daily, and relative-age table
     cells that restate the adjacent absolute dates as time since or until
-    now. It also carries php.net's sitewide `headsup` announcement banner,
-    which rotates with news and conference posts. A digest covering any of
-    them wakes the watcher with no lifecycle consequence, forcing a
-    classification and an evidence-state PR on otherwise quiet days. The
-    projection empties only those three renderings, and a banner only in its
-    reviewed shape: the one directly after the navbar's closing `</nav>`,
-    holding nothing but text and links. A banner marker anywhere else, in a
-    comment, or wrapping other markup is left covered, so it can never mask
-    the table; branch rows and their absolute support dates stay covered, and
-    the capture client retains the unprojected bytes beside the digested
-    body. A body without the markers is returned unchanged so an unexpected
-    page format still registers as changed evidence. This projects
-    identity only: lifecycle state is read from the stored body by the
-    reviewed parser in `_classifier`, which fails closed on any other page
-    shape (verify.py check A11).
+    now. A digest covering them wakes the watcher every day with no
+    lifecycle consequence, forcing a classification and an evidence-state PR on
+    otherwise quiet days. The projection empties only those two renderings;
+    branch rows and their absolute support dates stay covered, and the
+    capture client retains the unprojected bytes beside the digested body.
+    A body without the markers is returned unchanged so an unexpected page
+    format still registers as changed evidence. This projects identity
+    only: lifecycle state is read from the stored body by the reviewed
+    parser in `_classifier`, which fails closed on any other page shape
+    (verify.py check A11).
     """
     body = re.sub(rb'<g class="today">.*?</g>', b'<g class="today"></g>', body, flags=re.DOTALL)
-    body = re.sub(
-        rb'(</nav>\s*<div class="headsup">)(?:[^<]|<a\s[^<>]*>|</a>)*(</div>)', rb"\1\2", body, count=1
-    )
     return re.sub(rb'(<td class="collapse-phone">)<em>[^<]*</em>(</td>)', rb"\1\2", body)
 
 
@@ -243,10 +235,9 @@ def strip_supported_versions_date_presentation(body: bytes) -> bytes:
 # reviewed parser in `_classifier`. Two reviewed identity
 # projections exist: the GitHub releases digests must not cover per-asset download
 # counters or draft releases (visible only to some tokens), and the supported-versions
-# digest must not cover the page's renderings of the capture date or its sitewide
-# announcement banner. None of these carry a release consequence. Every php.net source
-# bypasses the CDN edge cache in front of it, because an edge can serve a snapshot
-# weeks old and the watcher and the publish
+# digest must not cover the page's renderings of the capture date. None of these carry
+# a release consequence. Every php.net source bypasses the CDN edge cache in front of
+# it, because an edge can serve a snapshot weeks old and the watcher and the publish
 # recapture reach different edges. Both GitHub releases lists are read page by page, so
 # rebuild selection and record recovery see every release rather than the newest 100.
 # The php-src tags list stays one page: no rule reads it, and its digest only wakes the
